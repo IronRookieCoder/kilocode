@@ -8,6 +8,8 @@ import ai.kilocode.backend.rpc.appStateDto
 import ai.kilocode.backend.testing.FakeCliServer
 import ai.kilocode.backend.testing.MockCliServer
 import ai.kilocode.backend.testing.TestLog
+import ai.kilocode.jetbrains.api.client.DefaultApi
+import ai.kilocode.log.KiloLog
 import ai.kilocode.rpc.dto.AgentConfigPatchDto
 import ai.kilocode.rpc.dto.CompactionPatchDto
 import ai.kilocode.rpc.dto.ConfigPatchDto
@@ -19,6 +21,8 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
@@ -26,6 +30,7 @@ import kotlinx.coroutines.withTimeoutOrNull
 import java.net.ServerSocket
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.atomic.AtomicInteger
+import okhttp3.OkHttpClient
 import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -94,6 +99,86 @@ class KiloBackendAppServiceTest {
             stop()
             mock.close()
         }
+    }
+
+    private class DiagnosticProvider(private val error: ConnectionState.Error) : KiloConnectionProvider {
+        val connection = DiagnosticConnection(error)
+        override val id = "aaa-diagnostic"
+
+        override fun create(cs: CoroutineScope, reconnect: () -> Unit, log: KiloLog, timeout: Long): KiloConnection = connection
+    }
+
+    private class DiagnosticConnection(private val error: ConnectionState.Error) : KiloConnection {
+        private val states = MutableStateFlow<ConnectionState>(ConnectionState.Disconnected)
+        override val state = states
+        override val events = MutableSharedFlow<SseEvent>()
+        override val api: DefaultApi? = null
+        override val apiClient: OkHttpClient? = null
+        override val target: ConnectionTarget? = null
+        var restarts = 0
+
+        override suspend fun connect() {
+            states.value = error
+        }
+
+        override suspend fun restart() {
+            restarts++
+            connect()
+        }
+
+        override suspend fun reinstall() = Unit
+        override fun shutdownForUnload() = Unit
+        override fun shutdownForAppClose() = Unit
+        override fun dispose() = Unit
+    }
+
+    private class UnusedServer : CliServer {
+        override var forceExtract = false
+        var starts = 0
+        override fun process(): Process? = null
+        override suspend fun init(onProgress: (CliDownload) -> Unit, onResolved: () -> Unit): CliServer.State {
+            starts++
+            return CliServer.State.Error("unexpected process start")
+        }
+        override fun exited(proc: Process) = Unit
+        override fun stop() = Unit
+        override fun dispose() = Unit
+    }
+
+    @Test
+    fun `external connection diagnostics are user facing`() = runBlocking {
+        val cases = listOf(
+            ConnectionState.Error("missing URL", "cs-cloud server URL was not found") to "cs-cloud daemon is not running",
+            ConnectionState.Error("missing key", "cs-cloud API key was not found") to "cs-cloud API key was not found",
+            ConnectionState.Error("unauthorized", "unauthorized: invalid credential (HTTP 401)") to "cs-cloud API key is invalid",
+            ConnectionState.Error("unavailable", "unavailable: Service Unavailable (HTTP 503)") to "csc agent is unavailable",
+        )
+        cases.forEach { (failure, detail) ->
+            val server = UnusedServer()
+            val provider = DiagnosticProvider(failure)
+            val svc = KiloBackendAppService.create(scope, server, log, provider)
+            svc.connect()
+            val state = withTimeout(5_000) { svc.appState.first { it is KiloAppState.Error } }
+
+            assertEquals(detail, assertIs<KiloAppState.Error>(state).errors.single().detail)
+            assertEquals(0, server.starts)
+            svc.dispose()
+        }
+    }
+
+    @Test
+    fun `external restart reconnects without process manager`() = runBlocking {
+        val server = UnusedServer()
+        val provider = DiagnosticProvider(ConnectionState.Error("missing URL", "cs-cloud server URL was not found"))
+        val svc = KiloBackendAppService.create(scope, server, log, provider)
+        svc.connect()
+        withTimeout(5_000) { svc.appState.first { it is KiloAppState.Error } }
+
+        svc.restart()
+
+        assertEquals(1, provider.connection.restarts)
+        assertEquals(0, server.starts)
+        svc.dispose()
     }
 
     @Test

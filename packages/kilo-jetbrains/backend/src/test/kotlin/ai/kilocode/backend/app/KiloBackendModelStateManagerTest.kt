@@ -35,7 +35,7 @@ class KiloBackendModelStateManagerTest {
         val port = start()
         dir.resolve("model.json").writeText("""{"favorite":[{"providerID":"kilo","modelID":"auto"}],"recent":[{"providerID":"anthropic","modelID":"claude"}],"model":{"code":{"providerID":"openai","modelID":"gpt"}},"variant":{"openai/gpt":"high"}}""")
         val mgr = KiloBackendModelStateManager(log)
-        mgr.start(http, port)
+        mgr.start(http, "http://127.0.0.1:$port")
 
         val state = mgr.state()
 
@@ -55,7 +55,7 @@ class KiloBackendModelStateManagerTest {
             """{"model":{"code":{"providerID":"kilo","modelID":"auto"}},"recent":[{"providerID":"openai","modelID":"gpt"}],"variant":{"kilo/auto":"fast"},"favorite":[]}""",
         )
         val mgr = KiloBackendModelStateManager(log)
-        mgr.start(http, port)
+        mgr.start(http, "http://127.0.0.1:$port")
 
         val state = mgr.favorite(ModelFavoriteUpdateDto("add", "anthropic", "claude"))
         val raw = dir.resolve("model.json").readText()
@@ -72,7 +72,7 @@ class KiloBackendModelStateManagerTest {
         val port = start()
         dir.resolve("model.json").writeText("""{"favorite":[],"recent":[]}""")
         val mgr = KiloBackendModelStateManager(log)
-        mgr.start(http, port)
+        mgr.start(http, "http://127.0.0.1:$port")
 
         val state = mgr.selection(ModelSelectionUpdateDto("code", "kilo", "auto"))
         val raw = dir.resolve("model.json").readText()
@@ -88,7 +88,7 @@ class KiloBackendModelStateManagerTest {
         val port = start()
         dir.resolve("model.json").writeText("""{"model":{"code":{"providerID":"kilo","modelID":"auto"},"plan":{"providerID":"openai","modelID":"gpt"}}}""")
         val mgr = KiloBackendModelStateManager(log)
-        mgr.start(http, port)
+        mgr.start(http, "http://127.0.0.1:$port")
 
         val state = mgr.clear("code")
 
@@ -101,7 +101,7 @@ class KiloBackendModelStateManagerTest {
         val port = start()
         dir.resolve("model.json").writeText("{}")
         val mgr = KiloBackendModelStateManager(log)
-        mgr.start(http, port)
+        mgr.start(http, "http://127.0.0.1:$port")
 
         val state = mgr.variant(ModelVariantUpdateDto("kilo/auto", "medium"))
 
@@ -114,7 +114,7 @@ class KiloBackendModelStateManagerTest {
         val port = start()
         dir.resolve("model.json").writeText("not-json")
         val mgr = KiloBackendModelStateManager(log)
-        mgr.start(http, port)
+        mgr.start(http, "http://127.0.0.1:$port")
 
         assertTrue(mgr.state().favorite.isEmpty())
     }

@@ -17,7 +17,7 @@ class KiloBackendTelemetryTest {
         server.start()
         val http = KiloBackendHttpClients.api("secret")
         try {
-            KiloBackendTelemetry().capture(http, server.port, "Test Event", mapOf("source" to "test"))
+            KiloBackendTelemetry().capture(http, "http://127.0.0.1:${server.port}", "Test Event", mapOf("source" to "test"))
 
             val req = server.takeRequest()
             assertEquals("/telemetry/capture", req.path)
@@ -41,7 +41,7 @@ class KiloBackendTelemetryTest {
         server.start()
         val http = KiloBackendHttpClients.api("secret")
         try {
-            KiloBackendTelemetry().setEnabled(http, server.port, true)
+            KiloBackendTelemetry().setEnabled(http, "http://127.0.0.1:${server.port}", true)
 
             val req = server.takeRequest()
             assertEquals("/telemetry/setEnabled", req.path)
@@ -53,8 +53,24 @@ class KiloBackendTelemetryTest {
     }
 
     @Test
+    fun `capture preserves a connection base path`() = runBlocking {
+        val server = MockWebServer()
+        server.enqueue(MockResponse().setBody("{}"))
+        server.start()
+        val http = KiloBackendHttpClients.api("secret")
+        try {
+            KiloBackendTelemetry().capture(http, "http://localhost:${server.port}/api/v1", "Test Event", emptyMap())
+
+            assertEquals("/api/v1/telemetry/capture", server.takeRequest().path)
+        } finally {
+            KiloBackendHttpClients.shutdown(http)
+            server.shutdown()
+        }
+    }
+
+    @Test
     fun `capture failure does not throw`() = runBlocking {
-        KiloBackendTelemetry().capture(null, 0, "Test Event", emptyMap())
+        KiloBackendTelemetry().capture(null, null, "Test Event", emptyMap())
     }
 
     @Test
@@ -64,7 +80,7 @@ class KiloBackendTelemetryTest {
         server.start()
         val http = KiloBackendHttpClients.api("secret")
         try {
-            KiloBackendTelemetry().capture(http, server.port, "Test Event", emptyMap())
+            KiloBackendTelemetry().capture(http, "http://127.0.0.1:${server.port}", "Test Event", emptyMap())
 
             assertEquals(null, server.takeRequest(100, TimeUnit.MILLISECONDS))
         } finally {

@@ -956,8 +956,21 @@ class SessionController(
 
         app.connect()
         cs.launch {
+            var connected = false
+            var recover = false
             app.state.collect { state ->
-                if (state.status == KiloAppStatusDto.READY) app.fetchVersionAsync()
+                if (state.status == KiloAppStatusDto.READY) {
+                    app.fetchVersionAsync()
+                    if (recover && ref is SessionRef.Local) {
+                        val token = SessionLoadState.Loading()
+                        startSessionLoading(token)
+                        loadSession(token)
+                    }
+                    connected = true
+                    recover = false
+                } else if (connected) {
+                    recover = true
+                }
                 fire(SessionControllerEvent.AppChanged) {
                     model.app = state
                     model.version = app.version

@@ -37,8 +37,8 @@ class KiloMigrationRpcApiImpl : KiloMigrationRpcApi {
 
     private fun manager(): KiloBackendMigrationManager {
         val http = app.http ?: throw IllegalStateException("Not connected")
-        val port = app.port
-        return KiloBackendMigrationManager(http, port)
+        val base = app.base ?: throw IllegalStateException("Connection target unavailable")
+        return KiloBackendMigrationManager(http, base)
     }
 
     override suspend fun status(): LegacyMigrationStatusDto? {

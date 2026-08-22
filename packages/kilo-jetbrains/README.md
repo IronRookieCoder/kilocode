@@ -84,6 +84,14 @@ See [RELEASING.md](RELEASING.md) for the full release process, including how to 
 
 ## Run the plugin
 
+### Connect to Costrict cs-cloud
+
+The JetBrains plugin connects to an already-running local Costrict daemon. Start it outside the IDE with `cs-cloud start`; the plugin does not start, stop, install, or reinstall the daemon.
+
+The daemon URL is read from `~/.costrict/cs-cloud/server_url`. The API key is selected in this order: `CS_BRIDGE_API_KEY`, `CS_CLOUD_API_KEY`, then `~/.costrict/cs-cloud/config.json` (`api_key`). Only loopback URLs (`localhost`, `127.0.0.1`, or `::1`) are accepted.
+
+For an unavailable daemon, check that `server_url` exists and `cs-cloud start` is still running. An authentication error means the selected environment variable or `config.json` key is missing or invalid. Restarting the connection re-reads the URL and credentials without managing the daemon process.
+
 Use the checked-in `Run IDE (Split Mode)` run configuration (or `./gradlew --no-configuration-cache runIdeSplitMode` from `packages/kilo-jetbrains/`) to launch the backend and frontend halves of a local split-mode sandbox. The backend downloads the pinned CLI release on first connect.
 
 Use `runIde` only when you need a monolithic sandboxed IntelliJ instance.

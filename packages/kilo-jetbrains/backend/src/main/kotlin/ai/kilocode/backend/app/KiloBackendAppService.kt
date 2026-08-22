@@ -26,6 +26,7 @@ import ai.kilocode.rpc.dto.HealthDto
 import com.intellij.openapi.Disposable
 import com.intellij.openapi.components.Service
 import com.intellij.openapi.components.service
+import com.intellij.openapi.project.ProjectManager
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
@@ -85,14 +86,16 @@ class KiloBackendAppService private constructor(
   private val server: CliServer,
   private val log: KiloLog,
   private val loadTimeoutMs: Long,
+  private val providers: List<KiloConnectionProvider>, // kilocode_change
 ) : Disposable {
 
     /** IntelliJ service injection entry point. */
     constructor(cs: CoroutineScope) : this(
         cs,
         KiloBackendCliManager(),
-      KiloLog.create(KiloBackendAppService::class.java),
+        KiloLog.create(KiloBackendAppService::class.java),
         APP_LOAD_TIMEOUT_MS,
+        KiloConnectionProvider.EP_NAME.extensions.toList(), // kilocode_change
     )
 
     companion object {
@@ -105,15 +108,33 @@ class KiloBackendAppService private constructor(
         internal fun create(
           cs: CoroutineScope,
           server: CliServer,
-          log: KiloLog,
-          loadTimeoutMs: Long = APP_LOAD_TIMEOUT_MS,
-        ) = KiloBackendAppService(cs, server, log, loadTimeoutMs)
+        log: KiloLog,
+        loadTimeoutMs: Long = APP_LOAD_TIMEOUT_MS,
+            providers: List<KiloConnectionProvider> = emptyList(), // kilocode_change
+        ) = KiloBackendAppService(cs, server, log, loadTimeoutMs, providers)
+
+        // kilocode_change start
+        internal fun create(
+            cs: CoroutineScope,
+            server: CliServer,
+            log: KiloLog,
+            provider: KiloConnectionProvider,
+            loadTimeoutMs: Long = APP_LOAD_TIMEOUT_MS,
+        ) = KiloBackendAppService(cs, server, log, loadTimeoutMs, listOf(provider))
+        // kilocode_change end
     }
 
     private val mutex = Mutex()
-    private val connection = KiloConnectionService(cs, server, onReconnect = {
+    // kilocode_change start
+    private val connectionProvider = providers
+        .distinctBy { it.id }
+        .sortedBy { it.id }
+        .firstOrNull()
+        ?: KiloCliConnectionProvider(server)
+    private val connection = connectionProvider.create(cs, reconnect = {
         cs.launch { reconnect() }
-    }, appLoadTimeoutMs = loadTimeoutMs, log = log)
+    }, log = log, timeout = loadTimeoutMs)
+    // kilocode_change end
 
     private var watcher: Job? = null
     private var eventWatcher: Job? = null
@@ -122,6 +143,7 @@ class KiloBackendAppService private constructor(
     private var migrationOffered = false
     private var migrationSuppressed = false
     private var migrationForceRequested = false
+    private var reconnecting = false
     private val loadLock = Any()
     private val rev = AtomicLong()
 
@@ -132,6 +154,7 @@ class KiloBackendAppService private constructor(
     val api: DefaultApi? get() = connection.api
     val http: OkHttpClient? get() = connection.apiClient
     val port: Int get() = connection.port
+    val base: String? get() = connection.target?.base
 
     val sessions = KiloBackendSessionManager(cs, log)
     val chat = KiloBackendChatManager(cs, log)
@@ -282,11 +305,12 @@ class KiloBackendAppService private constructor(
         val http = connection.apiClient ?: throw IllegalStateException("Not connected")
         val current = _appState.value as? KiloAppState.Ready ?: throw IllegalStateException("Kilo backend is not ready")
         val connected = connection.state.value as? ConnectionState.Connected
+        val base = connection.target?.base ?: throw IllegalStateException("Not connected")
         val body = KiloCliDataParser.buildConfigPatch(patch)
         val summary = summary(patch)
         log.info("Global config patch: started $summary")
         val request = Request.Builder()
-            .url("http://127.0.0.1:$port/global/config")
+            .url("$base/global/config")
             .header("Accept", "application/json")
             .patch(body.toRequestBody("application/json".toMediaType()))
             .build()
@@ -353,18 +377,31 @@ class KiloBackendAppService private constructor(
                     return@collect
                 }
                 when (next) {
-                    ConnectionState.Disconnected -> _appState.value = KiloAppState.Disconnected
-                    is ConnectionState.Downloading -> _appState.value = KiloAppState.Downloading(next.percent, next.version, next.platform)
-                    ConnectionState.Connecting -> _appState.value = KiloAppState.Connecting
-                    is ConnectionState.Connected -> {
-                        load()
+                    ConnectionState.Disconnected -> {
+                        _appState.value = KiloAppState.Disconnected
                     }
-                    is ConnectionState.Error -> setAppError(
-                        message = next.message,
-                        errors = next.details?.let {
-                            listOf(LoadError(resource = "connection", detail = it))
-                        } ?: emptyList(),
-                    )
+                    is ConnectionState.Downloading -> _appState.value = KiloAppState.Downloading(next.percent, next.version, next.platform)
+                    ConnectionState.Discovering -> {
+                        reconnecting = _appState.value is KiloAppState.Ready
+                        _appState.value = KiloAppState.Connecting // kilocode_change
+                    }
+                    ConnectionState.Connecting -> {
+                        reconnecting = reconnecting || _appState.value is KiloAppState.Ready
+                        _appState.value = KiloAppState.Connecting
+                    }
+                    is ConnectionState.Connected -> {
+                        val recover = reconnecting
+                        reconnecting = false
+                        load(recover = recover)
+                    }
+                    is ConnectionState.Error -> {
+                        reconnecting = reconnecting || _appState.value is KiloAppState.Ready
+                        val detail = connectionDiagnostic(next)
+                        setAppError(
+                            message = next.message,
+                            errors = listOf(LoadError(resource = "connection", status = detail.status, detail = detail.message)),
+                        )
+                    }
                 }
             }
         }
@@ -380,7 +417,7 @@ class KiloBackendAppService private constructor(
      * On success, transitions to [KiloAppState.Ready].
      * On failure of required data, transitions to [KiloAppState.Error].
      */
-    private fun load() {
+    private fun load(recover: Boolean = false) {
         synchronized(loadLock) {
             loader?.cancel()
             loader = cs.launch {
@@ -460,11 +497,16 @@ class KiloBackendAppService private constructor(
                     profile = prof
                     config = cfg
                     notifications = notifs
-                    models.start(connection.apiClient!!, connection.port)
-                    sessions.start(connection.api!!, connection.apiClient!!, connection.port, connection.events)
-                    chat.start(connection.apiClient!!, connection.port, connection.events)
+                    val base = connection.target?.base ?: throw IllegalStateException("Connection target unavailable")
+                    models.start(connection.apiClient!!, base)
+                    sessions.start(connection.api!!, connection.apiClient!!, base, connection.events)
+                    chat.start(connection.apiClient!!, base, connection.events)
                     activity.start(sessions.statuses, sessions::sessionDirectory, chat.events)
-                    workspaces.start(connection.api!!, connection.apiClient!!, connection.port, connection.events)
+                    workspaces.start(connection.api!!, connection.apiClient!!, base, connection.events)
+                    if (recover) {
+                        runCatching { sessions.recover(chat) }
+                            .onFailure { log.warn("Session recovery failed after reconnect", it) }
+                    }
                     startWatchingGlobalSseEvents()
                     setTelemetry(true)
                     captureBackend("Backend Connected", mapOf("portKnown" to "true"))
@@ -522,12 +564,12 @@ class KiloBackendAppService private constructor(
 
     private fun captureLoad(event: String, start: Long, props: Map<String, String>) {
         val http = connection.apiClient
-        val port = connection.port
+        val base = connection.target?.base
         cs.launch {
             runCatching {
                 service<KiloBackendTelemetry>().capture(
                     http,
-                    port,
+                    base,
                     event,
                     props + mapOf("durationMs" to (System.currentTimeMillis() - start).toString()),
                 )
@@ -537,20 +579,20 @@ class KiloBackendAppService private constructor(
 
     private fun setTelemetry(enabled: Boolean) {
         val http = connection.apiClient
-        val port = connection.port
+        val base = connection.target?.base
         cs.launch {
             runCatching {
-                service<KiloBackendTelemetry>().setEnabled(http, port, enabled)
+                service<KiloBackendTelemetry>().setEnabled(http, base, enabled)
             }.onFailure { log.info("Skipping telemetry setEnabled: ${it.message}") }
         }
     }
 
     private fun captureBackend(event: String, props: Map<String, String>) {
         val http = connection.apiClient
-        val port = connection.port
+        val base = connection.target?.base
         cs.launch {
             runCatching {
-                service<KiloBackendTelemetry>().capture(http, port, event, props)
+                service<KiloBackendTelemetry>().capture(http, base, event, props)
             }.onFailure { log.info("Skipping backend telemetry: ${it.message}") }
         }
     }
@@ -573,7 +615,8 @@ class KiloBackendAppService private constructor(
             }
             val source = KiloBackendLegacyMigrationStoreService.resolveSource(log, includeFile = migrationForceRequested)
             val store = source.store
-            val detection = KiloBackendMigrationManager(http, connection.port).detect(store)
+            val base = connection.target?.base ?: throw IllegalStateException("Connection target unavailable")
+            val detection = KiloBackendMigrationManager(http, base).detect(store)
             log.info("Migration check: completed hasData=${detection.hasData} ${migrationSummary(detection)}")
             if (!detection.hasData) return@withContext null
             migrationOffered = true
@@ -632,9 +675,11 @@ class KiloBackendAppService private constructor(
     private suspend fun fetchConfig(): FetchResult<ConfigDto> {
         val http = connection.apiClient
             ?: return FetchResult.fail("config", detail = "Not connected")
+        val base = connection.target?.base
+            ?: return FetchResult.fail("config", detail = "Connection target unavailable")
         return try {
             val request = Request.Builder()
-                .url("http://127.0.0.1:$port/global/config")
+                .url("$base/global/config")
                 .header("Accept", "application/json")
                 .get()
                 .build()
@@ -837,10 +882,24 @@ class KiloBackendAppService private constructor(
                             val current = _appState.value
                             if (current is KiloAppState.Ready) load()
                         }
+                        "host.file.created",
+                        "host.file.updated",
+                        "host.file.deleted",
+                        "host.file.renamed",
+                        "session.idle" -> refreshWorkspaces(event)
                     }
                 }
             }
         }
+    }
+
+    private fun refreshWorkspaces(event: SseEvent) {
+        ProjectManager.getInstance().openProjects
+            .filterNot { it.isDefault }
+            .forEach { project ->
+                val root = project.basePath ?: return@forEach
+                KiloBackendWorkspaceRefresh(project, root, log).handle(event)
+            }
     }
 
     private fun logSessionDisposalRisk(event: String) {
@@ -958,7 +1017,7 @@ class KiloBackendAppService private constructor(
             mapOf("organizationId" to (organizationId?.let { JsonPrimitive(it) } ?: JsonNull)),
         ).toString()
         val request = Request.Builder()
-            .url("http://127.0.0.1:$port/kilo/organization")
+            .url("${connection.target?.base ?: throw IllegalStateException("Not connected")}/kilo/organization")
             .header("Accept", "application/json")
             .post(body.toRequestBody("application/json".toMediaType()))
             .build()
@@ -982,7 +1041,7 @@ class KiloBackendAppService private constructor(
         watcher?.cancel()
         watcher = null
         clearNow()
-        connection.dispose()
+        if (fast) connection.shutdownForAppClose() else connection.shutdownForUnload() // kilocode_change
         if (fast) server.closeForShutdown() else server.dispose()
     }
 }
@@ -990,6 +1049,32 @@ class KiloBackendAppService private constructor(
 private fun summary(patch: ConfigPatchDto): String {
     val values = patch.values.keys.sorted().joinToString(",").ifEmpty { "none" }
     return "values=$values agents=${patch.agents.size}"
+}
+
+private data class ConnectionDiagnostic(val status: Int?, val message: String)
+
+/** Keep transport failures actionable without exposing credentials or raw request payloads. */
+private fun connectionDiagnostic(state: ConnectionState.Error): ConnectionDiagnostic {
+    val raw = state.details?.trim().takeUnless { it.isNullOrEmpty() } ?: state.message
+    val lower = raw.lowercase()
+    val status = Regex("\\bHTTP\\s+(\\d{3})\\b", RegexOption.IGNORE_CASE)
+        .find(raw)
+        ?.groupValues
+        ?.getOrNull(1)
+        ?.toIntOrNull()
+    if (lower.contains("api key was not found") || lower.contains("missing api key")) {
+        return ConnectionDiagnostic(status, "cs-cloud API key was not found")
+    }
+    if (status == 401 || status == 403 || lower.contains("unauthorized") || lower.contains("invalid api key")) {
+        return ConnectionDiagnostic(status, "cs-cloud API key is invalid")
+    }
+    if (status == 503 || lower.contains("agent_down") || lower.contains("agent is unavailable")) {
+        return ConnectionDiagnostic(status, "csc agent is unavailable")
+    }
+    if (lower.contains("server url") || lower.contains("connection refused") || lower.contains("timed out")) {
+        return ConnectionDiagnostic(status, "cs-cloud daemon is not running")
+    }
+    return ConnectionDiagnostic(status, raw)
 }
 
 /**
@@ -1065,4 +1150,4 @@ internal fun migrationGate(
  */
 internal fun preservesMigration(appState: KiloAppState, next: ConnectionState): Boolean =
     appState is KiloAppState.MigrationRequired &&
-        (next == ConnectionState.Connecting || next is ConnectionState.Connected || next is ConnectionState.Error)
+        (next == ConnectionState.Discovering || next == ConnectionState.Connecting || next is ConnectionState.Connected || next is ConnectionState.Error) // kilocode_change

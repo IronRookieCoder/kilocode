@@ -493,7 +493,7 @@ class KiloBackendWorkspaceTest {
         val events = MutableSharedFlow<SseEvent>()
         val sessions = KiloBackendSessionManager(scope, log)
         val manager = KiloBackendWorkspaceManager(scope, sessions, log)
-        manager.start(api, http, port, events)
+        manager.start(api, http, "http://127.0.0.1:$port", events)
 
         try {
             val results = (1..10).map {

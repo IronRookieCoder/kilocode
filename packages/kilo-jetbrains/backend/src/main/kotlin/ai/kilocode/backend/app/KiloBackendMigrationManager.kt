@@ -17,15 +17,14 @@ import okhttp3.OkHttpClient
  * Thin factory/wrapper that creates [LegacyMigrationEngine] instances using the active
  * CLI connection. Does not auto-run migration and does not touch any UI.
  *
- * Instantiate when the CLI connection is ready (port + authenticated client available).
+ * Instantiate when the CLI connection is ready (base URL + authenticated client available).
  * The [store] is caller-supplied, allowing test and UI flows to provide different adapters.
  */
 class KiloBackendMigrationManager(
     private val client: OkHttpClient,
-    private val port: Int,
+    private val base: String,
 ) {
-    private fun base() = "http://127.0.0.1:$port"
-    private fun httpBackend(): LegacyMigrationBackend = LegacyMigrationHttpBackend(client, base())
+    private fun httpBackend(): LegacyMigrationBackend = LegacyMigrationHttpBackend(client, ConnectionTarget(base).base)
 
     fun status(store: LegacyMigrationStore): LegacyMigrationStatus? =
         LegacyMigrationEngine(store, httpBackend()).status()

@@ -125,7 +125,7 @@ class KiloAppRpcApiImpl : KiloAppRpcApi {
         app.setOrganization(organizationId)?.let(::profileDto)
 
     override suspend fun captureTelemetry(capture: TelemetryCaptureDto) {
-        service<KiloBackendTelemetry>().capture(app.http, app.port, capture.event, capture.properties)
+        service<KiloBackendTelemetry>().capture(app.http, app.base, capture.event, capture.properties)
     }
 
     private fun dto(state: KiloAppState): KiloAppStateDto =

@@ -33,6 +33,7 @@ import java.util.concurrent.atomic.AtomicReference
 sealed class ConnectionState {
     data object Disconnected : ConnectionState()
     data class Downloading(val percent: Int, val version: String, val platform: String) : ConnectionState()
+    data object Discovering : ConnectionState() // kilocode_change
     data object Connecting : ConnectionState()
     data class Connected(val port: Int, val password: String) : ConnectionState()
     data class Error(val message: String, val details: String? = null) : ConnectionState()
@@ -110,6 +111,8 @@ class KiloConnectionService(
     private var healthClient: OkHttpClient? = null
     /** Port the CLI server is listening on. Zero when disconnected. */
     var port = 0
+        private set
+    @Volatile var target: ConnectionTarget? = null // kilocode_change
         private set
     private var password = ""
 
@@ -205,6 +208,7 @@ class KiloConnectionService(
         setState(ConnectionState.Connecting)
         port = ready.port
         password = ready.password
+        target = ConnectionTarget("http://127.0.0.1:$port") // kilocode_change
 
         // Create dual OkHttp clients (bundled — no IntelliJ platform deps)
         val ac = KiloBackendHttpClients.api(password)
@@ -215,8 +219,8 @@ class KiloConnectionService(
         healthClient = hc
 
         // Configure generated API client with the no-timeout api client
-        api = DefaultApi(basePath = "http://127.0.0.1:$port", client = ac)
-        appLoadApi = DefaultApi(basePath = "http://127.0.0.1:$port", client = lc)
+        api = DefaultApi(basePath = target!!.base, client = ac)
+        appLoadApi = DefaultApi(basePath = target!!.base, client = lc)
 
         startSse()
         startHeartbeatWatcher()
@@ -229,7 +233,7 @@ class KiloConnectionService(
     private fun startSse() {
         val http = apiClient ?: return
         val request = Request.Builder()
-            .url("http://127.0.0.1:$port/global/event")
+            .url("${target?.base ?: return}/global/event")
             .header("Accept", "text/event-stream")
             .build()
 
@@ -368,7 +372,7 @@ class KiloConnectionService(
         val http = healthClient ?: return false
         return try {
             val req = Request.Builder()
-                .url("http://127.0.0.1:$port/global/health")
+                .url("${target?.base ?: return false}/global/health")
                 .build()
             http.newCall(req).execute().use { it.isSuccessful }
         } catch (e: Exception) {
@@ -397,6 +401,7 @@ class KiloConnectionService(
         appLoadClient = null
         healthClient?.let { KiloBackendHttpClients.shutdown(it) }
         healthClient = null
+        target = null // kilocode_change
     }
 
     private fun setState(next: ConnectionState) {

@@ -5,6 +5,12 @@
         <module name="kilo.jetbrains.shared"/>
     </dependencies>
 
+    <extensionPoints>
+        <extensionPoint name="connectionProvider"
+                        interface="ai.kilocode.backend.app.KiloConnectionProvider"
+                        area="IDEA_APPLICATION"/>
+    </extensionPoints>
+
     <extensions defaultExtensionNs="com.intellij">
         <platform.rpc.backend.remoteApiProvider implementation="ai.kilocode.backend.rpc.KiloAppRpcApiProvider"/>
         <platform.rpc.backend.remoteApiProvider implementation="ai.kilocode.backend.rpc.KiloAgentBehaviorRpcApiProvider"/>

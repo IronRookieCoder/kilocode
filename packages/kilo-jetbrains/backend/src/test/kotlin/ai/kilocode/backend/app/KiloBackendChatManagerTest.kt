@@ -41,7 +41,7 @@ class KiloBackendChatManagerTest {
     fun `compact posts summarize request with selected model`() {
         val port = mock.start()
         val chat = KiloBackendChatManager(scope, TestLog())
-        chat.start(OkHttpClient(), port, MutableSharedFlow())
+        chat.start(OkHttpClient(), "http://127.0.0.1:$port", MutableSharedFlow())
 
         chat.compact("ses_abc", "/test/project", ModelSelectionDto("anthropic", "claude-4"))
 
@@ -55,7 +55,7 @@ class KiloBackendChatManagerTest {
     fun `revert posts message and part to revert endpoint`() = runBlocking {
         val port = mock.start()
         val chat = KiloBackendChatManager(scope, TestLog())
-        chat.start(OkHttpClient(), port, MutableSharedFlow())
+        chat.start(OkHttpClient(), "http://127.0.0.1:$port", MutableSharedFlow())
 
         chat.revert("ses_abc", "/test/project", "msg1", "prt1")
 
@@ -68,7 +68,7 @@ class KiloBackendChatManagerTest {
     fun `revert omits part when absent`() = runBlocking {
         val port = mock.start()
         val chat = KiloBackendChatManager(scope, TestLog())
-        chat.start(OkHttpClient(), port, MutableSharedFlow())
+        chat.start(OkHttpClient(), "http://127.0.0.1:$port", MutableSharedFlow())
 
         chat.revert("ses_abc", "/test/project", "msg1", null)
 
@@ -81,7 +81,7 @@ class KiloBackendChatManagerTest {
     fun `unrevert posts empty body to unrevert endpoint`() = runBlocking {
         val port = mock.start()
         val chat = KiloBackendChatManager(scope, TestLog())
-        chat.start(OkHttpClient(), port, MutableSharedFlow())
+        chat.start(OkHttpClient(), "http://127.0.0.1:$port", MutableSharedFlow())
 
         chat.unrevert("ses_abc", "/test/project")
 
@@ -94,7 +94,7 @@ class KiloBackendChatManagerTest {
     fun `delete message sends queued message delete request`() = runBlocking {
         val port = mock.start()
         val chat = KiloBackendChatManager(scope, TestLog())
-        chat.start(OkHttpClient(), port, MutableSharedFlow())
+        chat.start(OkHttpClient(), "http://127.0.0.1:$port", MutableSharedFlow())
 
         val result = chat.deleteMessage("ses_abc", "/test/project", "msg1")
 
@@ -107,7 +107,7 @@ class KiloBackendChatManagerTest {
     fun `delete message returns false for queued drop miss`() = runBlocking {
         val port = mock.start()
         val chat = KiloBackendChatManager(scope, TestLog())
-        chat.start(OkHttpClient(), port, MutableSharedFlow())
+        chat.start(OkHttpClient(), "http://127.0.0.1:$port", MutableSharedFlow())
         mock.messageDeleteResponse = "false"
 
         val result = chat.deleteMessage("ses_abc", "/test/project", "msg1")
@@ -120,7 +120,7 @@ class KiloBackendChatManagerTest {
     fun `revert failure throws on non successful response`() = runBlocking {
         val port = mock.start()
         val chat = KiloBackendChatManager(scope, TestLog())
-        chat.start(OkHttpClient(), port, MutableSharedFlow())
+        chat.start(OkHttpClient(), "http://127.0.0.1:$port", MutableSharedFlow())
         mock.revertStatus = 500
 
         val error = assertFailsWith<RuntimeException> {
@@ -136,7 +136,7 @@ class KiloBackendChatManagerTest {
     fun `unrevert failure throws on non successful response`() = runBlocking {
         val port = mock.start()
         val chat = KiloBackendChatManager(scope, TestLog())
-        chat.start(OkHttpClient(), port, MutableSharedFlow())
+        chat.start(OkHttpClient(), "http://127.0.0.1:$port", MutableSharedFlow())
         mock.unrevertStatus = 500
 
         val error = assertFailsWith<RuntimeException> {
@@ -152,7 +152,7 @@ class KiloBackendChatManagerTest {
     fun `enhance prompt posts scoped request and returns rewritten text`() = runBlocking {
         val port = mock.start()
         val chat = KiloBackendChatManager(scope, TestLog())
-        chat.start(OkHttpClient(), port, MutableSharedFlow())
+        chat.start(OkHttpClient(), "http://127.0.0.1:$port", MutableSharedFlow())
         mock.enhanced = """{"text":"Use a focused implementation plan"}"""
 
         val result = chat.enhancePrompt("/test/project", "make a plan")
@@ -167,7 +167,7 @@ class KiloBackendChatManagerTest {
     fun `enhance prompt hides provider response details`() = runBlocking {
         val port = mock.start()
         val chat = KiloBackendChatManager(scope, TestLog())
-        chat.start(OkHttpClient(), port, MutableSharedFlow())
+        chat.start(OkHttpClient(), "http://127.0.0.1:$port", MutableSharedFlow())
         mock.enhanceStatus = 500
         mock.enhanced = """{"error":"provider unavailable"}"""
 
@@ -182,7 +182,7 @@ class KiloBackendChatManagerTest {
     fun `prompt failure includes CLI response body summary`() {
         val port = mock.start()
         val chat = KiloBackendChatManager(scope, TestLog())
-        chat.start(OkHttpClient(), port, MutableSharedFlow())
+        chat.start(OkHttpClient(), "http://127.0.0.1:$port", MutableSharedFlow())
         mock.promptStatus = 400
         mock.promptResponse = """{"issues":[{"message":"invalid source type"}]}"""
 
@@ -198,7 +198,7 @@ class KiloBackendChatManagerTest {
     fun `enhance prompt cancels the HTTP request with its coroutine`() = runBlocking {
         val port = mock.start()
         val chat = KiloBackendChatManager(scope, TestLog())
-        chat.start(OkHttpClient(), port, MutableSharedFlow())
+        chat.start(OkHttpClient(), "http://127.0.0.1:$port", MutableSharedFlow())
         val gate = CountDownLatch(1)
         mock.responseGate = gate
         val request = async(Dispatchers.Default) { chat.enhancePrompt("/test/project", "make a plan") }
@@ -216,7 +216,7 @@ class KiloBackendChatManagerTest {
         val log = TestLog()
         val sse = MutableSharedFlow<SseEvent>(replay = 8)
         val chat = KiloBackendChatManager(scope, log)
-        chat.start(OkHttpClient(), port, sse)
+        chat.start(OkHttpClient(), "http://127.0.0.1:$port", sse)
 
         val received = async(start = CoroutineStart.UNDISPATCHED) { withTimeout(5_000) { chat.events.first() } }
         withTimeout(5_000) { sse.subscriptionCount.first { it > 0 } }
@@ -234,7 +234,7 @@ class KiloBackendChatManagerTest {
         val port = mock.start()
         val sse = MutableSharedFlow<SseEvent>(replay = 8)
         val chat = KiloBackendChatManager(scope, TestLog())
-        chat.start(OkHttpClient(), port, sse)
+        chat.start(OkHttpClient(), "http://127.0.0.1:$port", sse)
 
         val received = async(start = CoroutineStart.UNDISPATCHED) { withTimeout(5_000) { chat.events.first() } }
         withTimeout(5_000) { sse.subscriptionCount.first { it > 0 } }

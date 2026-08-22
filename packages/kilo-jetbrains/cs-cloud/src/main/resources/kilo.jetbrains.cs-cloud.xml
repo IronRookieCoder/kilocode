@@ -1,0 +1,9 @@
+<idea-plugin>
+    <dependencies>
+        <module name="kilo.jetbrains.backend"/>
+    </dependencies>
+
+    <extensions defaultExtensionNs="ai.kilocode.backend">
+        <connectionProvider implementation="ai.kilocode.cscloud.CsCloudConnectionProvider"/>
+    </extensions>
+</idea-plugin>

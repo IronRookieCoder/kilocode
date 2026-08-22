@@ -30,7 +30,7 @@ class KiloBackendWorkspaceManager(
 
     private var api: DefaultApi? = null
     private var http: OkHttpClient? = null
-    private var port = 0
+    private var base = ""
     private var events: SharedFlow<SseEvent>? = null
 
     /**
@@ -38,14 +38,18 @@ class KiloBackendWorkspaceManager(
      * Called by [KiloBackendAppService] after [KiloAppState.Ready].
      * Clears any stale workspaces from a previous connection.
      */
-    fun start(api: DefaultApi, http: OkHttpClient, port: Int, events: SharedFlow<SseEvent>) {
+    fun start(api: DefaultApi, http: OkHttpClient, base: String, events: SharedFlow<SseEvent>) {
         stop()
         this.api = api
         this.http = http
-        this.port = port
+        this.base = ai.kilocode.backend.app.ConnectionTarget(base).base
         this.events = events
         log.info("Workspace manager started")
     }
+
+    @Deprecated("Pass the connection base URL")
+    fun start(api: DefaultApi, http: OkHttpClient, port: Int, events: SharedFlow<SseEvent>) =
+        start(api, http, "http://127.0.0.1:$port", events)
 
     /**
      * Deactivate all workspaces. Called by [KiloBackendAppService] on disconnect.
@@ -55,7 +59,7 @@ class KiloBackendWorkspaceManager(
         workspaces.clear()
         api = null
         http = null
-        port = 0
+        base = ""
         events = null
         log.info("Workspace manager stopped")
     }
@@ -70,7 +74,7 @@ class KiloBackendWorkspaceManager(
         val ev = events!!
         return workspaces.computeIfAbsent(dir) { d ->
             log.info("Creating workspace for $d")
-            KiloBackendWorkspace(d, cs, client, http, port, ev, sessions, log).also { it.load() }
+            KiloBackendWorkspace(d, cs, client, http, base, ev, sessions, log).also { it.load() }
         }
     }
 

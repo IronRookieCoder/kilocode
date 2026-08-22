@@ -47,7 +47,7 @@ class KiloBackendWorkspace(
     private val cs: CoroutineScope,
     private val api: DefaultApi,
     private val http: OkHttpClient,
-    private val port: Int,
+    private val base: String,
     private val events: SharedFlow<SseEvent>,
     private val sessions: KiloBackendSessionManager,
     private val log: KiloLog,
@@ -291,7 +291,7 @@ class KiloBackendWorkspace(
     )
 
     private fun fetch(path: String): String {
-        val request = Request.Builder().url("http://127.0.0.1:$port$path").get().build()
+        val request = Request.Builder().url("$base$path").get().build()
         http.newCall(request).execute().use { response ->
             val raw = response.body?.string().orEmpty()
             if (!response.isSuccessful) throw RuntimeException("HTTP ${response.code}: $raw")

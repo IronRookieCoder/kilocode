@@ -85,9 +85,9 @@ class KiloBackendChatManager(
     private var watcher: Job? = null
     private var normalizer = KiloCliDataParser.ChatEventNormalizer()
 
-    fun start(http: OkHttpClient, port: Int, sse: SharedFlow<SseEvent>) {
+    fun start(http: OkHttpClient, base: String, sse: SharedFlow<SseEvent>) {
         client = http
-        base = "http://127.0.0.1:$port"
+        this.base = ConnectionTarget(base).base
         if (watcher?.isActive == true) return
         watcher = cs.launch {
             sse.collect { event ->
@@ -129,6 +129,10 @@ class KiloBackendChatManager(
         }
         log.info("Chat manager started")
     }
+
+    @Deprecated("Pass the connection base URL")
+    fun start(http: OkHttpClient, port: Int, sse: SharedFlow<SseEvent>) =
+        start(http, "http://127.0.0.1:$port", sse)
 
     fun stop() {
         watcher?.cancel()

@@ -1,5 +1,6 @@
 package ai.kilocode.backend.telemetry
 
+import ai.kilocode.backend.app.ConnectionTarget
 import ai.kilocode.backend.dev.KiloDevMode
 import ai.kilocode.log.KiloLog
 import com.intellij.openapi.components.Service
@@ -21,27 +22,35 @@ class KiloBackendTelemetry(
         private const val TIMEOUT_MS = 5_000L
     }
 
-    suspend fun capture(http: OkHttpClient?, port: Int, event: String, properties: Map<String, String>) {
+    suspend fun capture(http: OkHttpClient?, base: String?, event: String, properties: Map<String, String>) {
         val body = payload(event, properties)
         if (KiloDevMode.enabled()) {
             log.info(body)
             return
         }
-        if (http == null || port <= 0) return
-        post(http, port, "telemetry/capture", body)
+        if (http == null || base.isNullOrBlank()) return
+        post(http, base, "telemetry/capture", body)
     }
 
-    suspend fun setEnabled(http: OkHttpClient?, port: Int, enabled: Boolean) {
+    @Deprecated("Pass the connection base URL")
+    suspend fun capture(http: OkHttpClient?, port: Int, event: String, properties: Map<String, String>) =
+        capture(http, "http://127.0.0.1:$port", event, properties)
+
+    suspend fun setEnabled(http: OkHttpClient?, base: String?, enabled: Boolean) {
         val body = JsonObject(mapOf("enabled" to JsonPrimitive(enabled))).toString()
         if (KiloDevMode.enabled()) {
             log.info(body)
             return
         }
-        if (http == null || port <= 0) return
-        post(http, port, "telemetry/setEnabled", body)
+        if (http == null || base.isNullOrBlank()) return
+        post(http, base, "telemetry/setEnabled", body)
     }
 
-    private suspend fun post(http: OkHttpClient, port: Int, path: String, body: String) {
+    @Deprecated("Pass the connection base URL")
+    suspend fun setEnabled(http: OkHttpClient?, port: Int, enabled: Boolean) =
+        setEnabled(http, "http://127.0.0.1:$port", enabled)
+
+    private suspend fun post(http: OkHttpClient, base: String, path: String, body: String) {
         withContext(Dispatchers.IO) {
             try {
                 val client = http.newBuilder()
@@ -49,7 +58,7 @@ class KiloBackendTelemetry(
                     .readTimeout(TIMEOUT_MS, TimeUnit.MILLISECONDS)
                     .build()
                 val req = Request.Builder()
-                    .url("http://127.0.0.1:$port/$path")
+                    .url("${ConnectionTarget(base).base}/$path")
                     .header("Accept", "application/json")
                     .post(body.toRequestBody("application/json".toMediaType()))
                     .build()

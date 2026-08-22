@@ -31,11 +31,14 @@ class KiloBackendModelStateManager(
     private var base: String? = null
     private var file: Path? = null
 
-    fun start(http: OkHttpClient, port: Int) {
+    fun start(http: OkHttpClient, base: String) {
         client = http
-        base = "http://127.0.0.1:$port"
+        this.base = ConnectionTarget(base).base
         file = null
     }
+
+    @Deprecated("Pass the connection base URL")
+    fun start(http: OkHttpClient, port: Int) = start(http, "http://127.0.0.1:$port")
 
     fun stop() {
         client = null

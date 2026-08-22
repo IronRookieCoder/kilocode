@@ -14,6 +14,7 @@ import ai.kilocode.rpc.dto.SessionStatusDto
 import ai.kilocode.rpc.dto.SessionSummaryDto
 import ai.kilocode.rpc.dto.SessionTimeDto
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -21,6 +22,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonPrimitive
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.MediaType.Companion.toMediaType
@@ -61,10 +63,10 @@ class KiloBackendSessionManager(
     private var base: String? = null
     private var watcher: Job? = null
 
-    fun start(api: DefaultApi, httpClient: OkHttpClient, port: Int, events: SharedFlow<SseEvent>) {
+    fun start(api: DefaultApi, httpClient: OkHttpClient, base: String, events: SharedFlow<SseEvent>) {
         client = api
         http = httpClient
-        base = "http://127.0.0.1:$port"
+        this.base = ConnectionTarget(base).base
         if (watcher?.isActive == true) return
         watcher = cs.launch {
             events.collect { event ->
@@ -87,6 +89,10 @@ class KiloBackendSessionManager(
         }
         log.info("Session manager started")
     }
+
+    @Deprecated("Pass the connection base URL")
+    fun start(api: DefaultApi, httpClient: OkHttpClient, port: Int, events: SharedFlow<SseEvent>) =
+        start(api, httpClient, "http://127.0.0.1:$port", events)
 
     fun stop() {
         val active = _statuses.value.filterValues { it.type != "idle" }
@@ -267,6 +273,41 @@ class KiloBackendSessionManager(
         }
     }
 
+    /**
+     * Rehydrate the server-side state that may have changed while the SSE stream was down.
+     *
+     * The frontend's [SessionController] remains the owner of its event flow. This method only
+     * performs the existing read operations so a reconnect never replays a prompt or mutates the
+     * session transcript from the backend side. Statuses are seeded first, followed by pending
+     * interactions and history for sessions that are still active.
+     */
+    suspend fun recover(chat: KiloBackendChatManager) = withContext(Dispatchers.IO) {
+        val dirs = knownDirectories()
+        if (dirs.isEmpty()) return@withContext
+
+        dirs.forEach(::seed)
+
+        val pending = dirs.flatMap { dir ->
+            val permissions = runCatching { chat.pendingPermissions(dir) }
+                .onFailure { log.warn("Session recovery pending permissions failed for ${ChatLogSummary.dir(dir)}", it) }
+                .getOrDefault(emptyList())
+            val questions = runCatching { chat.pendingQuestions(dir) }
+                .onFailure { log.warn("Session recovery pending questions failed for ${ChatLogSummary.dir(dir)}", it) }
+                .getOrDefault(emptyList())
+            permissions.map { it.sessionID } + questions.map { it.sessionID }
+        }
+
+        val active = _statuses.value
+            .filterValues { it.type != "idle" }
+            .keys
+        (active + pending).distinct().forEach { id ->
+            val dir = sessionDirectory(id) ?: return@forEach
+            runCatching { chat.messages(id, dir) }
+                .onFailure { log.warn("Session recovery history failed for ${ChatLogSummary.sid(id)}", it) }
+        }
+        log.info("Session recovery completed directories=${dirs.size} active=${(active + pending).distinct().size}")
+    }
+
     // ------ worktree directory management ------
 
     fun setDirectory(id: String, dir: String) {
@@ -278,6 +319,12 @@ class KiloBackendSessionManager(
 
     fun sessionDirectory(id: String): String? =
         directories[id] ?: owned[id]
+
+    private fun knownDirectories(): Set<String> = buildSet {
+        addAll(directories.values)
+        addAll(owned.values)
+        _statuses.value.keys.mapNotNullTo(this) { sessionDirectory(it) }
+    }
 
     // ------ mapping (generated API model → DTO) ------
 
