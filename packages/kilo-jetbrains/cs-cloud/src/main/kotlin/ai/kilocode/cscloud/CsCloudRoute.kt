@@ -1,7 +1,13 @@
 package ai.kilocode.cscloud
 
-import ai.kilocode.rpc.dto.HealthDto
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.put
 import okhttp3.Interceptor
 import okhttp3.Protocol
 import okhttp3.Request
@@ -12,7 +18,6 @@ import java.nio.file.Path
 import java.nio.file.Files
 
 object CsCloudRoute {
-    private val json = Json { ignoreUnknownKeys = true }
     private const val workspace = "directory"
     private const val workspaceHeader = "X-Workspace-Directory"
 
@@ -22,10 +27,7 @@ object CsCloudRoute {
         val route = route(path)
         val workspacePath = request.url.queryParameter(workspace)
         val builder = request.url.newBuilder().encodedPath("${prefix.trimEnd('/')}$route")
-        var i = 0
-        while (i < builder.querySize) {
-            if (builder.queryParameterName(i) == workspace) builder.removeAllQueryParameters(workspace) else i++
-        }
+        if (request.url.queryParameter(workspace) != null) builder.removeAllQueryParameters(workspace)
         val result = request.newBuilder().url(builder.build())
         if (path == "/session" || path.startsWith("/session/")) {
             val value = workspacePath?.trim()?.takeIf { it.isNotEmpty() }
@@ -53,12 +55,36 @@ object CsCloudRoute {
         val body = response.body ?: return@Interceptor response
         val text = body.string()
         if (!response.isSuccessful) throw CsCloudRequestException.fromResponse(response, text)
-        if (!response.request.url.encodedPath.endsWith("/api/v1/runtime/health")) {
-            return@Interceptor response.newBuilder().body(text.toResponseBody(body.contentType())).build()
+        val data = when {
+            response.request.url.encodedPath.endsWith("/api/v1/runtime/health") -> {
+                val health = CsCloudHealth.parseHealth(text)
+                buildJsonObject {
+                    put("healthy", health.healthy)
+                    put("version", health.version)
+                }.toString()
+            }
+            response.request.url.encodedPath.endsWith("/api/v1/agents/models") -> models(text)
+            else -> text
         }
-        val health = CsCloudHealth.parseHealth(text)
-        val data = json.encodeToString(HealthDto.serializer(), health)
         response.newBuilder().body(data.toResponseBody(body.contentType())).build()
+    }
+
+    private fun models(raw: String): String {
+        val root = Json.parseToJsonElement(raw).jsonObject
+        val all = root["connected"]?.jsonArray ?: JsonArray(emptyList())
+        val connected = JsonArray(all.mapNotNull { it.jsonObject["id"] })
+        val defaults = buildJsonObject {
+            val provider = all.firstOrNull()?.jsonObject ?: return@buildJsonObject
+            val id = provider["id"]?.jsonPrimitive?.contentOrNull ?: return@buildJsonObject
+            val model = provider["default_model"]?.jsonPrimitive?.contentOrNull ?: return@buildJsonObject
+            put("build", "$id/$model")
+        }
+        return buildJsonObject {
+            put("all", all)
+            put("default", defaults)
+            put("connected", connected)
+            put("failed", JsonArray(emptyList()))
+        }.toString()
     }
 
     private fun route(path: String): String = when {
@@ -95,7 +121,7 @@ object CsCloudRoute {
         var parent = path
         while (!Files.exists(parent)) {
             val name = parent.fileName ?: break
-            missing += name
+            missing.add(name)
             parent = parent.parent ?: break
         }
         return missing.asReversed().fold(parent.toRealPath()) { root, part -> root.resolve(part) }.normalize()

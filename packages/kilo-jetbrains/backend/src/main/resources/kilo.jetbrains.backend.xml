@@ -7,8 +7,7 @@
 
     <extensionPoints>
         <extensionPoint name="connectionProvider"
-                        interface="ai.kilocode.backend.app.KiloConnectionProvider"
-                        area="IDEA_APPLICATION"/>
+                        interface="ai.kilocode.backend.app.KiloConnectionProvider"/>
     </extensionPoints>
 
     <extensions defaultExtensionNs="com.intellij">

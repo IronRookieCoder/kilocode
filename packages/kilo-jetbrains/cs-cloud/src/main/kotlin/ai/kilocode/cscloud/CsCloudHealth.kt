@@ -1,14 +1,15 @@
 package ai.kilocode.cscloud
 
-import ai.kilocode.rpc.dto.HealthDto
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 
+data class Health(val healthy: Boolean, val version: String)
+
 object CsCloudHealth {
     private val json = Json { ignoreUnknownKeys = true }
 
-    fun parseHealth(body: String): HealthDto {
+    fun parseHealth(body: String): Health {
         val root = runCatching { json.parseToJsonElement(body).jsonObject }
             .getOrElse { throw CsCloudRequestException("invalid_health", "cs-cloud health response is malformed", 200) }
         val ok = root["ok"]?.jsonPrimitive?.content?.toBooleanStrictOrNull()
@@ -22,8 +23,8 @@ object CsCloudHealth {
             ?: throw CsCloudRequestException("invalid_health", "cs-cloud health data is missing", 200)
         val version = data["version"]?.jsonPrimitive?.content?.takeIf { it.isNotBlank() }
             ?: throw CsCloudRequestException("invalid_health", "cs-cloud health version is missing", 200)
-        return HealthDto(healthy = data["status"]?.jsonPrimitive?.content == "ok", version = version)
+        return Health(healthy = data["status"]?.jsonPrimitive?.content == "ok", version = version)
     }
 }
 
-fun parseHealth(body: String): HealthDto = CsCloudHealth.parseHealth(body)
+fun parseHealth(body: String): Health = CsCloudHealth.parseHealth(body)

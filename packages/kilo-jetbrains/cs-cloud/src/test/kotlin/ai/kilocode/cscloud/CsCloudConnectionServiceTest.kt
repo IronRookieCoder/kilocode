@@ -19,6 +19,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertIs
+import kotlin.test.assertNull
 
 class CsCloudConnectionServiceTest {
     private val scope = kotlinx.coroutines.CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -41,7 +42,7 @@ class CsCloudConnectionServiceTest {
         server.start()
         val root = Files.createTempDirectory("cs-cloud-test")
         Files.createDirectories(root.resolve(".costrict/cs-cloud"))
-        Files.writeString(root.resolve(".costrict/cs-cloud/server_url"), server.url("/").toString())
+        Files.writeString(root.resolve(".costrict/cs-cloud/server_url"), server.url("/").newBuilder().host("127.0.0.1").build().toString())
         Files.writeString(root.resolve(".costrict/cs-cloud/config.json"), "{\"api_key\":\"secret\"}")
         val service = CsCloudConnectionService(
             scope,
@@ -53,8 +54,8 @@ class CsCloudConnectionServiceTest {
         val event = async { service.events.first() }
         try {
             service.connect()
-            assertIs<ConnectionState.Connected>(service.state.value)
-            assertEquals(server.url("/").toString().trimEnd('/'), service.target?.base)
+            assertIs<ConnectionState.Connected>(service.state.value, service.state.value.toString())
+            assertEquals(server.url("/").newBuilder().host("127.0.0.1").build().toString().trimEnd('/'), service.target?.base)
             val request = server.takeRequest()
             assertEquals("/api/v1/runtime/health", request.path)
             assertEquals("Bearer secret", request.getHeader("Authorization"))
@@ -73,6 +74,37 @@ class CsCloudConnectionServiceTest {
     }
 
     @Test
+    fun `connects without auth when daemon has no API key`() = runBlocking {
+        val server = MockWebServer()
+        server.enqueue(MockResponse().setBody("""{"ok":true,"data":{"status":"ok","version":"1.0.0"}}"""))
+        server.enqueue(
+            MockResponse()
+                .setHeader("Content-Type", "text/event-stream")
+                .setSocketPolicy(SocketPolicy.KEEP_OPEN),
+        )
+        server.start()
+        val root = Files.createTempDirectory("cs-cloud-no-auth")
+        Files.createDirectories(root.resolve(".costrict/cs-cloud"))
+        Files.writeString(root.resolve(".costrict/cs-cloud/server_url"), server.url("/").newBuilder().host("127.0.0.1").build().toString())
+        val service = CsCloudConnectionService(
+            scope,
+            CsCloudEndpointResolver(root, emptyMap()),
+            TestLog,
+            timeout = 5_000,
+            workspace = root,
+        )
+        try {
+            service.connect()
+            assertIs<ConnectionState.Connected>(service.state.value, service.state.value.toString())
+            assertNull(server.takeRequest().getHeader("Authorization"))
+            assertNull(server.takeRequest().getHeader("Authorization"))
+        } finally {
+            service.dispose()
+            server.shutdown()
+        }
+    }
+
+    @Test
     fun `discovery and health failures are typed and reinstall is unsupported`() = runBlocking {
         val missing = Files.createTempDirectory("cs-cloud-missing")
         val service = CsCloudConnectionService(scope, CsCloudEndpointResolver(missing, emptyMap()), TestLog)
@@ -85,7 +117,7 @@ class CsCloudConnectionServiceTest {
         server.start()
         val root = Files.createTempDirectory("cs-cloud-unavailable")
         Files.createDirectories(root.resolve(".costrict/cs-cloud"))
-        Files.writeString(root.resolve(".costrict/cs-cloud/server_url"), server.url("/").toString())
+        Files.writeString(root.resolve(".costrict/cs-cloud/server_url"), server.url("/").newBuilder().host("127.0.0.1").build().toString())
         Files.writeString(root.resolve(".costrict/cs-cloud/config.json"), "{\"api_key\":\"secret\"}")
         val unavailable = CsCloudConnectionService(scope, CsCloudEndpointResolver(root, emptyMap()), TestLog, workspace = root)
         try {

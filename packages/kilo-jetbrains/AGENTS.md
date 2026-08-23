@@ -242,6 +242,28 @@ For the full release process (resolve version, pin verification, prepare, change
 - JetBrains runtime behavior normally depends on the downloaded CLI release pinned by `packages/kilo-jetbrains/package.json`; local `packages/opencode/` changes are used only with `kilo.cli.pinned=false` repo CLI mode.
 - If there are relevant server/API changes outside `packages/kilo-jetbrains/`, warn the user that JetBrains may need a newly published/pinned CLI release and regenerated SDK artifacts.
 
+## JetBrains Plugin Debugging
+
+插件调试默认执行以下闭环：
+
+1. 首先复现问题，不直接猜测修改。
+2. 使用 `./gradlew runIde` 启动 Development IDE。
+3. 优先读取：
+   - Gradle/runIde 输出
+   - IDE 日志
+   - Exception stacktrace
+   - Problems / inspections
+4. 如 JetBrains MCP 可用，优先通过 MCP 获取 IDE 状态和诊断信息。
+5. 根据 stacktrace 定位最小相关代码。
+6. 只做解决根因所需的最小修改。
+7. 执行：
+   - compileKotlin / compileJava
+   - test
+   - runIde
+8. 在 Development IDE 中重新执行原始操作验证。
+9. 修复后检查日志中是否出现新的 ERROR/WARN。
+10. 未完成实际复现和验证前，不声明问题已解决。
+
 ## UI Guidelines
 
 ### Technology Choices

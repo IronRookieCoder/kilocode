@@ -126,13 +126,13 @@ class CsCloudConnectionService(
                 _state.value = ConnectionState.Connected(0, "")
             }
         } catch (error: TimeoutCancellationException) {
-            stream.close()
-            sse = null
+            streams.forEach(CsCloudSseClient::close)
+            sse = emptyList()
             fail(error)
             scheduleReconnect()
         } catch (error: CancellationException) {
-            stream.close()
-            sse = null
+            streams.forEach(CsCloudSseClient::close)
+            sse = emptyList()
             throw error
         } catch (error: Throwable) {
             if (!disposed) {

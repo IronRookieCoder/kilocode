@@ -17,7 +17,7 @@ interface KiloConnectionProvider {
 
     companion object {
         val EP_NAME: ExtensionPointName<KiloConnectionProvider> =
-            ExtensionPointName.create("ai.kilocode.backend.connectionProvider")
+            ExtensionPointName.create("ai.kilocode.jetbrains.connectionProvider")
     }
 }
 

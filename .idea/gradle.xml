@@ -16,12 +16,13 @@
           </compositeBuild>
         </compositeConfiguration>
         <option name="externalProjectPath" value="$PROJECT_DIR$/packages/kilo-jetbrains" />
-        <option name="gradleJvm" value="#JAVA_HOME" />
+        <option name="gradleJvm" value="21" />
         <option name="modules">
           <set>
             <option value="$PROJECT_DIR$/packages/kilo-jetbrains" />
             <option value="$PROJECT_DIR$/packages/kilo-jetbrains/backend" />
             <option value="$PROJECT_DIR$/packages/kilo-jetbrains/build-tasks" />
+            <option value="$PROJECT_DIR$/packages/kilo-jetbrains/cs-cloud" />
             <option value="$PROJECT_DIR$/packages/kilo-jetbrains/frontend" />
             <option value="$PROJECT_DIR$/packages/kilo-jetbrains/shared" />
           </set>

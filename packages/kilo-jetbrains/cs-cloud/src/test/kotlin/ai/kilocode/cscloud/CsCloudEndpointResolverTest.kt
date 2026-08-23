@@ -7,6 +7,7 @@ import kotlin.io.path.writeText
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertIs
+import kotlin.test.assertNull
 
 class CsCloudEndpointResolverTest {
     @Test
@@ -36,13 +37,11 @@ class CsCloudEndpointResolverTest {
     }
 
     @Test
-    fun `blank values are treated as missing`() = withRoot {
+    fun `blank values disable authentication`() = withRoot {
         writeUrl("http://127.0.0.1")
         writeConfig("  ")
 
-        val error = resolve(mapOf("CS_BRIDGE_API_KEY" to " ", "CS_CLOUD_API_KEY" to "\t")).exceptionOrNull()
-
-        assertIs<CsCloudDiscoveryError.MissingApiKey>(error)
+        assertNull(resolve(mapOf("CS_BRIDGE_API_KEY" to " ", "CS_CLOUD_API_KEY" to "\t")).getOrThrow().key)
     }
 
     @Test
@@ -52,10 +51,9 @@ class CsCloudEndpointResolverTest {
     }
 
     @Test
-    fun `missing key returns typed error`() = withRoot {
+    fun `missing key disables authentication`() = withRoot {
         writeUrl("http://127.0.0.1")
-        val error = resolve().exceptionOrNull()
-        assertIs<CsCloudDiscoveryError.MissingApiKey>(error)
+        assertNull(resolve().getOrThrow().key)
     }
 
     @Test

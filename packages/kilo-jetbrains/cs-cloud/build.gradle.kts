@@ -15,6 +15,7 @@ dependencies {
     }
 
     implementation(project(":backend"))
+    implementation(project(":shared"))
     implementation(libs.okhttp)
     implementation(libs.okhttp.sse)
     implementation(libs.kotlinx.serialization.json)

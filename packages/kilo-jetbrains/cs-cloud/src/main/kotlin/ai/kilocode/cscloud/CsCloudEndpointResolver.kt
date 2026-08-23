@@ -20,7 +20,6 @@ class CsCloudEndpointResolver(
         val key = env["CS_BRIDGE_API_KEY"]?.trim()?.takeIf { it.isNotEmpty() }
             ?: env["CS_CLOUD_API_KEY"]?.trim()?.takeIf { it.isNotEmpty() }
             ?: readKey(root.resolve("config.json"))
-            ?: throw CsCloudDiscoveryError.MissingApiKey()
         CsCloudEndpoint(base, key)
     }.recoverCatching { error ->
         when (error) {

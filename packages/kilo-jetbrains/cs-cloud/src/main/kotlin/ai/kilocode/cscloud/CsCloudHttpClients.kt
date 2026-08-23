@@ -22,7 +22,7 @@ object CsCloudHttpClients {
         val apiClient = OkHttpClient.Builder()
             .addInterceptor(CsCloudRoute.interceptor(prefix, roots))
             .addInterceptor(CsCloudRoute.responseInterceptor())
-            .addInterceptor(auth(endpoint.key))
+            .apply { endpoint.key?.let { addInterceptor(auth(it)) } }
             .callTimeout(0, TimeUnit.MILLISECONDS)
             .readTimeout(0, TimeUnit.MILLISECONDS)
             .build()
@@ -30,14 +30,14 @@ object CsCloudHttpClients {
         // would wait for EOF and prevent EventSource from receiving frames.
         val sseClient = OkHttpClient.Builder()
             .addInterceptor(CsCloudRoute.interceptor(prefix, roots))
-            .addInterceptor(auth(endpoint.key))
+            .apply { endpoint.key?.let { addInterceptor(auth(it)) } }
             .callTimeout(0, TimeUnit.MILLISECONDS)
             .readTimeout(0, TimeUnit.MILLISECONDS)
             .build()
         val healthClient = OkHttpClient.Builder()
             .addInterceptor(CsCloudRoute.interceptor(prefix, roots))
             .addInterceptor(CsCloudRoute.responseInterceptor())
-            .addInterceptor(auth(endpoint.key))
+            .apply { endpoint.key?.let { addInterceptor(auth(it)) } }
             .callTimeout(HEALTH_TIMEOUT_SECONDS, TimeUnit.SECONDS)
             .build()
         return CsCloudClients(

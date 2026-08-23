@@ -1,7 +1,11 @@
 package ai.kilocode.cscloud
 
+import ai.kilocode.backend.cli.KiloCliDataParser
+import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.HttpUrl.Companion.toHttpUrl
+import okhttp3.mockwebserver.MockResponse
+import okhttp3.mockwebserver.MockWebServer
 import okio.Buffer
 import java.nio.file.Path
 import kotlin.test.Test
@@ -10,6 +14,34 @@ import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 
 class CsCloudRouteTest {
+    @Test
+    fun `normalizes cs cloud model catalog for the kilo backend`() {
+        val server = MockWebServer()
+        server.enqueue(MockResponse().setBody("""{
+            "connected": [{
+                "default_model": "default",
+                "id": "firstParty",
+                "models": {"deepseek-v4-flash": {"id": "deepseek-v4-flash", "name": "DeepSeek", "capabilities": {}}},
+                "name": "CoStrict",
+                "source": "config"
+            }]
+        }"""))
+        server.start()
+        val client = OkHttpClient.Builder().addInterceptor(CsCloudRoute.responseInterceptor()).build()
+
+        try {
+            val response = client.newCall(Request.Builder().url(server.url("/api/v1/agents/models")).build()).execute()
+            val data = KiloCliDataParser.parseProviders(response.body!!.string())
+
+            assertEquals("firstParty", data.providers.single().id)
+            assertEquals("deepseek-v4-flash", data.providers.single().models.keys.single())
+            assertEquals(listOf("firstParty"), data.connected)
+            assertEquals(mapOf("build" to "firstParty/default"), data.defaults)
+        } finally {
+            server.shutdown()
+        }
+    }
+
     @Test
     fun `rewrites control plane routes and preserves request details`() {
         val cases = listOf(
