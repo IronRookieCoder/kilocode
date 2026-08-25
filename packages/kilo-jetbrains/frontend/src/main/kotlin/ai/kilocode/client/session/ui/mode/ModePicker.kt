@@ -4,10 +4,18 @@ import ai.kilocode.client.plugin.KiloBundle
 import ai.kilocode.client.ui.PickerButton
 import com.intellij.openapi.ui.popup.JBPopupFactory
 import com.intellij.openapi.ui.popup.PopupShowOptions
+import com.intellij.util.ui.JBUI
+import java.awt.Container
 import java.awt.Cursor
 import java.awt.event.MouseAdapter
 import java.awt.event.MouseEvent
 import javax.swing.ListSelectionModel
+
+/** Lower bound for the mode popup width so it never collapses below a readable dropdown size. */
+internal const val MODE_PICKER_MIN_WIDTH = 280
+
+/** Width used when no sized ancestor is available (popup opened before layout). */
+internal const val MODE_PICKER_FALLBACK_WIDTH = 360
 
 class ModePicker : PickerButton() {
 
@@ -75,7 +83,7 @@ class ModePicker : PickerButton() {
         val item = selected ?: items.first()
         val popup = JBPopupFactory.getInstance()
             .createPopupChooserBuilder(items)
-            .setRenderer(ModePickerRenderer { selected?.id })
+            .setRenderer(ModePickerRenderer({ selected?.id }, ::popupWidth))
             .setSelectionMode(ListSelectionModel.SINGLE_SELECTION)
             .setSelectedValue(item, true)
             .setVisibleRowCount(minOf(ModePickerRenderer.MAX_ROWS, items.size.coerceAtLeast(1)))
@@ -94,5 +102,19 @@ class ModePicker : PickerButton() {
 
         restoreFocusOnPick(popup)
         popup.show(PopupShowOptions.aboveComponent(this))
+    }
+
+    /**
+     * The chooser popup sizes itself to the widest renderer cell, so long agent descriptions must
+     * not leak their natural width into the popup. The dropdown tracks the enclosing prompt/tool
+     * window width (like the VS Code panel dropdown), falling back when no ancestor is laid out.
+     */
+    internal fun popupWidth(): Int {
+        var c: Container? = this
+        while (c != null) {
+            if (c.width >= JBUI.scale(MODE_PICKER_MIN_WIDTH)) return c.width
+            c = c.parent
+        }
+        return JBUI.scale(MODE_PICKER_FALLBACK_WIDTH)
     }
 }

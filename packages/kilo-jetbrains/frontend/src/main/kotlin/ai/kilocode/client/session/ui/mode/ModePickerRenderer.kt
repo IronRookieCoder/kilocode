@@ -13,7 +13,7 @@ import com.intellij.util.ui.EmptyIcon
 import com.intellij.util.ui.JBUI
 import com.intellij.util.ui.UIUtil
 import java.awt.BorderLayout
-import java.awt.FlowLayout
+import java.awt.Dimension
 import javax.swing.Icon
 import javax.swing.JList
 import javax.swing.JPanel
@@ -22,6 +22,7 @@ import javax.swing.SwingConstants
 
 internal class ModePickerRenderer(
     private val active: () -> String?,
+    private val maxWidth: () -> Int = { JBUI.scale(MODE_PICKER_FALLBACK_WIDTH) },
 ) : JPanel(BorderLayout()), ListCellRenderer<ModePicker.Item> {
 
     companion object {
@@ -39,9 +40,9 @@ internal class ModePickerRenderer(
     private val badge = JBLabel(FilledBadgeIcon(KiloBundle.message("mode.picker.deprecated"), UiStyle.Badge.Alert)).apply {
         border = JBUI.Borders.emptyLeft(JBUI.CurrentTheme.ActionsList.elementIconGap())
     }
-    private val head = JPanel(FlowLayout(FlowLayout.LEFT, 0, 0)).apply {
-        add(title)
-        add(badge)
+    private val head = JPanel(BorderLayout()).apply {
+        add(title, BorderLayout.CENTER)
+        add(badge, BorderLayout.EAST)
     }
     private val body = JPanel(BorderLayout())
     private val row = JPanel(BorderLayout())
@@ -78,15 +79,33 @@ internal class ModePickerRenderer(
         background = list.background
         wrap.update(list, selected, focus)
         title.clear()
-        title.append(value.display, SimpleTextAttributes(SimpleTextAttributes.STYLE_BOLD, fg))
+        title.appendWithClipping(
+            value.display,
+            SimpleTextAttributes(SimpleTextAttributes.STYLE_BOLD, fg),
+            SimpleColoredComponent.DefaultFragmentTextClipper.INSTANCE,
+        )
         desc.clear()
         desc.isVisible = value.description?.isNotBlank() == true
         value.description?.takeIf { it.isNotBlank() }?.let {
-            desc.append(it, SimpleTextAttributes(SimpleTextAttributes.STYLE_SMALLER, secondary))
+            desc.appendWithClipping(
+                it,
+                SimpleTextAttributes(SimpleTextAttributes.STYLE_SMALLER, secondary),
+                SimpleColoredComponent.DefaultFragmentTextClipper.INSTANCE,
+            )
         }
         badge.isVisible = value.deprecated
         icon.icon = icon(value)
         return this
+    }
+
+    /**
+     * The chooser popup sizes itself to the widest renderer cell. Descriptions come from user agent
+     * config and can be arbitrarily long, so cells report at most the picker's computed popup width.
+     */
+    override fun getPreferredSize(): Dimension {
+        val size = super.getPreferredSize()
+        val max = maxWidth()
+        return if (size.width <= max) size else Dimension(max, size.height)
     }
 
     internal fun icon(value: ModePicker.Item): Icon = when {
