@@ -130,6 +130,7 @@ class SessionUi(
     private val workspaces: KiloWorkspaceService = service(),
     private val migration: MigrationUiController = service<KiloMigrationService>(),
     private val timers: UiTimerSource = UiTimers,
+    echo: Boolean = true,
 ) : JPanel(BorderLayout()), Disposable, SessionEditorStyleTarget, UiDataProvider {
 
     companion object {
@@ -163,6 +164,7 @@ class SessionUi(
         comp = this,
         flushMs = flushMs,
         condense = Registry.`is`("kilo.session.condense", true),
+        echo = echo,
         displayMs = displayMs,
         open = { item -> manager?.openSession(item) },
         beforeUpdate = { if (opening) false else scroll.following() },

@@ -42,6 +42,7 @@ import ai.kilocode.rpc.dto.KiloAppStatusDto
 import ai.kilocode.rpc.dto.KiloWorkspaceStatusDto
 import ai.kilocode.rpc.dto.LoadErrorDto
 import ai.kilocode.rpc.dto.MessageDto
+import ai.kilocode.rpc.dto.MessageTimeDto
 import ai.kilocode.rpc.dto.MessageWithPartsDto
 import ai.kilocode.rpc.dto.ModelSelectionDto
 import ai.kilocode.rpc.dto.ProfileDto
@@ -98,6 +99,7 @@ class SessionController(
   private val comp: Component? = null,
   private val flushMs: Long = EVENT_FLUSH_MS,
   private val condense: Boolean = true,
+  private val echo: Boolean = true,
   private val displayMs: Long = DISPLAY_DELAY_MS,
   private val revertTimeoutMs: Long = REVERT_TIMEOUT_MS,
   private val open: (SessionRef) -> Unit = {},
@@ -194,6 +196,8 @@ class SessionController(
     private var prefVariant: String? = null
     private var modelTime: Double? = null
     private val snapshots = mutableMapOf<PartKey, String>()
+    private var echoSeq = 0L
+    private val echoes = ArrayDeque<String>()
 
     val ready: Boolean get() = model.isReady()
     val autoApprove: Boolean get() = KiloPluginSettings.getAutoApprove()
@@ -311,6 +315,7 @@ class SessionController(
             "textLength" to bucket(data.text),
         ) + props)
         showSession()
+        if (echo && data.kind == "prompt" && data.text.isNotBlank()) echoPrompt(data.text)
         val pending = sid?.let { CompletableDeferred(it) } ?: session()
         cs.launch {
             try {
@@ -330,6 +335,44 @@ class SessionController(
                 }
             }
         }
+    }
+
+    /**
+     * Optimistically render the prompt as a user message before the backend echoes it back as
+     * message events. Backends that echo user messages replace the bubble via [echoed]; backends
+     * that never echo (e.g. cs-cloud) keep it as the only visible copy of the user's input.
+     */
+    private fun echoPrompt(text: String) {
+        assertEdt()
+        val seq = ++echoSeq
+        val id = "msg_pending_$seq"
+        val part = "prt_pending_$seq"
+        val session = sid ?: ""
+        updateModel {
+            model.upsertMessage(
+                MessageDto(
+                    id = id,
+                    sessionID = session,
+                    role = "user",
+                    time = MessageTimeDto(created = System.currentTimeMillis() / 1000.0),
+                ),
+            )
+            model.updateContent(id, PartDto(id = part, sessionID = session, messageID = id, type = "text", text = text))
+            echoes.addLast(id)
+        }
+    }
+
+    /**
+     * Drop the oldest optimistic prompt bubble once the backend echoes a freshly rendered user
+     * text part. Repeats for an already-rendered part never consume the next pending bubble.
+     */
+    private fun echoed(part: PartDto, fresh: Boolean) {
+        if (!fresh) return
+        if (part.type != "text" || part.synthetic == true || part.text.isNullOrBlank()) return
+        if (model.message(part.messageID)?.info?.role != "user") return
+        if (model.content(part.messageID, part.id) == null) return
+        val id = echoes.removeFirstOrNull() ?: return
+        model.removeMessage(id)
     }
 
     private fun session(): CompletableDeferred<String?> {
@@ -962,9 +1005,13 @@ class SessionController(
                 if (state.status == KiloAppStatusDto.READY) {
                     app.fetchVersionAsync()
                     if (recover && ref is SessionRef.Local) {
-                        val token = SessionLoadState.Loading()
-                        startSessionLoading(token)
-                        loadSession(token)
+                        // startSessionLoading asserts EDT; this collect runs on cs, so hop over.
+                        edt {
+                            if (disposed) return@edt
+                            val token = SessionLoadState.Loading()
+                            startSessionLoading(token)
+                            loadSession(token)
+                        }
                     }
                     connected = true
                     recover = false
@@ -1073,6 +1120,7 @@ class SessionController(
                     if (sid != id) return@runEdt
                     updateModel {
                         snapshots.clear()
+                        echoes.clear()
                         childParts.clear()
                         childParts.putAll(discovered)
                         this@SessionController.model.loadHistory(items)
@@ -1129,6 +1177,7 @@ class SessionController(
                     setRecentSessionsState(RecentsState.Idle)
                     updateModel {
                         snapshots.clear()
+                        echoes.clear()
                         this@SessionController.model.loadHistory(items)
                         syncHistoryAgent(items)
                         this@SessionController.model.setSession(session)
@@ -1457,6 +1506,7 @@ class SessionController(
                 } else {
                     snapshots.remove(key)
                 }
+                echoed(event.part, prev == null)
                 val s = model.state
                 if (s is SessionState.Busy || s is SessionState.Retry || s is SessionState.Offline) {
                     model.setState(SessionState.Busy(status()))

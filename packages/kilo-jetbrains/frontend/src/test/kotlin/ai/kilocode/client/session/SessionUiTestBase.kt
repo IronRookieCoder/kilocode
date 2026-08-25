@@ -90,6 +90,7 @@ abstract class SessionUiTestBase : BasePlatformTestCase() {
         open: ((SessionRef) -> Unit)? = null,
         migration: MigrationUiController = FakeMigrationUiController(),
         manager: SessionManager? = null,
+        echo: Boolean = false,
     ): SessionUi {
         val owner = manager ?: open?.let { fn ->
             object : SessionManager {
@@ -105,6 +106,7 @@ abstract class SessionUiTestBase : BasePlatformTestCase() {
             manager = owner,
             workspaces = workspaces,
             migration = migration,
+            echo = echo,
         ).apply {
             setSize(800, 600)
         }
