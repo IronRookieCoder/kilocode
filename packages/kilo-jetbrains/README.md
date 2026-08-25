@@ -86,11 +86,16 @@ See [RELEASING.md](RELEASING.md) for the full release process, including how to 
 
 ### Connect to Costrict cs-cloud
 
-The JetBrains plugin connects to an already-running local Costrict daemon. Start it outside the IDE with `cs-cloud start`; the plugin does not start, stop, install, or reinstall the daemon.
+The JetBrains plugin connects to an already-running local Costrict daemon. The plugin does not start, stop, install, or reinstall the daemon; the daemon lifecycle is managed by the Costrict `csc` CLI.
+
+First-time setup (outside the IDE):
+
+1. Install csc: `npm install -g @costrict/csc`
+2. Start the daemon: `csc cloud start` (downloads and starts cs-cloud automatically on first run)
 
 The daemon URL is read from `~/.costrict/cs-cloud/server_url`. The API key is selected in this order: `CS_BRIDGE_API_KEY`, `CS_CLOUD_API_KEY`, then `~/.costrict/cs-cloud/config.json` (`api_key`). Only loopback URLs (`localhost`, `127.0.0.1`, or `::1`) are accepted.
 
-For an unavailable daemon, check that `server_url` exists and `cs-cloud start` is still running. An authentication error means the selected environment variable or `config.json` key is missing or invalid. Restarting the connection re-reads the URL and credentials without managing the daemon process.
+While the daemon is unavailable, the plugin keeps polling in the background and connects automatically once `csc cloud start` brings it up — no manual Retry needed. The connection banner shows the install command, and the retry menu offers two actions: "Start cs-cloud" runs `csc cloud start` from the plugin, and "Install csc CLI" opens the npm page. An authentication error means the selected environment variable or `config.json` key is missing or invalid. Restarting the connection re-reads the URL and credentials without managing the daemon process.
 
 Use the checked-in `Run IDE (Split Mode)` run configuration (or `./gradlew --no-configuration-cache runIdeSplitMode` from `packages/kilo-jetbrains/`) to launch the backend and frontend halves of a local split-mode sandbox. The backend downloads the pinned CLI release on first connect.
 

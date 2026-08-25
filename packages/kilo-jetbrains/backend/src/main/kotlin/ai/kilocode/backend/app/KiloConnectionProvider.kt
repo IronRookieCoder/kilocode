@@ -35,6 +35,11 @@ interface KiloConnection {
     suspend fun connect()
     suspend fun restart()
     suspend fun reinstall()
+
+    /** Start the external cs-cloud daemon; unsupported by the locally managed Kilo CLI provider. */
+    suspend fun startCsCloud(): ai.kilocode.rpc.dto.CsCloudStartDto =
+        ai.kilocode.rpc.dto.CsCloudStartDto(ok = false, message = "cs-cloud daemon is not managed by this connection")
+
     fun shutdownForUnload()
     fun shutdownForAppClose()
     fun dispose()

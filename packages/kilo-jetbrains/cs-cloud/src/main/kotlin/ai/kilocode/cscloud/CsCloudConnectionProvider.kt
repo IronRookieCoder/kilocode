@@ -4,6 +4,7 @@ import ai.kilocode.backend.app.KiloConnection
 import ai.kilocode.backend.app.KiloConnectionProvider
 import ai.kilocode.log.KiloLog
 import com.intellij.openapi.project.ProjectManager
+import com.intellij.util.EnvironmentUtil
 import kotlinx.coroutines.CoroutineScope
 import java.nio.file.Path
 
@@ -29,5 +30,6 @@ class CsCloudConnectionProvider : KiloConnectionProvider {
                 .map { Path.of(it).toAbsolutePath().normalize() }
                 .toList()
         },
+        starter = { CscCloudStarter(EnvironmentUtil.getEnvironmentMap(), log).start() },
     )
 }

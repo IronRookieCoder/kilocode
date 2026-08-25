@@ -2,6 +2,7 @@ package ai.kilocode.rpc
 
 import ai.kilocode.rpc.dto.DeviceAuthDto
 import ai.kilocode.rpc.dto.ConfigPatchDto
+import ai.kilocode.rpc.dto.CsCloudStartDto
 import ai.kilocode.rpc.dto.HealthDto
 import ai.kilocode.rpc.dto.KiloAppStateDto
 import ai.kilocode.rpc.dto.LogConfigDto
@@ -58,6 +59,9 @@ interface KiloAppRpcApi : RemoteApi<Unit> {
 
     /** Kill the Core process, re-download the binary, and restart. */
     suspend fun reinstall()
+
+    /** Run `csc cloud start` to bring up the local cs-cloud daemon. */
+    suspend fun startCsCloud(): CsCloudStartDto
 
     /** Load persisted CLI model state such as favorites. */
     suspend fun modelState(): ModelStateDto

@@ -18,6 +18,8 @@ import ai.kilocode.rpc.dto.ModelVariantUpdateDto
 import ai.kilocode.rpc.dto.ProfileDto
 import ai.kilocode.rpc.dto.ProfileStatusDto
 import ai.kilocode.log.KiloLog
+import ai.kilocode.client.KiloNotifications
+import ai.kilocode.client.plugin.KiloBundle
 import ai.kilocode.client.settings.KiloLogSettingsService
 import com.intellij.openapi.components.Service
 import com.intellij.openapi.components.service
@@ -171,6 +173,29 @@ class KiloAppService internal constructor(
     fun reinstallAsync() {
         LOG.info("reinstallAsync: launching reinstall")
         cs.launch { reinstall() }
+    }
+
+    private val csCloudStarting = AtomicBoolean(false)
+
+    /** Run `csc cloud start` on the backend and notify the user of the outcome. */
+    fun startCsCloudAsync() {
+        if (!csCloudStarting.compareAndSet(false, true)) return
+        LOG.info("startCsCloudAsync: launching csc cloud start")
+        cs.launch {
+            try {
+                val result = call { startCsCloud() }
+                if (result.ok) {
+                    KiloNotifications.info(KiloBundle.message("csCloud.start.ok"))
+                } else {
+                    KiloNotifications.error(KiloBundle.message("csCloud.start.failed"), result.message)
+                }
+            } catch (e: Exception) {
+                LOG.warn("startCsCloudAsync failed", e)
+                KiloNotifications.error(KiloBundle.message("csCloud.start.failed"), e.message)
+            } finally {
+                csCloudStarting.set(false)
+            }
+        }
     }
 
     suspend fun coreInfo(): CoreInfo? = try {

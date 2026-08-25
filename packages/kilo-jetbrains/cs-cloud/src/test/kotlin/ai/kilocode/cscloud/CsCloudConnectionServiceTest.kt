@@ -3,6 +3,7 @@ package ai.kilocode.cscloud
 import ai.kilocode.backend.app.ConnectionState
 import ai.kilocode.backend.app.SseEvent
 import ai.kilocode.log.KiloLog
+import ai.kilocode.rpc.dto.CsCloudStartDto
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
@@ -20,6 +21,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertIs
 import kotlin.test.assertNull
+import kotlin.test.assertTrue
 
 class CsCloudConnectionServiceTest {
     private val scope = kotlinx.coroutines.CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -128,6 +130,82 @@ class CsCloudConnectionServiceTest {
         } finally {
             unavailable.dispose()
             server.shutdown()
+        }
+    }
+
+    @Test
+    fun `polls until the cs-cloud daemon appears`() = runBlocking {
+        val server = MockWebServer()
+        server.enqueue(MockResponse().setBody("""{"ok":true,"data":{"status":"ok","version":"1.0.0"}}"""))
+        server.enqueue(
+            MockResponse()
+                .setHeader("Content-Type", "text/event-stream")
+                .setSocketPolicy(SocketPolicy.KEEP_OPEN),
+        )
+        server.start()
+        val root = Files.createTempDirectory("cs-cloud-poll")
+        val service = CsCloudConnectionService(
+            scope,
+            CsCloudEndpointResolver(root, emptyMap()),
+            TestLog,
+            timeout = 5_000,
+            workspace = root,
+        )
+        try {
+            service.connect()
+            assertIs<ConnectionState.Error>(service.state.value)
+
+            Files.createDirectories(root.resolve(".costrict/cs-cloud"))
+            Files.writeString(root.resolve(".costrict/cs-cloud/server_url"), server.url("/").newBuilder().host("127.0.0.1").build().toString())
+            Files.writeString(root.resolve(".costrict/cs-cloud/config.json"), "{\"api_key\":\"secret\"}")
+
+            val connected = withTimeout(10_000) { service.state.first { it is ConnectionState.Connected } }
+            assertIs<ConnectionState.Connected>(connected)
+            assertEquals("Bearer secret", server.takeRequest().getHeader("Authorization"))
+            service.dispose()
+            assertEquals(ConnectionState.Disconnected, service.state.value)
+        } finally {
+            service.dispose()
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun `startCsCloud returns starter outcome and reconnects on success`() = runBlocking {
+        val root = Files.createTempDirectory("cs-cloud-start")
+        val service = CsCloudConnectionService(
+            scope,
+            CsCloudEndpointResolver(root, emptyMap()),
+            TestLog,
+            starter = { CsCloudStartDto(true, "started") },
+        )
+        try {
+            val result = service.startCsCloud()
+            assertTrue(result.ok)
+            assertEquals("started", result.message)
+            // Success triggers a connect attempt, which fails discovery here.
+            assertIs<ConnectionState.Error>(service.state.value)
+        } finally {
+            service.dispose()
+        }
+    }
+
+    @Test
+    fun `startCsCloud failure does not reconnect`() = runBlocking {
+        val root = Files.createTempDirectory("cs-cloud-start-fail")
+        val service = CsCloudConnectionService(
+            scope,
+            CsCloudEndpointResolver(root, emptyMap()),
+            TestLog,
+            starter = { CsCloudStartDto(false, "csc not installed") },
+        )
+        try {
+            val result = service.startCsCloud()
+            assertTrue(!result.ok)
+            assertEquals("csc not installed", result.message)
+            assertEquals(ConnectionState.Disconnected, service.state.value)
+        } finally {
+            service.dispose()
         }
     }
 

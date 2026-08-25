@@ -22,6 +22,7 @@ import ai.kilocode.jetbrains.api.model.ProviderOauthCallbackRequest
 import ai.kilocode.rpc.dto.ConfigDto
 import ai.kilocode.rpc.dto.DeviceAuthDto
 import ai.kilocode.rpc.dto.ConfigPatchDto
+import ai.kilocode.rpc.dto.CsCloudStartDto
 import ai.kilocode.rpc.dto.HealthDto
 import com.intellij.openapi.Disposable
 import com.intellij.openapi.components.Service
@@ -215,6 +216,9 @@ class KiloBackendAppService private constructor(
             }
         }
     }
+
+    /** Run `csc cloud start` on the connection to bring up the local cs-cloud daemon. */
+    suspend fun startCsCloud(): CsCloudStartDto = connection.startCsCloud()
 
     /**
      * Synchronous CLI teardown for plugin unload. Confirms process exit but does not wait on the
@@ -1063,16 +1067,19 @@ private fun connectionDiagnostic(state: ConnectionState.Error): ConnectionDiagno
         ?.getOrNull(1)
         ?.toIntOrNull()
     if (lower.contains("api key was not found") || lower.contains("missing api key")) {
-        return ConnectionDiagnostic(status, "cs-cloud API key was not found")
+        return ConnectionDiagnostic(status, "cs-cloud API key was not found - run `csc cloud start` or set CS_BRIDGE_API_KEY / CS_CLOUD_API_KEY")
     }
     if (status == 401 || status == 403 || lower.contains("unauthorized") || lower.contains("invalid api key")) {
         return ConnectionDiagnostic(status, "cs-cloud API key is invalid")
     }
     if (status == 503 || lower.contains("agent_down") || lower.contains("agent is unavailable")) {
-        return ConnectionDiagnostic(status, "csc agent is unavailable")
+        return ConnectionDiagnostic(status, "csc agent is unavailable - check that csc is installed and `csc cloud start` finished starting the agent")
     }
-    if (lower.contains("server url") || lower.contains("connection refused") || lower.contains("timed out")) {
-        return ConnectionDiagnostic(status, "cs-cloud daemon is not running")
+    if (lower.contains("server url")) {
+        return ConnectionDiagnostic(status, "csc is not installed or cs-cloud has not been started - install csc (npm install -g @costrict/csc) and run `csc cloud start` to download and start cs-cloud automatically")
+    }
+    if (lower.contains("connection refused") || lower.contains("timeout")) {
+        return ConnectionDiagnostic(status, "cs-cloud daemon is not running - start it with `csc cloud start` (or use the Start action in the retry menu)")
     }
     return ConnectionDiagnostic(status, raw)
 }

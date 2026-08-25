@@ -259,6 +259,8 @@ class ConnectionPanel(
         group.addSeparator()
         ActionManager.getInstance().getAction("Kilo.Restart")?.let { group.add(it) }
         ActionManager.getInstance().getAction("Kilo.Reinstall")?.let { group.add(it) }
+        ActionManager.getInstance().getAction("Kilo.InstallCsc")?.let { group.add(it) }
+        ActionManager.getInstance().getAction("Kilo.StartCsCloud")?.let { group.add(it) }
         return group
     }
 

@@ -73,6 +73,8 @@ class KiloAppRpcApiImpl : KiloAppRpcApi {
 
     override suspend fun reinstall() = app.reinstall()
 
+    override suspend fun startCsCloud() = app.startCsCloud()
+
     override suspend fun modelState(): ModelStateDto {
         app.requireReady()
         return app.models.state()

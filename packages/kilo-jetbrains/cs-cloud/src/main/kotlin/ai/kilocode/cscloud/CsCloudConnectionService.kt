@@ -6,6 +6,7 @@ import ai.kilocode.backend.app.KiloConnection
 import ai.kilocode.backend.app.SseEvent
 import ai.kilocode.jetbrains.api.client.DefaultApi
 import ai.kilocode.log.KiloLog
+import ai.kilocode.rpc.dto.CsCloudStartDto
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -36,10 +37,12 @@ class CsCloudConnectionService(
     private val timeout: Long = 30_000L,
     workspace: Path? = null,
     private val roots: () -> List<Path> = { listOfNotNull(workspace) },
+    private val starter: suspend () -> CsCloudStartDto = { CsCloudStartDto(false, "cs-cloud starter is not configured") },
 ) : KiloConnection {
     private val _state = MutableStateFlow<ConnectionState>(ConnectionState.Disconnected)
     private val _events = MutableSharedFlow<SseEvent>(extraBufferCapacity = 128)
     private var reconnect: Job? = null
+    private var poll: Job? = null
     private var sse = emptyList<CsCloudSseClient>()
     private var clients: CsCloudClients? = null
     private var endpoint: CsCloudEndpoint? = null
@@ -57,11 +60,20 @@ class CsCloudConnectionService(
         if (disposed) return
         reconnect?.cancel()
         reconnect = null
+        poll?.cancel()
+        poll = null
         closeTransport()
-        attempt = 0
         _state.value = ConnectionState.Discovering
-        val found = resolver.resolve().getOrElse { return fail(it) }
-        if (roots().isEmpty()) return fail(IllegalStateException("active JetBrains project root is unavailable"))
+        val found = resolver.resolve().getOrElse {
+            fail(it)
+            schedulePoll()
+            return
+        }
+        if (roots().isEmpty()) {
+            fail(IllegalStateException("active JetBrains project root is unavailable"))
+            schedulePoll()
+            return
+        }
         endpoint = found
         _state.value = ConnectionState.Connecting
         val next = CsCloudHttpClients.create(found, roots)
@@ -73,6 +85,7 @@ class CsCloudConnectionService(
         } catch (error: Throwable) {
             closeTransport()
             fail(error)
+            schedulePoll()
             return
         }
         openSse(next)
@@ -81,6 +94,12 @@ class CsCloudConnectionService(
     override suspend fun restart() = connect()
 
     override suspend fun reinstall(): Nothing = throw CsCloudUnsupportedOperationException()
+
+    override suspend fun startCsCloud(): CsCloudStartDto {
+        val result = starter()
+        if (result.ok) connect()
+        return result
+    }
 
     override fun shutdownForUnload() = shutdown()
 
@@ -91,6 +110,8 @@ class CsCloudConnectionService(
         disposed = true
         reconnect?.cancel()
         reconnect = null
+        poll?.cancel()
+        poll = null
         closeTransport()
         _state.value = ConnectionState.Disconnected
     }
@@ -168,6 +189,23 @@ class CsCloudConnectionService(
         }
     }
 
+    /**
+     * Keeps re-attempting [connect] after a discovery or health failure so the plugin
+     * auto-connects once the user starts the cs-cloud daemon (e.g. `csc cloud start`)
+     * instead of requiring a manual Retry click.
+     */
+    private fun schedulePoll() {
+        if (disposed || poll?.isActive == true) return
+        poll = cs.launch {
+            poll = null
+            val wait = (250L shl attempt.coerceAtMost(3)).coerceAtMost(2_000L)
+            attempt = (attempt + 1).coerceAtMost(4)
+            delay(wait)
+            if (!isActive || disposed) return@launch
+            connect()
+        }
+    }
+
     private fun fail(error: Throwable) {
         val cause = error.cause ?: error
         val detail = when (cause) {
@@ -183,6 +221,8 @@ class CsCloudConnectionService(
         if (disposed) return
         reconnect?.cancel()
         reconnect = null
+        poll?.cancel()
+        poll = null
         closeTransport()
         _state.value = ConnectionState.Disconnected
     }
