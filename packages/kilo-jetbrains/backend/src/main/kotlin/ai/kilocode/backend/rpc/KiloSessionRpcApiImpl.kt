@@ -6,6 +6,8 @@ import ai.kilocode.backend.app.KiloBackendAppService
 import ai.kilocode.backend.app.KiloBackendActivityManager
 import ai.kilocode.backend.app.KiloBackendChatManager
 import ai.kilocode.backend.app.KiloBackendSessionManager
+import ai.kilocode.backend.app.CapabilityReleaseReason
+import ai.kilocode.backend.app.CapabilityResult
 import ai.kilocode.backend.workspace.KiloBackendWorkspaceManager
 import ai.kilocode.log.ChatLogSummary
 import ai.kilocode.rpc.KiloSessionRpcApi
@@ -103,7 +105,11 @@ class KiloSessionRpcApiImpl internal constructor(
         app.requireReady()
         log.info("delete session: id=$id, directory=$directory")
         val dir = sessions.getDirectory(id, directory)
-        workspaces.get(dir).deleteSession(id)
+        try {
+            workspaces.get(dir).deleteSession(id)
+        } finally {
+            app.sessionCapabilities?.release(id, CapabilityReleaseReason.DELETE)
+        }
     }
 
     override suspend fun rename(id: String, directory: String, title: String): ai.kilocode.rpc.dto.SessionDto {
@@ -137,6 +143,10 @@ class KiloSessionRpcApiImpl internal constructor(
 
     override suspend fun prompt(id: String, directory: String, prompt: PromptDto) {
         app.requireReady()
+        when (val capability = app.sessionCapabilities?.ensure(id, directory)) {
+            is CapabilityResult.Unavailable -> if (capability.reason != "tools_disabled") throw IllegalStateException(capability.reason)
+            else -> Unit
+        }
         log.info("prompt RPC: session=$id, dir=$directory, parts=${prompt.parts.size}")
         chat.prompt(id, directory, prompt)
     }
@@ -147,8 +157,13 @@ class KiloSessionRpcApiImpl internal constructor(
         chat.command(id, directory, command, arguments, prompt)
     }
 
-    override suspend fun abort(id: String, directory: String) =
-        ready { chat.abort(id, directory) }
+    override suspend fun abort(id: String, directory: String) = ready {
+        try {
+            chat.abort(id, directory)
+        } finally {
+            app.sessionCapabilities?.release(id, CapabilityReleaseReason.ABORT)
+        }
+    }
 
     override suspend fun compact(id: String, directory: String, model: ModelSelectionDto) =
         ready { chat.compact(id, directory, model) }

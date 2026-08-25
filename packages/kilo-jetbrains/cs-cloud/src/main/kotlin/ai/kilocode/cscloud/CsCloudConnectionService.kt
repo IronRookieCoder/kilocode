@@ -3,6 +3,10 @@ package ai.kilocode.cscloud
 import ai.kilocode.backend.app.ConnectionState
 import ai.kilocode.backend.app.ConnectionTarget
 import ai.kilocode.backend.app.KiloConnection
+import ai.kilocode.backend.app.KiloSessionCapabilities
+import ai.kilocode.backend.app.CapabilityReleaseReason
+import ai.kilocode.cscloud.mcp.CsCloudMcpBridge
+import ai.kilocode.cscloud.mcp.IdeMcpSessionFactory
 import ai.kilocode.backend.app.SseEvent
 import ai.kilocode.jetbrains.api.client.DefaultApi
 import ai.kilocode.log.KiloLog
@@ -37,6 +41,7 @@ class CsCloudConnectionService(
     workspace: Path? = null,
     private val roots: () -> List<Path> = { listOfNotNull(workspace) },
 ) : KiloConnection {
+    private val bridge = CsCloudMcpBridge(cs, { endpoint }, { clients?.apiClient }, IdeMcpSessionFactory.EP.extensionList.singleOrNull(), log)
     private val _state = MutableStateFlow<ConnectionState>(ConnectionState.Disconnected)
     private val _events = MutableSharedFlow<SseEvent>(extraBufferCapacity = 128)
     private var reconnect: Job? = null
@@ -52,6 +57,7 @@ class CsCloudConnectionService(
     override val apiClient: OkHttpClient? get() = clients?.apiClient
     override val target: ConnectionTarget? get() = endpoint?.let { ConnectionTarget(it.base) }
     override val port: Int get() = 0
+    override val capabilities: KiloSessionCapabilities get() = bridge
 
     override suspend fun connect() {
         if (disposed) return
@@ -92,6 +98,7 @@ class CsCloudConnectionService(
         reconnect?.cancel()
         reconnect = null
         closeTransport()
+        cs.launch { bridge.releaseAll(CapabilityReleaseReason.SHUTDOWN) }
         _state.value = ConnectionState.Disconnected
     }
 
@@ -184,6 +191,7 @@ class CsCloudConnectionService(
         reconnect?.cancel()
         reconnect = null
         closeTransport()
+        cs.launch { bridge.releaseAll(CapabilityReleaseReason.SHUTDOWN) }
         _state.value = ConnectionState.Disconnected
     }
 

@@ -62,11 +62,13 @@ class KiloBackendSessionManager(
     private var http: OkHttpClient? = null
     private var base: String? = null
     private var watcher: Job? = null
+    private var capabilities: KiloSessionCapabilities? = null
 
-    fun start(api: DefaultApi, httpClient: OkHttpClient, base: String, events: SharedFlow<SseEvent>) {
+    fun start(api: DefaultApi, httpClient: OkHttpClient, base: String, events: SharedFlow<SseEvent>, capabilities: KiloSessionCapabilities? = null) {
         client = api
         http = httpClient
         this.base = ConnectionTarget(base).base
+        this.capabilities = capabilities
         if (watcher?.isActive == true) return
         watcher = cs.launch {
             events.collect { event ->
@@ -75,6 +77,9 @@ class KiloBackendSessionManager(
                     if (pair != null) {
                         val prev = _statuses.value[pair.first]
                         _statuses.update { it + pair }
+                        if (pair.second.type == "idle" && prev?.type != "idle") {
+                            capabilities?.release(pair.first, CapabilityReleaseReason.IDLE)
+                        }
                         val total = _statuses.value.size
                         log.debug { "${ChatLogSummary.sid(pair.first)} evt=session.status ${ChatLogSummary.status(pair.second)}" }
                         if (pair.second.type != "busy") {
@@ -100,7 +105,9 @@ class KiloBackendSessionManager(
             log.warn("Session manager stopping with active sessions count=${active.size} statuses=${active.values.map { it.type }.distinct()}")
         }
         watcher?.cancel()
+        capabilities?.let { current -> cs.launch { current.releaseAll(CapabilityReleaseReason.DISCONNECT) } }
         watcher = null
+        capabilities = null
         client = null
         http = null
         base = null
@@ -304,6 +311,11 @@ class KiloBackendSessionManager(
             val dir = sessionDirectory(id) ?: return@forEach
             runCatching { chat.messages(id, dir) }
                 .onFailure { log.warn("Session recovery history failed for ${ChatLogSummary.sid(id)}", it) }
+        }
+        _statuses.value.filterValues { it.type == "busy" || it.type == "retry" }.keys.forEach { id ->
+            val dir = sessionDirectory(id) ?: return@forEach
+            runCatching { capabilities?.ensure(id, dir) }
+                .onFailure { log.warn("Session recovery capability failed for ${ChatLogSummary.sid(id)}", it) }
         }
         log.info("Session recovery completed directories=${dirs.size} active=${(active + pending).distinct().size}")
     }

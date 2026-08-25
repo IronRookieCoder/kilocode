@@ -8,6 +8,7 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
+import kotlinx.serialization.json.JsonPrimitive
 import okhttp3.Interceptor
 import okhttp3.Protocol
 import okhttp3.Request
@@ -61,6 +62,7 @@ object CsCloudRoute {
                 buildJsonObject {
                     put("healthy", health.healthy)
                     put("version", health.version)
+                    put("capabilities", JsonArray(health.capabilities.sorted().map(::JsonPrimitive)))
                 }.toString()
             }
             response.request.url.encodedPath.endsWith("/api/v1/agents/models") -> models(text)

@@ -1,0 +1,5 @@
+<idea-plugin>
+    <extensions defaultExtensionNs="ai.kilocode.jetbrains">
+        <ideMcpSessionFactory implementation="ai.kilocode.cscloud.mcp.JetBrainsMcpSessionFactory"/>
+    </extensions>
+</idea-plugin>

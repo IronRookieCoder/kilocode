@@ -19,6 +19,8 @@ import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertSame
+import kotlin.test.assertNull
 
 class KiloConnectionProviderTest {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -45,7 +47,36 @@ class KiloConnectionProviderTest {
         assertEquals("http://localhost:1234/api/v1", ConnectionTarget("http://localhost:1234/api/v1/").base)
     }
 
-    private class TestProvider(private val calls: AtomicInteger) : KiloConnectionProvider {
+    @Test
+    fun `cli connection has no session capabilities`() {
+        val provider = TestProvider(AtomicInteger())
+        val app = KiloBackendAppService.create(scope, TestServer, TestLog(), provider)
+
+        assertNull(app.sessionCapabilities)
+        app.dispose()
+    }
+
+    @Test
+    fun `app service exposes provider capabilities unchanged`() {
+        val capabilities = object : KiloSessionCapabilities {
+            override suspend fun ensure(id: String, directory: String): CapabilityResult =
+                CapabilityResult.Unavailable("test")
+
+            override suspend fun release(id: String, reason: CapabilityReleaseReason) = Unit
+
+            override suspend fun releaseAll(reason: CapabilityReleaseReason) = Unit
+        }
+        val provider = TestProvider(AtomicInteger(), capabilities)
+        val app = KiloBackendAppService.create(scope, TestServer, TestLog(), provider)
+
+        assertSame(capabilities, app.sessionCapabilities)
+        app.dispose()
+    }
+
+    private class TestProvider(
+        private val calls: AtomicInteger,
+        private val capabilities: KiloSessionCapabilities? = null,
+    ) : KiloConnectionProvider {
         override val id = "test"
         override fun create(cs: CoroutineScope, reconnect: () -> Unit, log: KiloLog, timeout: Long): KiloConnection =
             object : KiloConnection {
@@ -55,6 +86,7 @@ class KiloConnectionProviderTest {
                 override val api: DefaultApi? = null
                 override val apiClient: OkHttpClient? = null
                 override val target: ConnectionTarget? = null
+                override val capabilities: KiloSessionCapabilities? = this@TestProvider.capabilities
                 override suspend fun connect() { calls.incrementAndGet() }
                 override suspend fun restart() = Unit
                 override suspend fun reinstall() = Unit

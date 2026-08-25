@@ -155,6 +155,7 @@ class KiloBackendAppService private constructor(
     val http: OkHttpClient? get() = connection.apiClient
     val port: Int get() = connection.port
     val base: String? get() = connection.target?.base
+    val sessionCapabilities: KiloSessionCapabilities? get() = connection.capabilities // kilocode_change
 
     val sessions = KiloBackendSessionManager(cs, log)
     val chat = KiloBackendChatManager(cs, log)
@@ -499,7 +500,7 @@ class KiloBackendAppService private constructor(
                     notifications = notifs
                     val base = connection.target?.base ?: throw IllegalStateException("Connection target unavailable")
                     models.start(connection.apiClient!!, base)
-                    sessions.start(connection.api!!, connection.apiClient!!, base, connection.events)
+                    sessions.start(connection.api!!, connection.apiClient!!, base, connection.events, sessionCapabilities)
                     chat.start(connection.apiClient!!, base, connection.events)
                     activity.start(sessions.statuses, sessions::sessionDirectory, chat.events)
                     workspaces.start(connection.api!!, connection.apiClient!!, base, connection.events)

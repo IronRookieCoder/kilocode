@@ -31,6 +31,8 @@ interface KiloConnection {
         get() = api
     val port: Int
         get() = 0
+    val capabilities: KiloSessionCapabilities? // kilocode_change
+        get() = null
 
     suspend fun connect()
     suspend fun restart()

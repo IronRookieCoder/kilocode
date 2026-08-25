@@ -3,8 +3,9 @@ package ai.kilocode.cscloud
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.jsonArray
 
-data class Health(val healthy: Boolean, val version: String)
+data class Health(val healthy: Boolean, val version: String, val capabilities: Set<String> = emptySet())
 
 object CsCloudHealth {
     private val json = Json { ignoreUnknownKeys = true }
@@ -23,7 +24,8 @@ object CsCloudHealth {
             ?: throw CsCloudRequestException("invalid_health", "cs-cloud health data is missing", 200)
         val version = data["version"]?.jsonPrimitive?.content?.takeIf { it.isNotBlank() }
             ?: throw CsCloudRequestException("invalid_health", "cs-cloud health version is missing", 200)
-        return Health(healthy = data["status"]?.jsonPrimitive?.content == "ok", version = version)
+        val capabilities = data["capabilities"]?.jsonArray?.mapTo(mutableSetOf()) { it.jsonPrimitive.content }.orEmpty()
+        return Health(healthy = data["status"]?.jsonPrimitive?.content == "ok", version = version, capabilities = capabilities)
     }
 }
 
