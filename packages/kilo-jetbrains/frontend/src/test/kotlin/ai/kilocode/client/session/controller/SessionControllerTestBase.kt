@@ -138,8 +138,9 @@ abstract class SessionControllerTestBase : BasePlatformTestCase() {
         revertTimeoutMs: Long = SessionController.REVERT_TIMEOUT_MS,
         open: (SessionRef) -> Unit = {},
         log: KiloLog? = null,
+        echo: Boolean = false,
     ): SessionController {
-        return controller(id, flushMs, true, displayMs = displayMs, revertTimeoutMs = revertTimeoutMs, open = open, log = log)
+        return controller(id, flushMs, true, displayMs = displayMs, revertTimeoutMs = revertTimeoutMs, open = open, log = log, echo = echo)
     }
 
     protected fun controller(
@@ -162,6 +163,7 @@ abstract class SessionControllerTestBase : BasePlatformTestCase() {
         afterUpdate: (Boolean) -> Unit = {},
         open: (SessionRef) -> Unit = {},
         log: KiloLog? = null,
+        echo: Boolean = false,
         ref: SessionRef? = if (session != null) SessionRef.Local(session) else SessionRef.from(id),
     ): SessionController {
         val root = Root()
@@ -183,6 +185,7 @@ abstract class SessionControllerTestBase : BasePlatformTestCase() {
             telemetry = { event, props -> appRpc.telemetry.add(TelemetryCaptureDto(event, props)) },
             timers = timers,
             log = log ?: KiloLog.create(SessionController::class.java),
+            echo = echo,
         )
         controllers.add(m)
         roots[m] = root
@@ -277,10 +280,10 @@ abstract class SessionControllerTestBase : BasePlatformTestCase() {
     }
 
     /** Create a controller, attach both listeners, send initial prompt, and flush. */
-    protected fun prompted(): Triple<SessionController, MutableList<SessionControllerEvent>, MutableList<SessionModelEvent>> {
+    protected fun prompted(echo: Boolean = false): Triple<SessionController, MutableList<SessionControllerEvent>, MutableList<SessionModelEvent>> {
         appRpc.state.value = KiloAppStateDto(KiloAppStatusDto.READY, config = ConfigDto(model = "kilo/gpt-5"))
         projectRpc.state.value = workspaceReady()
-        val m = controller()
+        val m = controller(echo = echo)
         val events = collect(m)
         val modelEvents = collectModelEvents(m)
         flush()
