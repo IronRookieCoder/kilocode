@@ -14,6 +14,7 @@
         <module name="kilo.jetbrains.frontend"/>
         <module name="kilo.jetbrains.backend"/>
         <module name="kilo.jetbrains.cs-cloud"/>
+        <module name="kilo.jetbrains.cs-cloud-mcp" loading="optional"/>
     </content>
 
 </idea-plugin>

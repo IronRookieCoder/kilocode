@@ -3,6 +3,7 @@ package ai.kilocode.backend.app
 import ai.kilocode.backend.cli.CliServer
 import ai.kilocode.backend.cli.KiloBackendCliManager
 import ai.kilocode.backend.cli.KiloCliDataParser
+import ai.kilocode.backend.cli.KiloProps
 import ai.kilocode.backend.migration.KiloBackendLegacyMigrationStoreService
 import ai.kilocode.backend.migration.LegacyMigrationDetection
 import ai.kilocode.backend.migration.LegacyMigrationStatus
@@ -87,6 +88,7 @@ class KiloBackendAppService private constructor(
   private val log: KiloLog,
   private val loadTimeoutMs: Long,
   private val providers: List<KiloConnectionProvider>, // kilocode_change
+  private val runtime: Boolean, // kilocode_change
 ) : Disposable {
 
     /** IntelliJ service injection entry point. */
@@ -96,6 +98,7 @@ class KiloBackendAppService private constructor(
         KiloLog.create(KiloBackendAppService::class.java),
         APP_LOAD_TIMEOUT_MS,
         KiloConnectionProvider.EP_NAME.extensions.toList(), // kilocode_change
+        KiloProps.runtime(), // kilocode_change
     )
 
     companion object {
@@ -106,12 +109,13 @@ class KiloBackendAppService private constructor(
 
         /** Test factory — no IntelliJ deps needed. */
         internal fun create(
-          cs: CoroutineScope,
-          server: CliServer,
-        log: KiloLog,
-        loadTimeoutMs: Long = APP_LOAD_TIMEOUT_MS,
+            cs: CoroutineScope,
+            server: CliServer,
+            log: KiloLog,
+            loadTimeoutMs: Long = APP_LOAD_TIMEOUT_MS,
             providers: List<KiloConnectionProvider> = emptyList(), // kilocode_change
-        ) = KiloBackendAppService(cs, server, log, loadTimeoutMs, providers)
+            runtime: Boolean = true, // kilocode_change
+        ) = KiloBackendAppService(cs, server, log, loadTimeoutMs, providers, runtime)
 
         // kilocode_change start
         internal fun create(
@@ -120,7 +124,7 @@ class KiloBackendAppService private constructor(
             log: KiloLog,
             provider: KiloConnectionProvider,
             loadTimeoutMs: Long = APP_LOAD_TIMEOUT_MS,
-        ) = KiloBackendAppService(cs, server, log, loadTimeoutMs, listOf(provider))
+        ) = KiloBackendAppService(cs, server, log, loadTimeoutMs, listOf(provider), true)
         // kilocode_change end
     }
 
@@ -130,7 +134,10 @@ class KiloBackendAppService private constructor(
         .distinctBy { it.id }
         .sortedBy { it.id }
         .firstOrNull()
-        ?: KiloCliConnectionProvider(server)
+        ?: run {
+            check(runtime) { "Kilo CLI runtime is disabled and no connection provider is available" }
+            KiloCliConnectionProvider(server)
+        }
     private val connection = connectionProvider.create(cs, reconnect = {
         cs.launch { reconnect() }
     }, log = log, timeout = loadTimeoutMs)

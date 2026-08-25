@@ -2,7 +2,6 @@
     <dependencies>
         <module name="kilo.jetbrains.backend"/>
         <module name="kilo.jetbrains.shared"/>
-        <plugin id="com.intellij.mcpServer" optional="true" config-file="kilo.jetbrains.cs-cloud-mcp.xml"/>
     </dependencies>
 
     <extensionPoints>

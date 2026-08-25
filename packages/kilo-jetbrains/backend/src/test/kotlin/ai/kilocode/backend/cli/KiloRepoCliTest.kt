@@ -87,6 +87,13 @@ class KiloRepoCliTest {
         assertEquals(false, KiloProps.pinned(Properties().apply { setProperty("cli.pinned", "false") }))
     }
 
+    @Test
+    fun `runtime defaults true unless explicitly false`() {
+        assertEquals(true, KiloProps.runtime(Properties()))
+        assertEquals(true, KiloProps.runtime(Properties().apply { setProperty("cli.runtime", "true") }))
+        assertEquals(false, KiloProps.runtime(Properties().apply { setProperty("cli.runtime", "false") }))
+    }
+
     private fun archive(script: String = "#!/bin/sh\n", entry: String = "bin/${KiloCliPlatform.exe()}"): ByteArray {
         val out = ByteArrayOutputStream()
         ZipOutputStream(out).use { zip ->

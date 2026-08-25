@@ -84,6 +84,7 @@ fun gitTag(): String? {
 
 val release = providers.gradleProperty("production").map { it.toBoolean() }.orElse(false).get()
 val pinned = providers.gradleProperty("kilo.cli.pinned").map { it.trim().toBoolean() }.orElse(true).get()
+val runtime = providers.gradleProperty("kilo.cli.runtime").map { it.trim().toBoolean() }.orElse(true).get()
 val override = providers.gradleProperty("kilo.version").orNull?.trim()?.takeIf { it.isNotEmpty() }
 val prop = providers.gradleProperty("kilo.jetbrains.version").orNull?.trim()?.takeIf { it.isNotEmpty() }
 val tag = gitTag()?.removePrefix("jetbrains/v")
@@ -93,6 +94,9 @@ val ver = override?.let(::checked) ?: prop?.let(::checked) ?: if (release) check
 
 if (release && !pinned) error(
     "kilo.cli.pinned=false is a dev-only mode and cannot be released. Set kilo.cli.pinned=true before a production/publish build."
+)
+if (release && !runtime) error(
+    "kilo.cli.runtime=false is a dev-only mode and cannot be released. Set kilo.cli.runtime=true before a production/publish build."
 )
 
 val channel = providers.gradleProperty("kilo.channel").map { it.trim() }.orElse("default")
@@ -175,6 +179,7 @@ dependencies {
         pluginModule(implementation(project(":frontend")))
         pluginModule(implementation(project(":backend")))
         pluginModule(implementation(project(":cs-cloud")))
+        pluginModule(implementation(project(":cs-cloud-mcp")))
         testFramework(TestFrameworkType.Platform)
     }
 }
@@ -256,9 +261,11 @@ tasks.register("typecheck") {
         ":frontend:compileKotlin",
         ":backend:compileKotlin",
         ":cs-cloud:compileKotlin",
+        ":cs-cloud-mcp:compileKotlin",
         ":frontend:compileTestKotlin",
         ":backend:compileTestKotlin",
         ":cs-cloud:compileTestKotlin",
+        ":cs-cloud-mcp:compileTestKotlin",
     )
 }
 

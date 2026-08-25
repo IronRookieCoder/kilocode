@@ -21,6 +21,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertSame
 import kotlin.test.assertNull
+import kotlin.test.assertFailsWith
 
 class KiloConnectionProviderTest {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -71,6 +72,21 @@ class KiloConnectionProviderTest {
 
         assertSame(capabilities, app.sessionCapabilities)
         app.dispose()
+    }
+
+    @Test
+    fun `disabled cli runtime requires a connection provider`() {
+        val error = assertFailsWith<IllegalStateException> {
+            KiloBackendAppService.create(
+                scope,
+                TestServer,
+                TestLog(),
+                providers = emptyList(),
+                runtime = false,
+            )
+        }
+
+        assertEquals("Kilo CLI runtime is disabled and no connection provider is available", error.message)
     }
 
     private class TestProvider(

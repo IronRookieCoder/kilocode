@@ -12,7 +12,6 @@ dependencies {
         intellijIdea(libs.versions.intellij.platform)
         bundledModule("intellij.platform.kernel.backend")
         bundledModule("intellij.platform.backend")
-        bundledPlugin("com.intellij.mcpServer")
     }
 
     implementation(project(":backend"))

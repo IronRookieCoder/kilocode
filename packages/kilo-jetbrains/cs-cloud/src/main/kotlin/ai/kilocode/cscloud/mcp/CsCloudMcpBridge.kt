@@ -7,6 +7,7 @@ import ai.kilocode.cscloud.CsCloudEndpoint
 import ai.kilocode.log.KiloLog
 import com.intellij.openapi.project.ProjectManager
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.awaitCancellation
@@ -30,6 +31,23 @@ import java.nio.file.Path
 import java.security.MessageDigest
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
+
+internal suspend fun runLease(
+    ready: CompletableDeferred<IdeMcpTransport>,
+    label: String,
+    log: KiloLog,
+    block: suspend () -> Unit,
+) {
+    try {
+        block()
+    } catch (error: CancellationException) {
+        if (!ready.isCompleted) ready.completeExceptionally(error)
+        throw error
+    } catch (error: Throwable) {
+        if (!ready.isCompleted) ready.completeExceptionally(error)
+        log.warn(label, error)
+    }
+}
 
 class CsCloudMcpBridge(
     private val scope: CoroutineScope,
@@ -59,14 +77,11 @@ class CsCloudMcpBridge(
         val generation = UUID.randomUUID().toString()
         val ready = CompletableDeferred<IdeMcpTransport>()
         val job = scope.launch {
-            try {
+            runLease(ready, "IDE MCP lease failed conversation=${hash(id)} generation=${hash(generation)}", log) {
                 source.open(tools) { transport ->
                     ready.complete(transport)
                     awaitCancellation()
                 }
-            } catch (error: Throwable) {
-                if (!ready.isCompleted) ready.completeExceptionally(error)
-                log.warn("IDE MCP lease failed conversation=${hash(id)} generation=${hash(generation)}", error)
             }
         }
         val transport = runCatching { withTimeout(30_000) { ready.await() } }.getOrElse {

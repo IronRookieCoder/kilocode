@@ -24,7 +24,10 @@ val generatedChecksums = layout.buildDirectory.dir("generated/kilo-cli-checksums
 val pinned = providers.gradleProperty("kilo.cli.pinned").map { it.trim().toBoolean() }.orElse(true)
 val repoCli = pinned.map { !it }
 val bundled = providers.gradleProperty("kilo.cli.bundled").map { it.trim().toBoolean() }.orElse(false)
-val downloadsCli = repoCli.zip(bundled) { repo, bundle -> !repo && !bundle }
+val runtime = providers.gradleProperty("kilo.cli.runtime").map { it.trim().toBoolean() }.orElse(true)
+val downloadsCli = runtime.zip(repoCli.zip(bundled) { repo, bundle -> !repo && !bundle }) { enabled, download ->
+    enabled && download
+}
 val repoRootDir = rootProject.layout.projectDirectory.dir("../opencode")
 val local = rootProject.layout.projectDirectory.file(".gradle/kilo-cli-pin.properties")
 val bunPathProvider = providers.fileContents(local).asText.map { text ->
@@ -43,13 +46,16 @@ sourceSets {
     main {
         resources.srcDir(generatedProps)
         if (downloadsCli.get()) resources.srcDir(generatedChecksums)
-        if (repoCli.get() || bundled.get()) resources.srcDir(generatedCli)
+        if (runtime.get() && (repoCli.get() || bundled.get())) resources.srcDir(generatedCli)
         kotlin.srcDir(generatedApi)
     }
 }
 
 if (repoCli.get() && bundled.get()) {
     error("kilo.cli.bundled=true requires kilo.cli.pinned=true; do not combine release CLI bundling with local repo CLI mode.")
+}
+if (!runtime.get() && bundled.get()) {
+    error("kilo.cli.bundled=true requires kilo.cli.runtime=true; do not bundle a disabled CLI runtime.")
 }
 
 val writeKiloProperties by tasks.registering(WriteProperties::class) {
@@ -58,6 +64,7 @@ val writeKiloProperties by tasks.registering(WriteProperties::class) {
     destinationFile.set(out)
     property("cli.version", pinnedCliVersion)
     property("cli.pinned", pinned.map { it.toString() })
+    property("cli.runtime", runtime.map { it.toString() })
 }
 
 val generateOpenApiSpec by tasks.registering(GenerateOpenApiSpecTask::class) {
@@ -180,16 +187,16 @@ val fixGeneratedApi by tasks.registering(FixGeneratedApiTask::class) {
 tasks.named("compileKotlin") {
     dependsOn(fixGeneratedApi, writeKiloProperties)
     if (downloadsCli.get()) dependsOn(writeCliChecksums)
-    if (repoCli.get()) dependsOn(stageRepoCli)
-    if (bundled.get()) dependsOn(stageBundledCli)
+    if (runtime.get() && repoCli.get()) dependsOn(stageRepoCli)
+    if (runtime.get() && bundled.get()) dependsOn(stageBundledCli)
     inputs.dir(generatedApi)
 }
 
 tasks.named("processResources") {
     dependsOn(writeKiloProperties)
     if (downloadsCli.get()) dependsOn(writeCliChecksums)
-    if (repoCli.get()) dependsOn(stageRepoCli)
-    if (bundled.get()) dependsOn(stageBundledCli)
+    if (runtime.get() && repoCli.get()) dependsOn(stageRepoCli)
+    if (runtime.get() && bundled.get()) dependsOn(stageBundledCli)
 }
 
 tasks.named("compileTestKotlin") {

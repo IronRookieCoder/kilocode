@@ -4,6 +4,7 @@ include("shared")
 include("frontend")
 include("backend")
 include("cs-cloud")
+include("cs-cloud-mcp")
 
 pluginManagement {
     includeBuild("build-tasks")

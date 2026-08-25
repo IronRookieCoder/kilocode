@@ -17,4 +17,8 @@ object KiloProps {
     fun pinned(): Boolean = pinned(props)
 
     internal fun pinned(props: Properties): Boolean = props.getProperty("cli.pinned")?.toBoolean() ?: true
+
+    fun runtime(): Boolean = runtime(props)
+
+    internal fun runtime(props: Properties): Boolean = props.getProperty("cli.runtime")?.toBoolean() ?: true
 }

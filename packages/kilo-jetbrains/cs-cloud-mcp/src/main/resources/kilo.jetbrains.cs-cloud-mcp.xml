@@ -1,4 +1,9 @@
 <idea-plugin>
+    <dependencies>
+        <module name="kilo.jetbrains.cs-cloud"/>
+        <plugin id="com.intellij.mcpServer"/>
+    </dependencies>
+
     <extensions defaultExtensionNs="ai.kilocode.jetbrains">
         <ideMcpSessionFactory implementation="ai.kilocode.cscloud.mcp.JetBrainsMcpSessionFactory"/>
     </extensions>
