@@ -13,5 +13,6 @@
         <module name="kilo.jetbrains.shared" loading="required"/>
         <module name="kilo.jetbrains.frontend"/>
         <module name="kilo.jetbrains.backend"/>
+        <module name="kilo.jetbrains.cs-cloud"/>
     </content>
 </idea-plugin>
