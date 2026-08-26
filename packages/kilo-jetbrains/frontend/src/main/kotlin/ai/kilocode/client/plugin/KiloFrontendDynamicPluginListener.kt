@@ -29,7 +29,7 @@ object KiloFrontendUnloadCleanup {
         runEdt {
             ProjectManager.getInstance().openProjects.forEach { project ->
                 if (project.isDisposed) return@forEach
-                ToolWindowManager.getInstance(project).getToolWindow("Kilo Code")
+                ToolWindowManager.getInstance(project).getToolWindow("Costrict")
                     ?.contentManager
                     ?.removeAllContents(true)
                 val editors = FileEditorManager.getInstance(project).openFiles

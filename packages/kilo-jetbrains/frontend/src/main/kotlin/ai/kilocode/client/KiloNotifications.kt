@@ -9,7 +9,7 @@ import com.intellij.openapi.project.Project
 import com.intellij.openapi.project.ProjectManager
 
 object KiloNotifications {
-    private const val GROUP = "Kilo Code"
+    private const val GROUP = "Costrict"
 
     fun error(title: String, content: String? = null) {
         val project = ProjectManager.getInstance().openProjects.firstOrNull { !it.isDefault }

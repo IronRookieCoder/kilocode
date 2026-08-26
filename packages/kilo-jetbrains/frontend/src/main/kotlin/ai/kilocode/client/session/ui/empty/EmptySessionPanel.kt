@@ -74,7 +74,7 @@ class EmptySessionPanel(
     private val feedback = EmptySessionFeedback(browse)
 
     private val logo = JBLabel(
-        IconLoader.getIcon("/icons/kilo-content.svg", EmptySessionPanel::class.java),
+        IconLoader.getIcon("/icons/costrict-content.svg", EmptySessionPanel::class.java),
     ).apply {
         horizontalAlignment = JBLabel.CENTER
     }

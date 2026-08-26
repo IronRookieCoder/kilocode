@@ -283,7 +283,7 @@ class ModelsSettingsUiTest : BasePlatformTestCase() {
         rpc.configUpdateGate?.complete(Unit)
 
         flushUntil {
-            notes.any { it.groupId == "Kilo Code" && it.type == NotificationType.ERROR }
+            notes.any { it.groupId == "Costrict" && it.type == NotificationType.ERROR }
         }
         assertEquals(1, rpc.configUpdateAttempts)
         assertTrue(notes.any { it.title == "Failed to save model settings" })
@@ -305,21 +305,21 @@ class ModelsSettingsUiTest : BasePlatformTestCase() {
         workspaceRpc.models = ModelsWorkspaceDto(providers = providers())
         edt { ui = ModelsSettingsUi(uiScope, app, workspaces, directory = "/test") }
         val panel = requireUi()
-        flushUntil { text(panel).contains("Old") && text(panel).contains("Sign in to Kilo Code") }
+        flushUntil { text(panel).contains("Old") && text(panel).contains("Sign in to Costrict") }
         val banner = edt { components(panel.top).filterIsInstance<InlineBanner>().single() }
         rpc.configUpdateGate = CompletableDeferred()
 
         edt {
             select(panel, "new")
             panel.applyDraft()
-            assertTrue(text(panel).contains("Sign in to Kilo Code"))
+            assertTrue(text(panel).contains("Sign in to Costrict"))
             assertSame(banner, components(panel.top).filterIsInstance<InlineBanner>().single())
         }
 
         rpc.configUpdateGate?.complete(Unit)
         flushUntil { rpc.configPatches.isNotEmpty() }
         edt {
-            assertTrue(text(panel).contains("Sign in to Kilo Code"))
+            assertTrue(text(panel).contains("Sign in to Costrict"))
             assertSame(banner, components(panel.top).filterIsInstance<InlineBanner>().single())
         }
     }

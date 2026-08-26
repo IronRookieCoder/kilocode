@@ -4,7 +4,7 @@ import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 
 // ---------------------------------------------------------------------------
-// Legacy input models (data shapes from legacy Kilo Code v5.x)
+// Legacy input models (data shapes from legacy Costrict v5.x)
 // ---------------------------------------------------------------------------
 
 data class LegacyProviderProfiles(

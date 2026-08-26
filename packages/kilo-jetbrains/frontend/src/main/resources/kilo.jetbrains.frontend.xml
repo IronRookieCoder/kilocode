@@ -13,14 +13,14 @@
         <applicationService serviceImplementation="ai.kilocode.client.autocomplete.KiloAutocompleteSettingsService"/>
         <customPasteProvider implementation="ai.kilocode.client.session.ui.prompt.PromptAttachmentPasteProvider"/>
 
-        <notificationGroup id="Kilo Code"
+        <notificationGroup id="Costrict"
                            displayType="BALLOON"
                            bundle="messages.KiloBundle"
                            key="notification.group.kilo"/>
 
-        <toolWindow id="Kilo Code"
+        <toolWindow id="Costrict"
                     anchor="left"
-                    icon="/icons/kilo.svg"
+                    icon="/icons/costrict.svg"
                     factoryClass="ai.kilocode.client.KiloToolWindowFactory"/>
 
         <fileEditorProvider id="KiloVfsEditor" implementation="ai.kilocode.client.vfs.KiloFileEditorProvider"/>

@@ -76,9 +76,9 @@ internal object AdvancedLogActions {
     private fun notify(type: NotificationType, title: String, content: String? = null) {
         ApplicationManager.getApplication().invokeLater {
             val notification = NotificationGroupManager.getInstance()
-                .getNotificationGroup("Kilo Code")
+                .getNotificationGroup("Costrict")
                 ?.createNotification(title, content.orEmpty(), type)
-                ?: Notification("Kilo Code", title, content.orEmpty(), type)
+                ?: Notification("Costrict", title, content.orEmpty(), type)
             notification.notify(ProjectManager.getInstance().openProjects.firstOrNull { !it.isDefault })
         }
     }

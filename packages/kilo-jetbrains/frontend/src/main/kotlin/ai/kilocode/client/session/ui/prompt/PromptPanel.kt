@@ -924,7 +924,7 @@ class PromptPanel(
     private fun elapsedMs(start: Long) = (System.nanoTime() - start) / 1_000_000
 
     private fun notify(text: String) {
-        com.intellij.notification.Notification("Kilo Code", text, com.intellij.notification.NotificationType.WARNING).notify(project)
+        com.intellij.notification.Notification("Costrict", text, com.intellij.notification.NotificationType.WARNING).notify(project)
     }
 
     @RequiresEdt
