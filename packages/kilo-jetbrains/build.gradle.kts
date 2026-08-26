@@ -174,6 +174,7 @@ dependencies {
         pluginModule(implementation(project(":shared")))
         pluginModule(implementation(project(":frontend")))
         pluginModule(implementation(project(":backend")))
+        pluginModule(implementation(project(":cs-cloud")))
         testFramework(TestFrameworkType.Platform)
     }
 }
@@ -254,8 +255,10 @@ tasks.register("typecheck") {
         ":shared:compileKotlin",
         ":frontend:compileKotlin",
         ":backend:compileKotlin",
+        ":cs-cloud:compileKotlin",
         ":frontend:compileTestKotlin",
         ":backend:compileTestKotlin",
+        ":cs-cloud:compileTestKotlin",
     )
 }
 
