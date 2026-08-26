@@ -25,6 +25,7 @@ import kotlin.io.path.createTempDirectory
 import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertFailsWith
 import kotlin.test.assertIs
 import kotlin.test.assertNotNull
@@ -42,6 +43,14 @@ class KiloSessionRpcApiImplTest {
         apps.clear()
         scope.cancel()
         mock.close()
+    }
+
+    @Test
+    fun `unsupported IDE capability does not block prompts`() {
+        assertFalse(capabilityRequired("ide_capability_unsupported"))
+        assertFalse(capabilityRequired("tools_disabled"))
+        assertTrue(capabilityRequired("project_not_open"))
+        assertTrue(capabilityRequired("ide_capability_bind_failed"))
     }
 
     private fun app(log: TestLog): KiloBackendAppService {

@@ -144,7 +144,7 @@ class KiloSessionRpcApiImpl internal constructor(
     override suspend fun prompt(id: String, directory: String, prompt: PromptDto) {
         app.requireReady()
         when (val capability = app.sessionCapabilities?.ensure(id, directory)) {
-            is CapabilityResult.Unavailable -> if (capability.reason != "tools_disabled") throw IllegalStateException(capability.reason)
+            is CapabilityResult.Unavailable -> if (capabilityRequired(capability.reason)) throw IllegalStateException(capability.reason) // kilocode_change
             else -> Unit
         }
         log.info("prompt RPC: session=$id, dir=$directory, parts=${prompt.parts.size}")
@@ -331,3 +331,11 @@ class KiloSessionRpcApiImpl internal constructor(
         return block()
     }
 }
+
+// kilocode_change start
+/** IDE MCP is optional; only hard capability failures should reject a prompt. */
+internal fun capabilityRequired(reason: String): Boolean = reason !in setOf(
+    "tools_disabled",
+    "ide_capability_unsupported",
+)
+// kilocode_change end
