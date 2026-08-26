@@ -35,13 +35,12 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.onCompletion
 import kotlinx.coroutines.flow.onStart
+import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
-import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
-import okhttp3.Request
 import ai.kilocode.backend.diff.DiffFullReconstruct
 import java.nio.file.Files
 import java.nio.file.Path
@@ -168,12 +167,8 @@ class KiloSessionRpcApiImpl internal constructor(
     override suspend fun diff(id: String, directory: String): List<DiffFileDto> = ready {
         // GET /session/:id/diff returns the cumulative, deduplicated, unquoted snapshot diff. Prefer it
         // over concatenating per-message summaries (which duplicate files per turn and skip unquoting).
-        val api = app.api ?: throw IllegalStateException("Kilo API is unavailable")
-        withContext(Dispatchers.IO) { api.sessionDiff(sessionID = id, directory = directory) }
-            .mapNotNull { file ->
-                val path = file.file ?: return@mapNotNull null
-                DiffFileDto(path, file.additions.toInt(), file.deletions.toInt(), file.patch, file.status?.value)
-            }
+        val raw = app.transport().use { it.call("GET", "/session/$id/diff?directory=" + enc(directory)) }
+        Json.decodeFromString(ListSerializer(DiffFileDto.serializer()), raw)
     }
 
     override suspend fun diffSides(sessionId: String?, directory: String, file: DiffFileDto, messageId: String?): DiffFileDto? {
@@ -213,35 +208,23 @@ class KiloSessionRpcApiImpl internal constructor(
         return null
     }
 
-    // Ask the CLI for full before/after via GET /session/:id/diff?full=true&file=...; returns null when
-    // the pinned CLI lacks full/file support (it omits before/after) so the caller falls back locally.
+    // Ask the backend for full before/after via GET /session/:id/diff?full=true&file=...; returns null when
+    // the backend lacks full/file support (it omits before/after) so the caller falls back locally.
     private suspend fun authoritative(sessionId: String, directory: String, file: DiffFileDto, messageId: String?): DiffFileDto? {
-        val api = app.api ?: return null
         return withContext(Dispatchers.IO) {
             runCatching {
-                val url = (api.baseUrl.trimEnd('/') + "/").toHttpUrlOrNull()
-                    ?.newBuilder()
-                    ?.addPathSegment("session")
-                    ?.addPathSegment(sessionId)
-                    ?.addPathSegment("diff")
-                    ?.addQueryParameter("directory", directory)
-                    ?.addQueryParameter("full", "true")
-                    ?.addQueryParameter("file", file.file)
-                    ?.apply { if (!messageId.isNullOrBlank()) addQueryParameter("messageID", messageId) }
-                    ?.build()
-                    ?: return@runCatching null
-                api.client.newCall(Request.Builder().url(url).get().build()).execute().use { response ->
-                    if (!response.isSuccessful) {
-                        log.info("diffSides authoritative file=${file.file} http=${response.code} messageID=${messageId ?: "none"}")
-                        return@runCatching null
-                    }
-                    val arr = Json.parseToJsonElement(response.body?.string().orEmpty()).jsonArray
-                    val item = arr.firstOrNull { it.jsonObject["file"]?.jsonPrimitive?.contentOrNull == file.file }?.jsonObject
-                    val before = item?.get("before")?.jsonPrimitive?.contentOrNull
-                    val after = item?.get("after")?.jsonPrimitive?.contentOrNull
-                    log.info("diffSides authoritative file=${file.file} items=${arr.size} matched=${item != null} before=${before?.length ?: 0} after=${after?.length ?: 0}")
-                    if (before != null && after != null) file.copy(before = before, after = after) else null
+                val query = buildString {
+                    append("directory=").append(enc(directory))
+                    append("&full=true&file=").append(enc(file.file))
+                    if (!messageId.isNullOrBlank()) append("&messageID=").append(enc(messageId))
                 }
+                val raw = app.transport().use { it.call("GET", "/session/$sessionId/diff?$query") }
+                val arr = Json.parseToJsonElement(raw).jsonArray
+                val item = arr.firstOrNull { it.jsonObject["file"]?.jsonPrimitive?.contentOrNull == file.file }?.jsonObject
+                val before = item?.get("before")?.jsonPrimitive?.contentOrNull
+                val after = item?.get("after")?.jsonPrimitive?.contentOrNull
+                log.info("diffSides authoritative file=${file.file} items=${arr.size} matched=${item != null} before=${before?.length ?: 0} after=${after?.length ?: 0}")
+                if (before != null && after != null) file.copy(before = before, after = after) else null
             }.onFailure { log.info("diffSides authoritative file=${file.file} error=${it.message}") }.getOrNull()
         }
     }
@@ -310,6 +293,8 @@ class KiloSessionRpcApiImpl internal constructor(
 
     override suspend fun pendingQuestions(directory: String): List<QuestionRequestDto> =
         ready { chat.pendingQuestions(directory) }
+
+    private fun enc(value: String): String = java.net.URLEncoder.encode(value, "UTF-8")
 
     private suspend fun <T> ready(block: suspend () -> T): T {
         app.requireReady()

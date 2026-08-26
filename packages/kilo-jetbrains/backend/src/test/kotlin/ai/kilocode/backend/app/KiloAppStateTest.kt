@@ -19,7 +19,6 @@ class KiloAppStateTest {
     fun `default LoadProgress has all fields unloaded`() {
         val progress = LoadProgress()
         assertFalse(progress.config)
-        assertFalse(progress.notifications)
         assertEquals(ProfileResult.PENDING, progress.profile)
     }
 
@@ -28,18 +27,16 @@ class KiloAppStateTest {
         val p1 = LoadProgress()
         val p2 = p1.copy(config = true)
         assertTrue(p2.config)
-        assertFalse(p2.notifications)
+        assertEquals(ProfileResult.PENDING, p2.profile)
 
-        val p3 = p2.copy(notifications = true, profile = ProfileResult.LOADED)
+        val p3 = p2.copy(profile = ProfileResult.LOADED)
         assertTrue(p3.config)
-        assertTrue(p3.notifications)
         assertEquals(ProfileResult.LOADED, p3.profile)
     }
 
     @Test
     fun `KiloAppState sealed subtypes are distinct`() {
         assertIs<KiloAppState.Disconnected>(KiloAppState.Disconnected)
-        assertIs<KiloAppState.Downloading>(KiloAppState.Downloading(42, "1.2.3", "darwin-arm64"))
         assertIs<KiloAppState.Connecting>(KiloAppState.Connecting)
         assertIs<KiloAppState.Loading>(KiloAppState.Loading(LoadProgress()))
         assertIs<KiloAppState.Error>(KiloAppState.Error("fail"))
@@ -49,7 +46,7 @@ class KiloAppStateTest {
     fun `KiloAppState Error with errors list`() {
         val errors = listOf(
           LoadError("config", status = 500, detail = "server error"),
-          LoadError("notifications", detail = "timeout"),
+          LoadError("profile", detail = "timeout"),
         )
         val state = KiloAppState.Error("Failed", errors = errors)
         assertEquals(2, state.errors.size)
@@ -62,10 +59,10 @@ class KiloAppStateTest {
     fun `AppData construction`() {
         val cfg = ConfigDto(model = "test")
         val data =
-          AppData(profile = null, config = cfg, notifications = emptyList())
+          AppData(profile = null, config = cfg, warnings = emptyList())
         assertNull(data.profile)
         assertEquals(cfg, data.config)
-        assertTrue(data.notifications.isEmpty())
+        assertTrue(data.warnings.isEmpty())
     }
 
     @Test
@@ -82,7 +79,7 @@ class KiloAppStateTest {
 
     @Test
     fun `LoadError with minimal fields`() {
-        val err = LoadError(resource = "notifications")
+        val err = LoadError(resource = "profile")
         assertNull(err.status)
         assertNull(err.detail)
     }

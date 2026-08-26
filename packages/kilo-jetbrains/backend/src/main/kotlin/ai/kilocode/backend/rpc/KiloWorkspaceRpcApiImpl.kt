@@ -3,15 +3,14 @@ package ai.kilocode.backend.rpc
 import ai.kilocode.backend.app.KiloAppState
 import ai.kilocode.backend.app.KiloBackendAppService
 import ai.kilocode.backend.app.LoadError
-import ai.kilocode.backend.cli.KiloCliDataParser
-import ai.kilocode.backend.cli.buildKiloCliEnv
-import ai.kilocode.backend.cli.KiloCliConfigPath
+import ai.kilocode.backend.migration.LegacyMigrationPaths
+import ai.kilocode.backend.migration.migrationEnv
 import ai.kilocode.backend.workspace.AgentData
 import ai.kilocode.backend.workspace.AgentInfo
 import ai.kilocode.backend.workspace.KiloBackendWorkspaceManager
 import ai.kilocode.backend.workspace.KiloWorkspaceState
+import ai.kilocode.backend.workspace.ProviderWire
 import ai.kilocode.log.KiloLog
-import ai.kilocode.jetbrains.api.model.Agent
 import ai.kilocode.rpc.KiloWorkspaceRpcApi
 import ai.kilocode.rpc.isManagedWorktreeStorage
 import ai.kilocode.rpc.dto.ConfigTargetDto
@@ -50,7 +49,6 @@ import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.json.Json
-import okhttp3.Request
 import java.net.URI
 import java.net.URLDecoder
 import java.net.URLEncoder
@@ -136,23 +134,13 @@ class KiloWorkspaceRpcApiImpl internal constructor(
 
     override suspend fun models(directory: String): ModelsWorkspaceDto {
         app.requireReady()
-        val api = app.api ?: throw IllegalStateException("Kilo API is unavailable")
-        val http = app.http ?: throw IllegalStateException("Kilo HTTP client is unavailable")
         val errors = mutableListOf<LoadError>()
 
         val prov = try {
             val raw = withContext(Dispatchers.IO) {
-                val request = Request.Builder()
-                    .url("http://127.0.0.1:${app.port}/provider?directory=${encode(directory)}")
-                    .get()
-                    .build()
-                http.newCall(request).execute().use { response ->
-                    val body = response.body?.string().orEmpty()
-                    if (!response.isSuccessful) throw RuntimeException("HTTP ${response.code}: $body")
-                    body
-                }
+                app.transport().use { it.call("GET", "/provider?directory=${encode(directory)}") }
             }
-            KiloCliDataParser.parseProviders(raw)
+            ProviderWire.parse(raw)
         } catch (e: Exception) {
             LOG.warn("Models settings providers fetch failed for $directory: ${e.message}", e)
             errors.add(LoadError(resource = "providers", detail = e.message))
@@ -160,12 +148,14 @@ class KiloWorkspaceRpcApiImpl internal constructor(
         }
 
         val agents = try {
-            val response = api.appAgents(directory = directory)
-            val mapped = response.map(::agent)
-            val visible = response.filter { it.mode != Agent.Mode.SUBAGENT && it.hidden != true }
+            val raw = withContext(Dispatchers.IO) {
+                app.transport().use { it.call("GET", "/app/agents?directory=${encode(directory)}") }
+            }
+            val all = JSON.decodeFromString<List<AgentInfo>>(raw)
+            val visible = all.filter { it.mode != "subagent" && it.hidden != true }
             AgentData(
-                agents = visible.map(::agent),
-                all = mapped,
+                agents = visible,
+                all = all,
                 default = visible.firstOrNull()?.name ?: "code",
             )
         } catch (e: Exception) {
@@ -228,16 +218,9 @@ class KiloWorkspaceRpcApiImpl internal constructor(
         limit: Int,
         dir: Boolean,
     ): List<WorkspaceFileDto> {
-        val http = app.http ?: throw IllegalStateException("Kilo HTTP client is unavailable")
         val raw = withContext(Dispatchers.IO) {
-            val request = Request.Builder()
-                .url("http://127.0.0.1:${app.port}/find/file?directory=${encode(directory)}&query=${encode(query)}&type=$type&limit=$limit")
-                .get()
-                .build()
-            http.newCall(request).execute().use { response ->
-                val body = response.body?.string().orEmpty()
-                if (!response.isSuccessful) throw RuntimeException("HTTP ${response.code}: $body")
-                body
+            app.transport().use {
+                it.call("GET", "/find/file?directory=${encode(directory)}&query=${encode(query)}&type=$type&limit=$limit")
             }
         }
         return JSON.decodeFromString<List<String>>(raw)
@@ -350,8 +333,8 @@ class KiloWorkspaceRpcApiImpl internal constructor(
     }
 
     private fun globalConfig(): Path {
-        val env = buildKiloCliEnv("config")
-        val root = KiloCliConfigPath.resolve(env).toPath().normalize()
+        val env = migrationEnv(LOG)
+        val root = LegacyMigrationPaths.resolve(env).toPath().normalize()
         return GLOBAL.asSequence()
             .map { root.resolve(it) }
             .firstOrNull { Files.exists(it) }
@@ -476,17 +459,6 @@ class KiloWorkspaceRpcApiImpl internal constructor(
             DiffFileDto(rel, 0, 0, "", "untracked")
         }
     }
-
-    private fun agent(a: Agent) = AgentInfo(
-        name = a.name,
-        displayName = a.displayName,
-        description = a.description,
-        mode = a.mode.value,
-        native = a.native,
-        hidden = a.hidden,
-        color = a.color,
-        deprecated = a.deprecated,
-    )
 
     // ------ mapping: domain model → DTO ------
 
