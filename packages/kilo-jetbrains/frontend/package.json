@@ -1,0 +1,13 @@
+{
+  "name": "@costrict/kilo-jetbrains-frontend",
+  "description": "Costrict JetBrains 插件前端：品牌标识与连接状态显示",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "exports": {
+    "./*": "./src/*.ts"
+  },
+  "scripts": {
+    "test": "node --test \"test/*.test.ts\""
+  }
+}

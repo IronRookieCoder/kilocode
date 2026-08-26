@@ -18,7 +18,7 @@ import com.intellij.util.ui.JBUI
 import javax.swing.JComponent
 
 /**
- * Root settings entry under Settings -> Tools -> Kilo Code.
+ * Root settings entry under Settings -> Tools -> Costrict.
  *
  * Displays a brief description and a link to the User Profile child page.
  * Child configurables are registered in XML (`kilo.jetbrains.frontend.xml`) as

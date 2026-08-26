@@ -154,7 +154,7 @@ RC builds are published to the `eap` channel. To get them in IntelliJ IDEA:
 https://plugins.jetbrains.com/plugins/list?channel=eap&pluginId=28350
 ```
 
-4. Search for **Kilo Code** in the Marketplace tab.
+4. Search for **Costrict** in the Marketplace tab.
 
 ## Manual Recovery
 

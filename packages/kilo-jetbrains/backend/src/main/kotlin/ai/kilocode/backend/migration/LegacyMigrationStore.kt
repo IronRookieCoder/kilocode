@@ -3,7 +3,7 @@ package ai.kilocode.backend.migration
 import kotlinx.serialization.json.JsonElement
 
 /**
- * Source adapter for legacy Kilo Code v5.x data.
+ * Source adapter for legacy Costrict v5.x data.
  *
  * Abstracts over VS Code SecretStorage, globalState, and filesystem access.
  * Callers supply raw content; this interface never reads VS Code storage directly.

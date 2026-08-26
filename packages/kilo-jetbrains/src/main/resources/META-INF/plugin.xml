@@ -1,6 +1,6 @@
 <idea-plugin>
-    <name>Kilo Code</name>
-    <vendor url="https://kilo.ai">Kilo Code</vendor>
+    <name>Costrict</name>
+    <vendor>Costrict</vendor>
 
     <description><![CDATA[
         Open Source AI coding agent that generates code from natural language, automates tasks,

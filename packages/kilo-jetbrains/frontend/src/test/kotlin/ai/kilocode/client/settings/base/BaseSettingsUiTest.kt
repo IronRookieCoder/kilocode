@@ -149,7 +149,7 @@ class BaseSettingsUiTest : BasePlatformTestCase() {
 
         edt { view.banner(true) }
 
-        edt { assertTrue(text(view).contains("Sign in to Kilo Code")) }
+        edt { assertTrue(text(view).contains("Sign in to Costrict")) }
     }
 
     fun `test login banner can be disabled`() {
@@ -157,7 +157,7 @@ class BaseSettingsUiTest : BasePlatformTestCase() {
 
         edt { view.banner(true) }
 
-        edt { assertFalse(text(view).contains("Sign in to Kilo Code")) }
+        edt { assertFalse(text(view).contains("Sign in to Costrict")) }
     }
 
     private fun create(

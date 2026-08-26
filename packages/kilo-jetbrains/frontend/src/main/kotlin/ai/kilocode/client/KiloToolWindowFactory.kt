@@ -40,7 +40,7 @@ import java.awt.ComponentOrientation
 import javax.swing.JPanel
 
 /**
- * Creates the Kilo Code tool window and delegates session content management.
+ * Creates the Costrict tool window and delegates session content management.
  *
  * Resolves the project directory through the backend (handles split-mode
  * where `project.basePath` is a synthetic frontend path) before creating
@@ -122,7 +122,7 @@ internal class KiloToolWindowSetupService(
             }
             agent.add(agentManagerPanel.component, BorderLayout.CENTER)
 
-            // Hide the "Kilo Code" id label in the header so only the content tabs remain.
+            // Hide the "Costrict" id label in the header so only the content tabs remain.
             toolWindow.component.putClientProperty(ToolWindowContentUi.HIDE_ID_LABEL, "true")
 
             val factory = ContentFactory.getInstance()
