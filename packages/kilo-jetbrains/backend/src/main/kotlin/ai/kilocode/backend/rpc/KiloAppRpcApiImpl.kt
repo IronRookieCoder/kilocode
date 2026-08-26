@@ -5,14 +5,9 @@ package ai.kilocode.backend.rpc
 import ai.kilocode.backend.app.KiloAppState
 import ai.kilocode.backend.app.KiloBackendAppService
 import ai.kilocode.backend.telemetry.KiloBackendTelemetry
-import ai.kilocode.backend.app.ConfigWarning
 import ai.kilocode.backend.app.LoadError
 import ai.kilocode.backend.app.LoadProgress
 import ai.kilocode.backend.app.ProfileResult
-import ai.kilocode.backend.cli.KiloCliPlatform
-import ai.kilocode.backend.cli.KiloProps
-import ai.kilocode.backend.cli.KiloRepoCli
-import ai.kilocode.jetbrains.api.model.KiloProfile200Response
 import ai.kilocode.log.KiloLog
 import ai.kilocode.log.LogConfig
 import ai.kilocode.rpc.dto.ConfigPatchDto
@@ -61,11 +56,11 @@ class KiloAppRpcApiImpl : KiloAppRpcApi {
 
     override suspend fun health(): HealthDto = app.health()
 
-    override suspend fun cliVersion(): String = KiloProps.cliVersion()
+    override suspend fun cliVersion(): String = "0.0.0" // transitional until cs-cloud connector supplies build info
 
-    override suspend fun cliPlatform(): String = KiloCliPlatform.current()
+    override suspend fun cliPlatform(): String = com.intellij.openapi.util.SystemInfo.OS_NAME
 
-    override suspend fun cliBundled(): Boolean = KiloRepoCli.available()
+    override suspend fun cliBundled(): Boolean = false
 
     override suspend fun retry() = app.retry()
 
@@ -113,19 +108,19 @@ class KiloAppRpcApiImpl : KiloAppRpcApi {
         LogFileDto(path.fileName.toString(), Files.readString(path))
     }
 
-    override suspend fun refreshProfile(): ProfileDto? = app.refreshProfile()?.let(::profileDto)
+    override suspend fun refreshProfile(): ProfileDto? = app.refreshProfile()
 
     override suspend fun startLogin(directory: String?): DeviceAuthDto = app.startLogin(directory)
 
-    override suspend fun completeLogin(directory: String?): ProfileDto? = app.completeLogin(directory)?.let(::profileDto)
+    override suspend fun completeLogin(directory: String?): ProfileDto? = app.completeLogin(directory)
 
     override suspend fun logout(): Boolean = app.logout()
 
     override suspend fun setOrganization(organizationId: String?): ProfileDto? =
-        app.setOrganization(organizationId)?.let(::profileDto)
+        app.setOrganization(organizationId)
 
     override suspend fun captureTelemetry(capture: TelemetryCaptureDto) {
-        service<KiloBackendTelemetry>().capture(app.http, app.port, capture.event, capture.properties)
+        service<KiloBackendTelemetry>().capture(app.transportFactory()?.create(), capture.event, capture.properties)
     }
 
     private fun dto(state: KiloAppState): KiloAppStateDto =
@@ -135,12 +130,6 @@ class KiloAppRpcApiImpl : KiloAppRpcApi {
 internal fun appStateDto(state: KiloAppState): KiloAppStateDto =
     when (state) {
         KiloAppState.Disconnected -> KiloAppStateDto(KiloAppStatusDto.DISCONNECTED)
-        is KiloAppState.Downloading -> KiloAppStateDto(
-            status = KiloAppStatusDto.DOWNLOADING,
-            downloadPercent = state.percent,
-            downloadVersion = state.version,
-            downloadPlatform = state.platform,
-        )
         KiloAppState.Connecting -> KiloAppStateDto(KiloAppStatusDto.CONNECTING)
         is KiloAppState.Loading -> KiloAppStateDto(
             status = KiloAppStatusDto.LOADING,
@@ -158,9 +147,9 @@ internal fun appStateDto(state: KiloAppState): KiloAppStateDto =
                 profile = if (state.data.profile != null) ProfileStatusDto.LOADED
                     else ProfileStatusDto.NOT_LOGGED_IN,
             ),
-            warnings = state.data.warnings.map(::warning),
+            warnings = state.data.warnings,
             config = state.data.config,
-            profile = state.data.profile?.let(::profileDto),
+            profile = state.data.profile,
         )
         is KiloAppState.Error -> KiloAppStateDto(
             status = KiloAppStatusDto.ERROR,
@@ -169,34 +158,10 @@ internal fun appStateDto(state: KiloAppState): KiloAppStateDto =
         )
     }
 
-internal fun profileDto(p: KiloProfile200Response): ProfileDto = ProfileDto(
-    email = p.profile.email,
-    name = p.profile.name,
-    organizations = p.profile.organizations.orEmpty().map { org ->
-        ProfileOrganizationDto(id = org.id, name = org.name, role = org.role)
-    },
-    // The pinned CLI release does not expose hasPersonalAccount yet, so default to
-    // showing the personal account. Flip back to p.profile.hasPersonalAccount once a
-    // CLI release ships the field.
-    hasPersonalAccount = true,
-    balance = p.balance?.balance?.let { ProfileBalanceDto(balance = it) },
-    kiloPass = p.kiloPass?.let {
-        val base = it.currentPeriodBaseCreditsUsd ?: return@let null
-        val usage = it.currentPeriodUsageUsd ?: return@let null
-        val bonus = it.currentPeriodBonusCreditsUsd ?: return@let null
-        ProfileKiloPassDto(
-            currentPeriodBaseCreditsUsd = base,
-            currentPeriodUsageUsd = usage,
-            currentPeriodBonusCreditsUsd = bonus,
-            nextBillingAt = it.nextBillingAt,
-        )
-    },
-    currentOrgId = p.currentOrgId,
-)
 
 private fun progress(p: LoadProgress) = LoadProgressDto(
     config = p.config,
-    notifications = p.notifications,
+    notifications = false,
     profile = when (p.profile) {
         ProfileResult.PENDING -> ProfileStatusDto.PENDING
         ProfileResult.LOADED -> ProfileStatusDto.LOADED
@@ -210,8 +175,3 @@ private fun error(e: LoadError) = LoadErrorDto(
     detail = e.detail,
 )
 
-private fun warning(w: ConfigWarning) = ConfigWarningDto(
-    path = w.path,
-    message = w.message,
-    detail = w.detail,
-)

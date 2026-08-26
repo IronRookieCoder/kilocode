@@ -1,20 +1,20 @@
 package ai.kilocode.backend.app
 
-import ai.kilocode.jetbrains.api.model.KiloNotifications200ResponseInner
-import ai.kilocode.jetbrains.api.model.KiloProfile200Response
 import ai.kilocode.backend.migration.LegacyMigrationDetection
 import ai.kilocode.rpc.dto.ConfigDto
+import ai.kilocode.rpc.dto.ConfigWarningDto
+import ai.kilocode.rpc.dto.ProfileDto
 
 /**
- * Full application lifecycle state, combining CLI transport connection
+ * Full application lifecycle state, combining backend connection
  * status with data-loading progress.
  *
- * [ConnectionState] stays internal to [KiloConnectionService] for the
- * transport layer. This sealed class is what the frontend observes.
+ * [ConnectionState][ai.kilocode.connection.ConnectionState] stays internal
+ * to the connection provider for the transport layer. This sealed class is
+ * what the frontend observes.
  */
 sealed class KiloAppState {
     data object Disconnected : KiloAppState()
-    data class Downloading(val percent: Int, val version: String, val platform: String) : KiloAppState()
     data object Connecting : KiloAppState()
     data class Loading(val progress: LoadProgress) : KiloAppState()
     data class MigrationRequired(val detection: LegacyMigrationDetection) : KiloAppState()
@@ -27,7 +27,6 @@ sealed class KiloAppState {
  */
 data class LoadProgress(
     val config: Boolean = false,
-    val notifications: Boolean = false,
     val profile: ProfileResult = ProfileResult.PENDING,
 )
 
@@ -43,19 +42,12 @@ data class LoadError(
     val detail: String? = null,
 )
 
-data class ConfigWarning(
-    val path: String,
-    val message: String,
-    val detail: String? = null,
-)
-
 /**
  * All global data that has been successfully loaded.
  * Present only in [KiloAppState.Ready].
  */
 data class AppData(
-    val profile: KiloProfile200Response?,
+    val profile: ProfileDto?,
     val config: ConfigDto,
-    val notifications: List<KiloNotifications200ResponseInner>,
-    val warnings: List<ConfigWarning> = emptyList(),
+    val warnings: List<ConfigWarningDto> = emptyList(),
 )
