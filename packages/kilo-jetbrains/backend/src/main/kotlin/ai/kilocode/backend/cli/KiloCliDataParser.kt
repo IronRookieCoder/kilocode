@@ -197,6 +197,12 @@ object KiloCliDataParser {
                 ChatEventDto.Error(sid, err)
             }
 
+            "session.result" -> {
+                val sid = props.str("sessionID") ?: return null
+                val isError = props["isError"]?.jsonPrimitive?.booleanOrNull == true
+                ChatEventDto.SessionResult(sid, isError, props.str("subtype"))
+            }
+
             "permission.asked" -> {
                 val sid = props.str("sessionID") ?: return null
                 val request = parsePermissionRequest(props) ?: return null

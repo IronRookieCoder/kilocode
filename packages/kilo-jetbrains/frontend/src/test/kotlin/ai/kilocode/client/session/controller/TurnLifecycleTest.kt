@@ -4,6 +4,7 @@ import ai.kilocode.client.plugin.KiloBundle
 import ai.kilocode.client.session.model.Outcome
 import ai.kilocode.client.session.model.OutcomeTone
 import ai.kilocode.client.session.model.SessionState
+import ai.kilocode.client.session.model.LoginKind
 import ai.kilocode.client.session.model.TurnOutcome
 import ai.kilocode.client.testing.FakeSessionRpcApi
 import ai.kilocode.rpc.dto.ChatEventDto
@@ -971,5 +972,128 @@ class TurnLifecycleTest : SessionControllerTestBase() {
         emit(ChatEventDto.MessageUpdated("ses_test", msg("a1", "ses_test", "assistant")), flush = false)
         emit(ChatEventDto.MessageUpdated("ses_test", msg("u2", "ses_test", "user")), flush = false)
         emit(ChatEventDto.MessageUpdated("ses_test", msg("a2", "ses_test", "assistant")))
+    }
+
+    // ------ cs-cloud (CoStrict) auth ------
+
+    fun `test cs cloud not logged in error enters login required with cs cloud kind`() {
+        val (m, _, _) = prompted()
+
+        emit(ChatEventDto.Error(
+            "ses_test",
+            MessageErrorDto(type = "APIError", message = "Not logged in · Please run /login"),
+        ))
+
+        val state = m.model.state
+        assertTrue("expected LoginRequired, was $state", state is SessionState.LoginRequired)
+        assertEquals(LoginKind.CsCloud, (state as SessionState.LoginRequired).kind)
+        assertTrue(appRpc.telemetry.any {
+            it.event == "Account Overlay Shown" && it.properties["reason"] == "cs_cloud_auth"
+        })
+    }
+
+    fun `test cs cloud login refreshes workspace providers`() {
+        val (m, _, _) = prompted()
+
+        emit(ChatEventDto.Error(
+            "ses_test",
+            MessageErrorDto(type = "APIError", message = "Not logged in · Please run /login"),
+        ))
+        assertTrue(m.model.state is SessionState.LoginRequired)
+
+        // The daemon only serves the real model catalog once auth is valid; simulate the
+        // login completing (profile arrives) and require a provider reload for the picker.
+        appRpc.state.value = appRpc.state.value.copy(profile = ProfileDto("user@costrict.ai"))
+        flush()
+
+        assertTrue(
+            "workspace providers should be reloaded after login so the picker lists costrict models",
+            projectRpc.reloads >= 1,
+        )
+    }
+
+    fun `test cs cloud auth error without login phrase stays generic error`() {
+        val (m, _, _) = prompted()
+
+        emit(ChatEventDto.Error(
+            "ses_test",
+            MessageErrorDto(type = "APIError", message = "The model provider is rate limiting you"),
+        ))
+
+        assertTrue(m.model.state is SessionState.Error)
+    }
+
+    fun `test session result with not logged in text enters login required with cs cloud kind`() {
+        val (m, _, _) = prompted()
+
+        emit(ChatEventDto.MessageUpdated("ses_test", msg("a1", "ses_test", "assistant")), flush = false)
+        emit(ChatEventDto.PartUpdated(
+            "ses_test",
+            part("p1", "ses_test", "a1", "text", text = "Not logged in · Please run /login"),
+        ))
+        emit(ChatEventDto.SessionResult("ses_test", isError = true, subtype = "success"))
+
+        val state = m.model.state
+        assertTrue("expected LoginRequired, was $state", state is SessionState.LoginRequired)
+        assertEquals(LoginKind.CsCloud, (state as SessionState.LoginRequired).kind)
+        assertTrue(appRpc.telemetry.any {
+            it.event == "Account Overlay Shown" && it.properties["reason"] == "cs_cloud_auth"
+        })
+    }
+
+    fun `test session result without error does not show login card`() {
+        val (m, _, _) = prompted()
+
+        emit(ChatEventDto.SessionResult("ses_test", isError = false))
+
+        assertTrue(m.model.state is SessionState.Idle)
+    }
+
+    fun `test session result with unrelated error text stays idle`() {
+        val (m, _, _) = prompted()
+
+        emit(ChatEventDto.MessageUpdated("ses_test", msg("a1", "ses_test", "assistant")), flush = false)
+        emit(ChatEventDto.PartUpdated(
+            "ses_test",
+            part("p1", "ses_test", "a1", "text", text = "The model provider is rate limiting you"),
+        ))
+        emit(ChatEventDto.SessionResult("ses_test", isError = true, subtype = "success"))
+
+        assertTrue(m.model.state is SessionState.Idle)
+    }
+
+    fun `test idle signals do not clobber session result login required`() {
+        val (m, _, _) = prompted()
+
+        emit(ChatEventDto.MessageUpdated("ses_test", msg("a1", "ses_test", "assistant")), flush = false)
+        emit(ChatEventDto.PartUpdated(
+            "ses_test",
+            part("p1", "ses_test", "a1", "text", text = "Not logged in · Please run /login"),
+        ))
+        emit(ChatEventDto.SessionResult("ses_test", isError = true, subtype = "success"))
+        assertTrue(m.model.state is SessionState.LoginRequired)
+
+        emit(ChatEventDto.SessionIdle("ses_test"))
+        emit(ChatEventDto.SessionStatusChanged("ses_test", SessionStatusDto("idle")))
+
+        assertTrue(m.model.state is SessionState.LoginRequired)
+    }
+
+    fun `test dismiss cs cloud login required reports cs cloud reason`() {
+        val (m, _, _) = prompted()
+
+        emit(ChatEventDto.Error(
+            "ses_test",
+            MessageErrorDto(type = "APIError", message = "Not logged in · Please run /login"),
+        ))
+        assertTrue(m.model.state is SessionState.LoginRequired)
+
+        edt { m.dismissLoginRequired() }
+        flush()
+
+        assertTrue(appRpc.telemetry.any {
+            it.event == "Account Overlay Dismissed" && it.properties["reason"] == "cs_cloud_auth"
+        })
+        assertTrue(m.model.state is SessionState.Idle)
     }
 }

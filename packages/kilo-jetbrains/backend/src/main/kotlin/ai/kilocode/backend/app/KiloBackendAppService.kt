@@ -20,9 +20,11 @@ import ai.kilocode.jetbrains.api.model.KiloNotifications200ResponseInner
 import ai.kilocode.jetbrains.api.model.KiloProfile200Response
 import ai.kilocode.jetbrains.api.model.ProviderOauthAuthorizeRequest
 import ai.kilocode.jetbrains.api.model.ProviderOauthCallbackRequest
+import ai.kilocode.rpc.ConnectionErrorCode
 import ai.kilocode.rpc.dto.ConfigDto
 import ai.kilocode.rpc.dto.DeviceAuthDto
 import ai.kilocode.rpc.dto.ConfigPatchDto
+import ai.kilocode.rpc.dto.CsCloudStartDto
 import ai.kilocode.rpc.dto.HealthDto
 import com.intellij.openapi.Disposable
 import com.intellij.openapi.components.Service
@@ -224,6 +226,15 @@ class KiloBackendAppService private constructor(
         }
     }
 
+    /** Run `csc cloud start` on the connection to bring up the local cs-cloud daemon. */
+    suspend fun startCsCloud(): CsCloudStartDto = connection.startCsCloud()
+
+    /** Install the `csc` CLI via npm on the connection, then start the local cs-cloud daemon. */
+    suspend fun installCsc(): CsCloudStartDto = connection.installCsc()
+
+    /** Run `csc auth login` on the connection so the user can sign in to CoStrict in the browser. */
+    suspend fun loginCsCloud(): CsCloudStartDto = connection.loginCsCloud()
+
     /**
      * Synchronous CLI teardown for plugin unload. Confirms process exit but does not wait on the
      * lifecycle mutex, so an in-flight download/spawn cannot delay unload. Safe to call repeatedly.
@@ -407,7 +418,7 @@ class KiloBackendAppService private constructor(
                         val detail = connectionDiagnostic(next)
                         setAppError(
                             message = next.message,
-                            errors = listOf(LoadError(resource = "connection", status = detail.status, detail = detail.message)),
+                            errors = listOf(LoadError(resource = "connection", status = detail.status, detail = detail.message, code = next.code)),
                         )
                     }
                 }
@@ -1064,23 +1075,40 @@ private data class ConnectionDiagnostic(val status: Int?, val message: String)
 /** Keep transport failures actionable without exposing credentials or raw request payloads. */
 private fun connectionDiagnostic(state: ConnectionState.Error): ConnectionDiagnostic {
     val raw = state.details?.trim().takeUnless { it.isNullOrEmpty() } ?: state.message
-    val lower = raw.lowercase()
     val status = Regex("\\bHTTP\\s+(\\d{3})\\b", RegexOption.IGNORE_CASE)
         .find(raw)
         ?.groupValues
         ?.getOrNull(1)
         ?.toIntOrNull()
+    when (state.code) {
+        ConnectionErrorCode.CSC_NOT_INSTALLED -> return ConnectionDiagnostic(
+            status,
+            "csc is not installed or cs-cloud has not been started - install csc (npm install -g @costrict/csc) and run `csc cloud start` to download and start cs-cloud automatically",
+        )
+        ConnectionErrorCode.DAEMON_DOWN -> return ConnectionDiagnostic(
+            status,
+            "cs-cloud daemon is not running - start it with `csc cloud start` (or use the Start action in the retry menu)",
+        )
+        ConnectionErrorCode.UNAUTHORIZED -> return ConnectionDiagnostic(
+            status,
+            "cs-cloud API key was not found - run `csc cloud start` or set CS_BRIDGE_API_KEY / CS_CLOUD_API_KEY",
+        )
+    }
+    val lower = raw.lowercase()
     if (lower.contains("api key was not found") || lower.contains("missing api key")) {
-        return ConnectionDiagnostic(status, "cs-cloud API key was not found")
+        return ConnectionDiagnostic(status, "cs-cloud API key was not found - run `csc cloud start` or set CS_BRIDGE_API_KEY / CS_CLOUD_API_KEY")
     }
     if (status == 401 || status == 403 || lower.contains("unauthorized") || lower.contains("invalid api key")) {
         return ConnectionDiagnostic(status, "cs-cloud API key is invalid")
     }
     if (status == 503 || lower.contains("agent_down") || lower.contains("agent is unavailable")) {
-        return ConnectionDiagnostic(status, "csc agent is unavailable")
+        return ConnectionDiagnostic(status, "csc agent is unavailable - check that csc is installed and `csc cloud start` finished starting the agent")
     }
-    if (lower.contains("server url") || lower.contains("connection refused") || lower.contains("timed out")) {
-        return ConnectionDiagnostic(status, "cs-cloud daemon is not running")
+    if (lower.contains("server url")) {
+        return ConnectionDiagnostic(status, "csc is not installed or cs-cloud has not been started - install csc (npm install -g @costrict/csc) and run `csc cloud start` to download and start cs-cloud automatically")
+    }
+    if (lower.contains("connection refused") || lower.contains("timeout")) {
+        return ConnectionDiagnostic(status, "cs-cloud daemon is not running - start it with `csc cloud start` (or use the Start action in the retry menu)")
     }
     return ConnectionDiagnostic(status, raw)
 }

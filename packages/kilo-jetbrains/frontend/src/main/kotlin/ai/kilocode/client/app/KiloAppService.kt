@@ -18,9 +18,15 @@ import ai.kilocode.rpc.dto.ModelVariantUpdateDto
 import ai.kilocode.rpc.dto.ProfileDto
 import ai.kilocode.rpc.dto.ProfileStatusDto
 import ai.kilocode.log.KiloLog
+import ai.kilocode.client.KiloNotifications
+import ai.kilocode.client.actions.InstallCscAction
+import ai.kilocode.client.plugin.KiloBundle
 import ai.kilocode.client.settings.KiloLogSettingsService
+import ai.kilocode.rpc.ConnectionErrorCode
+import com.intellij.ide.BrowserUtil
 import com.intellij.openapi.components.Service
 import com.intellij.openapi.components.service
+import com.intellij.openapi.project.ProjectManager
 import fleet.rpc.client.durable
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CoroutineScope
@@ -171,6 +177,111 @@ class KiloAppService internal constructor(
     fun reinstallAsync() {
         LOG.info("reinstallAsync: launching reinstall")
         cs.launch { reinstall() }
+    }
+
+    private val csCloudStarting = AtomicBoolean(false)
+
+    /** Run `csc cloud start` on the backend and notify the user of the outcome. */
+    fun startCsCloudAsync() {
+        if (!csCloudStarting.compareAndSet(false, true)) return
+        LOG.info("startCsCloudAsync: launching csc cloud start")
+        cs.launch {
+            try {
+                val result = call { startCsCloud() }
+                if (result.ok) {
+                    KiloNotifications.info(KiloBundle.message("csCloud.start.ok"))
+                } else if (result.code == ConnectionErrorCode.CSC_NOT_INSTALLED) {
+                    val project = ProjectManager.getInstance().openProjects.firstOrNull { !it.isDefault }
+                    KiloNotifications.error(
+                        project,
+                        KiloBundle.message("csCloud.start.failed"),
+                        result.message,
+                        KiloBundle.message("action.Kilo.InstallCsc.text"),
+                    ) {
+                        installCscAsync()
+                    }
+                } else {
+                    KiloNotifications.error(KiloBundle.message("csCloud.start.failed"), result.message)
+                }
+            } catch (e: Exception) {
+                LOG.warn("startCsCloudAsync failed", e)
+                KiloNotifications.error(KiloBundle.message("csCloud.start.failed"), e.message)
+            } finally {
+                csCloudStarting.set(false)
+            }
+        }
+    }
+
+    private val csCloudInstalling = AtomicBoolean(false)
+
+    /** Install the csc CLI via npm on the backend, then start cs-cloud. */
+    fun installCscAsync() {
+        if (!csCloudInstalling.compareAndSet(false, true)) return
+        LOG.info("installCscAsync: launching csc install")
+        cs.launch {
+            try {
+                KiloNotifications.info(KiloBundle.message("csCloud.install.start"))
+                val result = call { installCsc() }
+                if (result.ok) {
+                    KiloNotifications.info(KiloBundle.message("csCloud.install.ok"))
+                } else if (result.code == ConnectionErrorCode.NPM_NOT_FOUND) {
+                    val project = ProjectManager.getInstance().openProjects.firstOrNull { !it.isDefault }
+                    KiloNotifications.error(
+                        project,
+                        KiloBundle.message("csCloud.install.failed"),
+                        result.message,
+                        KiloBundle.message("action.Kilo.OpenCscNpm.text"),
+                    ) {
+                        BrowserUtil.browse(InstallCscAction.CSC_NPM_URL)
+                    }
+                } else {
+                    KiloNotifications.error(KiloBundle.message("csCloud.install.failed"), result.message)
+                }
+            } catch (e: Exception) {
+                LOG.warn("installCscAsync failed", e)
+                KiloNotifications.error(KiloBundle.message("csCloud.install.failed"), e.message)
+            } finally {
+                csCloudInstalling.set(false)
+            }
+        }
+    }
+
+    private val csCloudLoggingIn = AtomicBoolean(false)
+
+    /** Run `csc auth login` on the backend; the command opens the browser itself. */
+    fun loginCsCloudAsync(onDone: (Boolean) -> Unit = {}) {
+        if (!csCloudLoggingIn.compareAndSet(false, true)) return
+        LOG.info("loginCsCloudAsync: launching csc auth login")
+        cs.launch {
+            try {
+                KiloNotifications.info(KiloBundle.message("csCloud.login.start"))
+                val result = call { loginCsCloud() }
+                if (result.ok) {
+                    KiloNotifications.info(KiloBundle.message("csCloud.login.ok"))
+                    onDone(true)
+                } else if (result.code == ConnectionErrorCode.CSC_NOT_INSTALLED) {
+                    val project = ProjectManager.getInstance().openProjects.firstOrNull { !it.isDefault }
+                    KiloNotifications.error(
+                        project,
+                        KiloBundle.message("csCloud.login.failed"),
+                        result.message,
+                        KiloBundle.message("action.Kilo.InstallCsc.text"),
+                    ) {
+                        installCscAsync()
+                    }
+                    onDone(false)
+                } else {
+                    KiloNotifications.error(KiloBundle.message("csCloud.login.failed"), result.message)
+                    onDone(false)
+                }
+            } catch (e: Exception) {
+                LOG.warn("loginCsCloudAsync failed", e)
+                KiloNotifications.error(KiloBundle.message("csCloud.login.failed"), e.message)
+                onDone(false)
+            } finally {
+                csCloudLoggingIn.set(false)
+            }
+        }
     }
 
     suspend fun coreInfo(): CoreInfo? = try {

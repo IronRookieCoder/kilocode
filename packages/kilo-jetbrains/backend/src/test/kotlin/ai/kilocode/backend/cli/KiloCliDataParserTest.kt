@@ -647,6 +647,40 @@ class KiloCliDataParserTest {
         }
 
         @Test
+        fun `parseChatEvent - session result carries error flag`() {
+            val data = globalEvent("""
+                "type": "session.result",
+                "properties": {
+                    "sessionID": "ses_1",
+                    "isError": true,
+                    "subtype": "success"
+                }
+            """)
+
+            val result = KiloCliDataParser.parseChatEvent("session.result", data)
+            assertNotNull(result)
+            assertTrue(result is ChatEventDto.SessionResult)
+            assertEquals("ses_1", result.sessionID)
+            assertTrue(result.isError)
+            assertEquals("success", result.subtype)
+        }
+
+        @Test
+        fun `parseChatEvent - session result defaults to no error`() {
+            val data = globalEvent("""
+                "type": "session.result",
+                "properties": { "sessionID": "ses_1" }
+            """)
+
+            val result = KiloCliDataParser.parseChatEvent("session.result", data)
+            assertNotNull(result)
+            assertTrue(result is ChatEventDto.SessionResult)
+            assertEquals("ses_1", result.sessionID)
+            assertFalse(result.isError)
+            assertNull(result.subtype)
+        }
+
+        @Test
         fun `parseChatEvent - message removed`() {
             val data = globalEvent("""
                 "type": "message.removed",

@@ -245,4 +245,22 @@ class KiloBackendChatManagerTest {
         assertEquals("ses_abc", event.sessionID)
         assertEquals(listOf("msg2"), event.queued)
     }
+
+    @Test
+    fun `failed session result is forwarded with error flag`() = runBlocking {
+        val port = mock.start()
+        val sse = MutableSharedFlow<SseEvent>(replay = 8)
+        val chat = KiloBackendChatManager(scope, TestLog())
+        chat.start(OkHttpClient(), "http://127.0.0.1:$port", sse)
+
+        val received = async(start = CoroutineStart.UNDISPATCHED) { withTimeout(5_000) { chat.events.first() } }
+        withTimeout(5_000) { sse.subscriptionCount.first { it > 0 } }
+        sse.emit(SseEvent("session.result", """{"payload":{"properties":{"sessionID":"ses_abc","isError":true,"subtype":"success"}}}"""))
+
+        val event = received.await()
+        assertTrue(event is ChatEventDto.SessionResult)
+        assertEquals("ses_abc", event.sessionID)
+        assertTrue(event.isError)
+        assertEquals("success", event.subtype)
+    }
 }

@@ -1,5 +1,7 @@
 package ai.kilocode.client.session.views
 
+import ai.kilocode.client.plugin.KiloBundle
+import ai.kilocode.client.session.model.LoginKind
 import ai.kilocode.client.util.edtWait
 import ai.kilocode.client.session.ui.style.SessionEditorStyle
 import ai.kilocode.client.session.ui.style.SessionUiStyle
@@ -9,6 +11,7 @@ import com.intellij.openapi.application.ApplicationManager
 import com.intellij.testFramework.fixtures.BasePlatformTestCase
 import com.intellij.ui.components.JBTextArea
 import java.awt.Container
+import javax.swing.JButton
 
 @Suppress("UnstableApiUsage")
 class LoginRequiredViewTest : BasePlatformTestCase() {
@@ -181,6 +184,45 @@ class LoginRequiredViewTest : BasePlatformTestCase() {
                 desc!!.font.name == "Courier New",
             )
             assertEquals("Description font should equal secondary text font", SessionUiStyle.Text.Secondary.font(style), desc.font)
+        }
+    }
+
+    // ------ cs-cloud login kind ------
+
+    fun `test cs cloud kind shows sign in to costrict button`() {
+        edt {
+            val view = LoginRequiredView(openProfile = {}, dismiss = {})
+            view.show("Sign in to continue.", LoginKind.CsCloud)
+            val btn = view.csCloudLoginButton()
+            assertEquals("Sign-in button should be primary for cs-cloud", true, btn.getClientProperty(DarculaButtonUI.DEFAULT_STYLE_KEY))
+        }
+    }
+
+    fun `test cs cloud kind hides open profile button`() {
+        edt {
+            val view = LoginRequiredView(openProfile = {}, dismiss = {})
+            view.show("Sign in to continue.", LoginKind.CsCloud)
+            val buttons = findAll<JButton>(view).map { it.text }
+            assertTrue("cs-cloud kind should not offer Open User Profile", buttons.none { it == KiloBundle.message("session.login.required.button") })
+        }
+    }
+
+    fun `test cs cloud login button click invokes loginCsCloud callback`() {
+        var called = false
+        edt {
+            val view = LoginRequiredView(openProfile = {}, dismiss = {}, loginCsCloud = { called = true })
+            view.show("Sign in to continue.", LoginKind.CsCloud)
+            view.csCloudLoginButton().doClick()
+        }
+        assertTrue("loginCsCloud should have been called", called)
+    }
+
+    fun `test profile kind still shows open user profile after a cs cloud show`() {
+        edt {
+            val view = LoginRequiredView(openProfile = {}, dismiss = {})
+            view.show("Sign in to continue.", LoginKind.CsCloud)
+            view.show("Sign in required.")
+            assertNotNull("Profile kind should restore Open User Profile", view.openProfileButton())
         }
     }
 

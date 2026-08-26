@@ -84,4 +84,75 @@ class PaidModelAuthTest {
             ),
         )
     }
+
+    // ------ isCsCloudAuthRequired ------
+
+    private fun csCloudError(message: String? = null, type: String = "APIError", responseBody: String? = null) =
+        MessageErrorDto(type = type, statusCode = 401, responseBody = responseBody, message = message)
+
+    @Test
+    fun `null cs cloud error returns false`() {
+        assertFalse(isCsCloudAuthRequired(null))
+    }
+
+    @Test
+    fun `not logged in message returns true`() {
+        assertTrue(isCsCloudAuthRequired(csCloudError(message = "Not logged in · Please run /login")))
+    }
+
+    @Test
+    fun `run login message returns true regardless of case`() {
+        assertTrue(isCsCloudAuthRequired(csCloudError(message = "NOT LOGGED IN · PLEASE RUN /LOGIN")))
+    }
+
+    @Test
+    fun `authentication_failed type returns true`() {
+        assertTrue(isCsCloudAuthRequired(csCloudError(type = "authentication_failed")))
+    }
+
+    @Test
+    fun `authentication_failed in response body returns true`() {
+        assertTrue(
+            isCsCloudAuthRequired(
+                csCloudError(responseBody = """{"error":"authentication_failed","content":"Not logged in · Please run /login"}"""),
+            ),
+        )
+    }
+
+    @Test
+    fun `unrelated error returns false`() {
+        assertFalse(isCsCloudAuthRequired(csCloudError(message = "The model provider is rate limiting you")))
+    }
+
+    @Test
+    fun `paid model auth error is not a cs cloud auth error`() {
+        assertFalse(isCsCloudAuthRequired(csCloudError(responseBody = """{"error":{"code":"PAID_MODEL_AUTH_REQUIRED"}}""")))
+    }
+
+    // ------ isCsCloudAuthRequiredText ------
+
+    @Test
+    fun `null cs cloud text returns false`() {
+        assertFalse(isCsCloudAuthRequiredText(null))
+    }
+
+    @Test
+    fun `not logged in text returns true`() {
+        assertTrue(isCsCloudAuthRequiredText("Not logged in · Please run /login"))
+    }
+
+    @Test
+    fun `run login text returns true regardless of case`() {
+        assertTrue(isCsCloudAuthRequiredText("NOT LOGGED IN · PLEASE RUN /LOGIN"))
+    }
+
+    @Test
+    fun `authentication_failed text returns true`() {
+        assertTrue(isCsCloudAuthRequiredText("authentication_failed"))
+    }
+
+    @Test
+    fun `unrelated assistant text returns false`() {
+        assertFalse(isCsCloudAuthRequiredText("The model provider is rate limiting you"))
+    }
 }

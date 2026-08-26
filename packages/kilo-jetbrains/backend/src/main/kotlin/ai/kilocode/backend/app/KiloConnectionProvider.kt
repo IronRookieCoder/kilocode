@@ -37,6 +37,19 @@ interface KiloConnection {
     suspend fun connect()
     suspend fun restart()
     suspend fun reinstall()
+
+    /** Start the external cs-cloud daemon; unsupported by the locally managed Kilo CLI provider. */
+    suspend fun startCsCloud(): ai.kilocode.rpc.dto.CsCloudStartDto =
+        ai.kilocode.rpc.dto.CsCloudStartDto(ok = false, message = "cs-cloud daemon is not managed by this connection")
+
+    /** Install the external csc CLI via npm; unsupported by the locally managed Kilo CLI provider. */
+    suspend fun installCsc(): ai.kilocode.rpc.dto.CsCloudStartDto =
+        ai.kilocode.rpc.dto.CsCloudStartDto(ok = false, message = "csc install is not managed by this connection")
+
+    /** Sign in to CoStrict via `csc auth login`; unsupported by the locally managed Kilo CLI provider. */
+    suspend fun loginCsCloud(): ai.kilocode.rpc.dto.CsCloudStartDto =
+        ai.kilocode.rpc.dto.CsCloudStartDto(ok = false, message = "csc auth login is not managed by this connection")
+
     fun shutdownForUnload()
     fun shutdownForAppClose()
     fun dispose()

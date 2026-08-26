@@ -279,4 +279,23 @@ class ChatLogSummaryTest {
         assertFalse(ChatLogSummary.hasError(event))
         assertNull(ChatLogSummary.error(event))
     }
+
+    @Test
+    fun `failed session result is error-bearing`() {
+        val event = ChatEventDto.SessionResult(sessionID = "ses_1", isError = true, subtype = "success")
+
+        val out = ChatLogSummary.error(event)!!
+
+        assertTrue(out.contains("sid=ses_1"), out)
+        assertTrue(out.contains("evt=session.result"), out)
+        assertTrue(out.contains("isError=true"), out)
+        assertTrue(out.contains("subtype=success"), out)
+    }
+
+    @Test
+    fun `successful session result has no error summary`() {
+        val event = ChatEventDto.SessionResult(sessionID = "ses_1")
+
+        assertNull(ChatLogSummary.error(event))
+    }
 }

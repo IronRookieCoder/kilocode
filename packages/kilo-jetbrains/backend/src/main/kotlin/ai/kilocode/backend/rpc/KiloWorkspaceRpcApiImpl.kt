@@ -139,11 +139,12 @@ class KiloWorkspaceRpcApiImpl internal constructor(
         val api = app.api ?: throw IllegalStateException("Kilo API is unavailable")
         val http = app.http ?: throw IllegalStateException("Kilo HTTP client is unavailable")
         val errors = mutableListOf<LoadError>()
+        val base = app.base ?: "http://127.0.0.1:${app.port}"
 
         val prov = try {
             val raw = withContext(Dispatchers.IO) {
                 val request = Request.Builder()
-                    .url("http://127.0.0.1:${app.port}/provider?directory=${encode(directory)}")
+                    .url("$base/provider?directory=${encode(directory)}")
                     .get()
                     .build()
                 http.newCall(request).execute().use { response ->
@@ -229,9 +230,10 @@ class KiloWorkspaceRpcApiImpl internal constructor(
         dir: Boolean,
     ): List<WorkspaceFileDto> {
         val http = app.http ?: throw IllegalStateException("Kilo HTTP client is unavailable")
+        val base = app.base ?: "http://127.0.0.1:${app.port}"
         val raw = withContext(Dispatchers.IO) {
             val request = Request.Builder()
-                .url("http://127.0.0.1:${app.port}/find/file?directory=${encode(directory)}&query=${encode(query)}&type=$type&limit=$limit")
+                .url("$base/find/file?directory=${encode(directory)}&query=${encode(query)}&type=$type&limit=$limit")
                 .get()
                 .build()
             http.newCall(request).execute().use { response ->

@@ -73,6 +73,12 @@ class KiloAppRpcApiImpl : KiloAppRpcApi {
 
     override suspend fun reinstall() = app.reinstall()
 
+    override suspend fun startCsCloud() = app.startCsCloud()
+
+    override suspend fun installCsc() = app.installCsc()
+
+    override suspend fun loginCsCloud() = app.loginCsCloud()
+
     override suspend fun modelState(): ModelStateDto {
         app.requireReady()
         return app.models.state()
@@ -208,6 +214,7 @@ private fun error(e: LoadError) = LoadErrorDto(
     resource = e.resource,
     status = e.status,
     detail = e.detail,
+    code = e.code,
 )
 
 private fun warning(w: ConfigWarning) = ConfigWarningDto(

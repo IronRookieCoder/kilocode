@@ -5,6 +5,7 @@ import ai.kilocode.rpc.dto.AgentConfigDto
 import ai.kilocode.rpc.dto.CompactionConfigDto
 import ai.kilocode.rpc.dto.ConfigDto
 import ai.kilocode.rpc.dto.ConfigPatchDto
+import ai.kilocode.rpc.dto.CsCloudStartDto
 import ai.kilocode.rpc.dto.DeviceAuthDto
 import ai.kilocode.rpc.dto.HealthDto
 import ai.kilocode.rpc.dto.KiloAppStateDto
@@ -67,6 +68,9 @@ class FakeAppRpcApi : KiloAppRpcApi {
         private set
     var reinstalls = 0
         private set
+    var csCloudStart = CsCloudStartDto(ok = true, message = "started")
+    var csCloudStarts = 0
+        private set
 
     override suspend fun connect() {
         assertNotEdt("connect")
@@ -116,6 +120,32 @@ class FakeAppRpcApi : KiloAppRpcApi {
     override suspend fun reinstall() {
         assertNotEdt("reinstall")
         reinstalls += 1
+    }
+
+    override suspend fun startCsCloud(): CsCloudStartDto {
+        assertNotEdt("startCsCloud")
+        csCloudStarts += 1
+        return csCloudStart
+    }
+
+    var csCloudInstall = CsCloudStartDto(ok = true, message = "installed")
+    var csCloudInstalls = 0
+        private set
+
+    override suspend fun installCsc(): CsCloudStartDto {
+        assertNotEdt("installCsc")
+        csCloudInstalls += 1
+        return csCloudInstall
+    }
+
+    var csCloudLogin = CsCloudStartDto(ok = true, message = "logged in")
+    var csCloudLogins = 0
+        private set
+
+    override suspend fun loginCsCloud(): CsCloudStartDto {
+        assertNotEdt("loginCsCloud")
+        csCloudLogins += 1
+        return csCloudLogin
     }
 
     override suspend fun modelState(): ModelStateDto {

@@ -63,6 +63,44 @@ class KiloWorkspaceRpcApiImplTest {
     }
 
     @Test
+    fun `models loads costrict providers through the connection base`() = runBlocking {
+        mock.providers = """
+            {
+                "all": [
+                    {
+                        "id": "costrict",
+                        "name": "CoStrict",
+                        "source": "config",
+                        "default_model": "Auto",
+                        "models": {
+                            "Auto": {"id": "Auto", "name": "Auto", "status": "active"},
+                            "DeepSeek-V4-Flash": {"id": "DeepSeek-V4-Flash", "name": "DeepSeek-V4-Flash", "status": "active"}
+                        }
+                    }
+                ],
+                "default": {"build": "costrict/Auto"},
+                "connected": ["costrict"],
+                "failed": []
+            }
+        """.trimIndent()
+        mock.agents = """[{"name":"code","displayName":"Code","mode":"primary","permission":[],"options":{}}]"""
+        val dir = Files.createTempDirectory("kilo-models")
+        try {
+            val app = app()
+            val result = KiloWorkspaceRpcApiImpl(app).models(dir.toString())
+
+            assertEquals(emptyList(), result.errors)
+            val provider = assertNotNull(result.providers?.providers?.single { it.id == "costrict" })
+            assertEquals("CoStrict", provider.name)
+            assertEquals(setOf("Auto", "DeepSeek-V4-Flash"), provider.models.keys)
+            assertEquals(listOf("costrict"), result.providers?.connected)
+            assertEquals(mapOf("build" to "costrict/Auto"), result.providers?.defaults)
+        } finally {
+            delete(dir)
+        }
+    }
+
+    @Test
     fun `state maps unsupported workspace`() = runBlocking {
         val app = app()
         val rpc = KiloWorkspaceRpcApiImpl(app)

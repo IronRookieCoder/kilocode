@@ -160,6 +160,12 @@
         <action id="Kilo.Reinstall"
                 class="ai.kilocode.client.actions.ReinstallKiloAction"/>
 
+        <action id="Kilo.InstallCsc"
+                class="ai.kilocode.client.actions.InstallCscAction"/>
+
+        <action id="Kilo.StartCsCloud"
+                class="ai.kilocode.client.actions.StartCsCloudAction"/>
+
         <action id="Kilo.CoreInfo"
                 class="ai.kilocode.client.actions.CoreInfoAction"/>
 
@@ -179,6 +185,8 @@
         <group id="Kilo.CliGroup" text="Core" popup="true">
             <reference ref="Kilo.Restart"/>
             <reference ref="Kilo.Reinstall"/>
+            <reference ref="Kilo.InstallCsc"/>
+            <reference ref="Kilo.StartCsCloud"/>
             <separator/>
             <reference ref="Kilo.CoreInfo"/>
         </group>

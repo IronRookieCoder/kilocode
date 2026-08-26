@@ -1,6 +1,7 @@
 package ai.kilocode.client.session.views
 
 import ai.kilocode.client.plugin.KiloBundle
+import ai.kilocode.client.session.model.LoginKind
 import ai.kilocode.client.session.ui.SessionView
 import ai.kilocode.client.session.views.base.DialogView
 import ai.kilocode.client.session.ui.selection.SessionSelection
@@ -20,6 +21,7 @@ import javax.swing.JButton
 class LoginRequiredView(
     private val openProfile: () -> Unit,
     private val dismiss: () -> Unit,
+    private val loginCsCloud: () -> Unit = {},
     selection: SessionSelection? = null,
     focus: (() -> Unit)? = null,
 ) : DialogView(selection, focus), SessionView {
@@ -28,6 +30,7 @@ class LoginRequiredView(
 
     private val ID_DISMISS = "dismiss"
     private val ID_OPEN = "open"
+    private val ID_LOGIN = "login"
 
     init {
         isOpaque = false
@@ -40,9 +43,22 @@ class LoginRequiredView(
         ))
     }
 
-    /** Make the view visible with [message] shown as the description. */
+    /** Make the view visible with [message] shown as the description for the given [kind]. */
     @RequiresEdt
-    fun show(message: String) {
+    fun show(message: String, kind: LoginKind = LoginKind.Profile) {
+        if (kind == LoginKind.CsCloud) {
+            setHeader(KiloBundle.message("session.login.required.csCloud.title"))
+            setActions(listOf(
+                DialogView.Action(ID_DISMISS, KiloBundle.message("session.login.required.dismiss"), primary = false) { dismiss() },
+                DialogView.Action(ID_LOGIN, KiloBundle.message("session.login.required.csCloud.button"), primary = true) { loginCsCloud() },
+            ))
+        } else {
+            setHeader(KiloBundle.message("session.login.required.title"))
+            setActions(listOf(
+                DialogView.Action(ID_DISMISS, KiloBundle.message("session.login.required.dismiss"), primary = false) { dismiss() },
+                DialogView.Action(ID_OPEN, KiloBundle.message("session.login.required.button"), primary = true) { openProfile() },
+            ))
+        }
         setDescription(message)
         isVisible = true
         refresh()
@@ -64,6 +80,7 @@ class LoginRequiredView(
     // Test helpers — return generic JButton to keep SessionQuestionButton internal
     internal fun openProfileButton() = button(KiloBundle.message("session.login.required.button"))
     internal fun dismissButton() = button(KiloBundle.message("session.login.required.dismiss"))
+    internal fun csCloudLoginButton() = button(KiloBundle.message("session.login.required.csCloud.button"))
 
     private fun button(text: String) = buttons(this).first { it.text == text }
 

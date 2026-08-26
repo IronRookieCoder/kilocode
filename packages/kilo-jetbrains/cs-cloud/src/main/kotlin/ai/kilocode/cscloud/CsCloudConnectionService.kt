@@ -10,6 +10,8 @@ import ai.kilocode.cscloud.mcp.IdeMcpSessionFactory
 import ai.kilocode.backend.app.SseEvent
 import ai.kilocode.jetbrains.api.client.DefaultApi
 import ai.kilocode.log.KiloLog
+import ai.kilocode.rpc.ConnectionErrorCode
+import ai.kilocode.rpc.dto.CsCloudStartDto
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -29,6 +31,7 @@ import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.TimeoutCancellationException
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import java.io.IOException
 import java.nio.file.Path
 import java.util.concurrent.atomic.AtomicInteger
 
@@ -40,11 +43,15 @@ class CsCloudConnectionService(
     private val timeout: Long = 30_000L,
     workspace: Path? = null,
     private val roots: () -> List<Path> = { listOfNotNull(workspace) },
+    private val starter: suspend () -> CsCloudStartDto = { CsCloudStartDto(false, "cs-cloud starter is not configured") },
+    private val installer: suspend () -> CsCloudStartDto = { CsCloudStartDto(false, "cs-cloud installer is not configured") },
+    private val login: suspend () -> CsCloudStartDto = { CsCloudStartDto(false, "cs-cloud login is not configured") },
 ) : KiloConnection {
     private val bridge = CsCloudMcpBridge(cs, { endpoint }, { clients?.apiClient }, IdeMcpSessionFactory.EP.extensionList.singleOrNull(), log)
     private val _state = MutableStateFlow<ConnectionState>(ConnectionState.Disconnected)
     private val _events = MutableSharedFlow<SseEvent>(extraBufferCapacity = 128)
     private var reconnect: Job? = null
+    private var poll: Job? = null
     private var sse = emptyList<CsCloudSseClient>()
     private var clients: CsCloudClients? = null
     private var endpoint: CsCloudEndpoint? = null
@@ -63,11 +70,20 @@ class CsCloudConnectionService(
         if (disposed) return
         reconnect?.cancel()
         reconnect = null
+        poll?.cancel()
+        poll = null
         closeTransport()
-        attempt = 0
         _state.value = ConnectionState.Discovering
-        val found = resolver.resolve().getOrElse { return fail(it) }
-        if (roots().isEmpty()) return fail(IllegalStateException("active JetBrains project root is unavailable"))
+        val found = resolver.resolve().getOrElse {
+            fail(it)
+            schedulePoll()
+            return
+        }
+        if (roots().isEmpty()) {
+            fail(IllegalStateException("active JetBrains project root is unavailable"))
+            schedulePoll()
+            return
+        }
         endpoint = found
         _state.value = ConnectionState.Connecting
         val next = CsCloudHttpClients.create(found, roots)
@@ -79,6 +95,7 @@ class CsCloudConnectionService(
         } catch (error: Throwable) {
             closeTransport()
             fail(error)
+            schedulePoll()
             return
         }
         openSse(next)
@@ -87,6 +104,22 @@ class CsCloudConnectionService(
     override suspend fun restart() = connect()
 
     override suspend fun reinstall(): Nothing = throw CsCloudUnsupportedOperationException()
+
+    override suspend fun startCsCloud(): CsCloudStartDto {
+        val result = starter()
+        if (result.ok) connect()
+        return result
+    }
+
+    /** Install the csc CLI, then start the daemon so the fresh install takes effect. */
+    override suspend fun installCsc(): CsCloudStartDto {
+        val installed = installer()
+        if (!installed.ok) return installed
+        return startCsCloud()
+    }
+
+    /** Run `csc auth login` so the user can sign in to CoStrict in the browser. */
+    override suspend fun loginCsCloud(): CsCloudStartDto = login()
 
     override fun shutdownForUnload() = shutdown()
 
@@ -97,6 +130,8 @@ class CsCloudConnectionService(
         disposed = true
         reconnect?.cancel()
         reconnect = null
+        poll?.cancel()
+        poll = null
         closeTransport()
         cs.launch { bridge.releaseAll(CapabilityReleaseReason.SHUTDOWN) }
         _state.value = ConnectionState.Disconnected
@@ -175,6 +210,23 @@ class CsCloudConnectionService(
         }
     }
 
+    /**
+     * Keeps re-attempting [connect] after a discovery or health failure so the plugin
+     * auto-connects once the user starts the cs-cloud daemon (e.g. `csc cloud start`)
+     * instead of requiring a manual Retry click.
+     */
+    private fun schedulePoll() {
+        if (disposed || poll?.isActive == true) return
+        poll = cs.launch {
+            poll = null
+            val wait = (250L shl attempt.coerceAtMost(3)).coerceAtMost(2_000L)
+            attempt = (attempt + 1).coerceAtMost(4)
+            delay(wait)
+            if (!isActive || disposed) return@launch
+            connect()
+        }
+    }
+
     private fun fail(error: Throwable) {
         val cause = error.cause ?: error
         val detail = when (cause) {
@@ -182,7 +234,13 @@ class CsCloudConnectionService(
             is CsCloudRequestException -> "${cause.code}: ${cause.message} (HTTP ${cause.status})"
             else -> cause.message
         }
-        _state.value = ConnectionState.Error(detail ?: "cs-cloud connection failed", detail)
+        val code = when {
+            cause is CsCloudDiscoveryError.MissingUrl -> ConnectionErrorCode.CSC_NOT_INSTALLED
+            cause is CsCloudRequestException && (cause.status == 401 || cause.status == 403) -> ConnectionErrorCode.UNAUTHORIZED
+            cause is IOException -> ConnectionErrorCode.DAEMON_DOWN
+            else -> null
+        }
+        _state.value = ConnectionState.Error(detail ?: "cs-cloud connection failed", detail, code)
         log.warn("cs-cloud connection failed: ${detail ?: "unknown error"}", cause)
     }
 
@@ -190,6 +248,8 @@ class CsCloudConnectionService(
         if (disposed) return
         reconnect?.cancel()
         reconnect = null
+        poll?.cancel()
+        poll = null
         closeTransport()
         cs.launch { bridge.releaseAll(CapabilityReleaseReason.SHUTDOWN) }
         _state.value = ConnectionState.Disconnected

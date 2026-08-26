@@ -3,6 +3,7 @@ package ai.kilocode.client.actions
 import ai.kilocode.client.app.KiloAppService
 import ai.kilocode.client.app.KiloWorkspaceService
 import ai.kilocode.client.app.Workspace
+import ai.kilocode.client.plugin.KiloBundle
 import ai.kilocode.client.session.SessionManager
 import ai.kilocode.client.testing.FakeAppRpcApi
 import ai.kilocode.client.testing.FakeWorkspaceRpcApi
@@ -95,6 +96,26 @@ class KiloRecoveryActionsTest : BasePlatformTestCase() {
         assertEquals("Reinstall Core", event.presentation.text)
     }
 
+    fun `test install csc action shows install text in connection retry popup`() {
+        val action = InstallCscAction()
+        val event = event(action, place = KiloActionPlaces.connectionRetryPopup())
+
+        update(action, event)
+
+        assertTrue("Install csc action should stay enabled", event.presentation.isEnabled)
+        assertEquals(KiloBundle.message("action.Kilo.InstallCsc.text"), event.presentation.text)
+    }
+
+    fun `test start cs-cloud action shows start text in connection retry popup`() {
+        val action = StartCsCloudAction()
+        val event = event(action, place = KiloActionPlaces.connectionRetryPopup())
+
+        update(action, event)
+
+        assertTrue("Start cs-cloud action should stay enabled", event.presentation.isEnabled)
+        assertEquals(KiloBundle.message("action.Kilo.StartCsCloud.text"), event.presentation.text)
+    }
+
     fun `test core group has visible menu text and info action`() {
         val xml = requireNotNull(javaClass.classLoader.getResourceAsStream("kilo.jetbrains.frontend.xml"))
             .bufferedReader()
@@ -103,6 +124,8 @@ class KiloRecoveryActionsTest : BasePlatformTestCase() {
         assertTrue(xml.contains("<group id=\"Kilo.CliGroup\" text=\"Core\" popup=\"true\">"))
         assertTrue(xml.contains("<reference ref=\"Kilo.Restart\"/>"))
         assertTrue(xml.contains("<reference ref=\"Kilo.Reinstall\"/>"))
+        assertTrue(xml.contains("<reference ref=\"Kilo.InstallCsc\"/>"))
+        assertTrue(xml.contains("<reference ref=\"Kilo.StartCsCloud\"/>"))
         assertTrue(xml.contains("<reference ref=\"Kilo.CoreInfo\"/>"))
         assertTrue(xml.contains("<group id=\"Kilo.OpenConfigGroup\" text=\"Config Files\" popup=\"true\">"))
         assertTrue(xml.contains("<reference ref=\"Kilo.OpenConfigGroup\"/>"))

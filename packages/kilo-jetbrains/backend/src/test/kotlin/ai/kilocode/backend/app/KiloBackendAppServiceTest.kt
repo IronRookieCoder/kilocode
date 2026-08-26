@@ -13,6 +13,7 @@ import ai.kilocode.log.KiloLog
 import ai.kilocode.rpc.dto.AgentConfigPatchDto
 import ai.kilocode.rpc.dto.CompactionPatchDto
 import ai.kilocode.rpc.dto.ConfigPatchDto
+import ai.kilocode.rpc.dto.CsCloudStartDto
 import ai.kilocode.rpc.dto.WatcherPatchDto
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
@@ -116,6 +117,7 @@ class KiloBackendAppServiceTest {
         override val apiClient: OkHttpClient? = null
         override val target: ConnectionTarget? = null
         var restarts = 0
+        var startCsCloudCalls = 0
 
         override suspend fun connect() {
             states.value = error
@@ -127,6 +129,11 @@ class KiloBackendAppServiceTest {
         }
 
         override suspend fun reinstall() = Unit
+
+        override suspend fun startCsCloud(): CsCloudStartDto {
+            startCsCloudCalls++
+            return CsCloudStartDto(ok = false, message = "nope")
+        }
         override fun shutdownForUnload() = Unit
         override fun shutdownForAppClose() = Unit
         override fun dispose() = Unit
@@ -148,10 +155,11 @@ class KiloBackendAppServiceTest {
     @Test
     fun `external connection diagnostics are user facing`() = runBlocking {
         val cases = listOf(
-            ConnectionState.Error("missing URL", "cs-cloud server URL was not found") to "cs-cloud daemon is not running",
-            ConnectionState.Error("missing key", "cs-cloud API key was not found") to "cs-cloud API key was not found",
+            ConnectionState.Error("missing URL", "cs-cloud server URL was not found") to "csc is not installed or cs-cloud has not been started - install csc (npm install -g @costrict/csc) and run `csc cloud start` to download and start cs-cloud automatically",
+            ConnectionState.Error("stopped", "Connection refused") to "cs-cloud daemon is not running - start it with `csc cloud start` (or use the Start action in the retry menu)",
+            ConnectionState.Error("missing key", "cs-cloud API key was not found") to "cs-cloud API key was not found - run `csc cloud start` or set CS_BRIDGE_API_KEY / CS_CLOUD_API_KEY",
             ConnectionState.Error("unauthorized", "unauthorized: invalid credential (HTTP 401)") to "cs-cloud API key is invalid",
-            ConnectionState.Error("unavailable", "unavailable: Service Unavailable (HTTP 503)") to "csc agent is unavailable",
+            ConnectionState.Error("unavailable", "unavailable: Service Unavailable (HTTP 503)") to "csc agent is unavailable - check that csc is installed and `csc cloud start` finished starting the agent",
         )
         cases.forEach { (failure, detail) ->
             val server = UnusedServer()
@@ -178,6 +186,20 @@ class KiloBackendAppServiceTest {
 
         assertEquals(1, provider.connection.restarts)
         assertEquals(0, server.starts)
+        svc.dispose()
+    }
+
+    @Test
+    fun `startCsCloud delegates to the external connection`() = runBlocking {
+        val server = UnusedServer()
+        val provider = DiagnosticProvider(ConnectionState.Error("missing URL", "cs-cloud server URL was not found"))
+        val svc = KiloBackendAppService.create(scope, server, log, provider)
+
+        val result = svc.startCsCloud()
+
+        assertEquals(1, provider.connection.startCsCloudCalls)
+        assertEquals(false, result.ok)
+        assertEquals("nope", result.message)
         svc.dispose()
     }
 
