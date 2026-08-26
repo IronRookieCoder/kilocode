@@ -1,5 +1,6 @@
 package ai.kilocode.client.settings
 
+import ai.kilocode.client.app.KiloAppService
 import ai.kilocode.client.plugin.KiloBundle
 import ai.kilocode.client.settings.agents.AgentBehaviorConfigurable
 import ai.kilocode.client.settings.autoapprove.AutoApproveConfigurable
@@ -9,9 +10,11 @@ import ai.kilocode.client.settings.providers.ProvidersConfigurable
 import ai.kilocode.client.settings.profile.UserProfileConfigurable
 import ai.kilocode.client.ui.UiStyle
 import ai.kilocode.client.ui.layout.Stack
+import ai.kilocode.rpc.dto.KiloAppStatusDto
 import com.intellij.ide.DataManager
 import com.intellij.openapi.options.SearchableConfigurable
 import com.intellij.openapi.options.ex.Settings
+import com.intellij.openapi.components.service
 import com.intellij.ui.components.ActionLink
 import com.intellij.ui.components.JBLabel
 import com.intellij.util.ui.JBUI
@@ -38,6 +41,21 @@ class KiloSettingsConfigurable : SearchableConfigurable {
     override fun createComponent(): JComponent {
         val panel = Stack.vertical()
         panel.border = JBUI.Borders.empty(UiStyle.Gap.lg(), 0, 0, 0)
+
+        val app = service<KiloAppService>()
+        val state = app.state.value
+        val status = JBLabel(statusText(state.status)).apply {
+            border = JBUI.Borders.emptyBottom(UiStyle.Gap.sm())
+        }
+        panel.next(status)
+        if (state.status != KiloAppStatusDto.READY) {
+            panel.next(ActionLink(KiloBundle.message("settings.connection.retry")) {
+                app.retryAsync()
+                status.text = KiloBundle.message("settings.connection.retrying")
+            }.apply {
+                border = JBUI.Borders.emptyBottom(UiStyle.Gap.pad())
+            })
+        }
 
         val desc = JBLabel(KiloBundle.message("settings.kilo.description"))
         desc.border = JBUI.Borders.emptyBottom(UiStyle.Gap.pad())
@@ -112,5 +130,15 @@ class KiloSettingsConfigurable : SearchableConfigurable {
 
     companion object {
         const val ID = "ai.kilocode.jetbrains.settings"
+
+        internal fun statusText(status: KiloAppStatusDto): String = when (status) {
+            KiloAppStatusDto.READY -> KiloBundle.message("settings.connection.ready")
+            KiloAppStatusDto.CONNECTING,
+            KiloAppStatusDto.DOWNLOADING,
+            KiloAppStatusDto.LOADING,
+            KiloAppStatusDto.MIGRATION_REQUIRED -> KiloBundle.message("settings.connection.connecting")
+            KiloAppStatusDto.ERROR -> KiloBundle.message("settings.connection.error")
+            KiloAppStatusDto.DISCONNECTED -> KiloBundle.message("settings.connection.disconnected")
+        }
     }
 }

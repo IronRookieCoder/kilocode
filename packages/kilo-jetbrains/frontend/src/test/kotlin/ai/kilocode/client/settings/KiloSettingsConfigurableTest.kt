@@ -13,6 +13,7 @@ import com.intellij.openapi.options.Configurable
 import com.intellij.openapi.options.SearchableConfigurable
 import com.intellij.testFramework.fixtures.BasePlatformTestCase
 import com.intellij.ui.components.ActionLink
+import ai.kilocode.rpc.dto.KiloAppStatusDto
 import java.awt.Container
 import javax.swing.AbstractButton
 
@@ -115,7 +116,8 @@ class KiloSettingsConfigurableTest : BasePlatformTestCase() {
         edt {
             val panel = cfg.createComponent()
             val labels = links(panel as Container).map { it.text }
-            assertEquals(listOf("User Profile", "Models", "Providers", "Agent Behavior", "Auto-Approve", "Context", "Advanced"), labels)
+            assertTrue(labels.containsAll(listOf("User Profile", "Models", "Providers", "Agent Behavior", "Auto-Approve", "Context", "Advanced")))
+            assertTrue(labels.indexOf("User Profile") < labels.indexOf("Advanced"))
         }
     }
 
@@ -142,6 +144,12 @@ class KiloSettingsConfigurableTest : BasePlatformTestCase() {
 
     fun `test isModified always false`() {
         assertFalse(KiloSettingsConfigurable().isModified)
+    }
+
+    fun `test connection status text distinguishes ready and failure`() {
+        assertEquals("Connection: ready", KiloSettingsConfigurable.statusText(KiloAppStatusDto.READY))
+        assertEquals("Connection: error", KiloSettingsConfigurable.statusText(KiloAppStatusDto.ERROR))
+        assertEquals("Connection: disconnected", KiloSettingsConfigurable.statusText(KiloAppStatusDto.DISCONNECTED))
     }
 
     // -- helpers --
