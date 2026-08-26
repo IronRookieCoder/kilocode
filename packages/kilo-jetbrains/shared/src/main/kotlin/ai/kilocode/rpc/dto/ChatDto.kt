@@ -283,6 +283,19 @@ sealed class ChatEventDto {
         val sessionID: String,
     ) : ChatEventDto()
 
+    /**
+     * Turn-completion marker emitted by the cs-cloud daemon on every turn end.
+     * The daemon reports authentication failures as [isError] with the human-readable
+     * reason in the preceding assistant text part instead of emitting `session.error`.
+     */
+    @Serializable
+    @SerialName("session.result")
+    data class SessionResult(
+        val sessionID: String,
+        val isError: Boolean = false,
+        val subtype: String? = null,
+    ) : ChatEventDto()
+
     @Serializable
     @SerialName("session.queue.changed")
     data class SessionQueueChanged(

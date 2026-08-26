@@ -7,4 +7,5 @@ import kotlinx.serialization.Serializable
 data class CsCloudStartDto(
     val ok: Boolean,
     val message: String? = null,
+    val code: String? = null,
 )

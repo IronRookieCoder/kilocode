@@ -456,7 +456,7 @@ class SessionMessageListPanel(
                 question?.hideView()
                 permission?.hideView()
                 outcome?.hideView()
-                login?.show(state.message)
+                login?.show(state.message, state.kind)
             }
             is SessionState.Error -> {
                 setHiddenQuestionTool(null)

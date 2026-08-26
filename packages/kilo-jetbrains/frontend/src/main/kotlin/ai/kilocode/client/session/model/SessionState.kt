@@ -1,5 +1,8 @@
 package ai.kilocode.client.session.model
 
+/** Which account the [SessionState.LoginRequired] overlay should sign the user into. */
+enum class LoginKind { Profile, CsCloud }
+
 /** Single source of truth for what a session is doing right now. */
 sealed class SessionState {
     data object Idle : SessionState()
@@ -24,7 +27,7 @@ sealed class SessionState {
 
     data class TurnEnded(val outcome: Outcome, val tone: OutcomeTone) : SessionState()
 
-    data class LoginRequired(val message: String) : SessionState()
+    data class LoginRequired(val message: String, val kind: LoginKind = LoginKind.Profile) : SessionState()
 
     fun isBusy(): Boolean = when (this) {
         is Idle, is Loading, is Error, is TurnEnded, is LoginRequired -> false

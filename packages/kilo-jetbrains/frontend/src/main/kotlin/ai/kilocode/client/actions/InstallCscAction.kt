@@ -1,18 +1,19 @@
 package ai.kilocode.client.actions
 
+import ai.kilocode.client.app.KiloAppService
 import ai.kilocode.client.plugin.KiloBundle
-import com.intellij.ide.BrowserUtil
 import com.intellij.openapi.actionSystem.AnAction
 import com.intellij.openapi.actionSystem.AnActionEvent
+import com.intellij.openapi.components.service
 import com.intellij.openapi.project.DumbAware
 
 /**
- * Opens the Costrict csc npm package so users can install the CLI that downloads
- * and manages the local cs-cloud daemon.
+ * Installs the Costrict csc CLI via npm on the backend (which then starts the
+ * local cs-cloud daemon), so users never have to install it manually.
  */
 class InstallCscAction : AnAction(), DumbAware {
     override fun actionPerformed(e: AnActionEvent) {
-        BrowserUtil.browse(CSC_NPM_URL)
+        service<KiloAppService>().installCscAsync()
     }
 
     override fun update(e: AnActionEvent) {

@@ -33,6 +33,7 @@ data class LoadErrorDto(
     val resource: String,
     val status: Int? = null,
     val detail: String? = null,
+    val code: String? = null,
 )
 
 @Serializable

@@ -384,6 +384,7 @@ class SessionUi(
         val loginView = if (readonly) null else LoginRequiredView(
             openProfile = { controller.openProfile() },
             dismiss = { controller.dismissLoginRequired() },
+            loginCsCloud = { controller.loginCsCloud() },
             selection = selection,
             focus = focus,
         ).also { login = it }

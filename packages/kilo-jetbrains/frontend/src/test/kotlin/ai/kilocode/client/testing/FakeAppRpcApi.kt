@@ -128,6 +128,26 @@ class FakeAppRpcApi : KiloAppRpcApi {
         return csCloudStart
     }
 
+    var csCloudInstall = CsCloudStartDto(ok = true, message = "installed")
+    var csCloudInstalls = 0
+        private set
+
+    override suspend fun installCsc(): CsCloudStartDto {
+        assertNotEdt("installCsc")
+        csCloudInstalls += 1
+        return csCloudInstall
+    }
+
+    var csCloudLogin = CsCloudStartDto(ok = true, message = "logged in")
+    var csCloudLogins = 0
+        private set
+
+    override suspend fun loginCsCloud(): CsCloudStartDto {
+        assertNotEdt("loginCsCloud")
+        csCloudLogins += 1
+        return csCloudLogin
+    }
+
     override suspend fun modelState(): ModelStateDto {
         assertNotEdt("modelState")
         return models

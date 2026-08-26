@@ -6,6 +6,7 @@ import ai.kilocode.client.session.controller.SessionControllerEvent
 import ai.kilocode.client.session.controller.SessionControllerTestBase
 import ai.kilocode.client.session.ui.style.SessionEditorStyle
 import ai.kilocode.client.ui.UiStyle
+import ai.kilocode.rpc.ConnectionErrorCode
 import com.intellij.ui.components.JBScrollPane
 import java.awt.Dimension
 import javax.swing.border.CompoundBorder
@@ -78,6 +79,68 @@ class ConnectionPanelTest : SessionControllerTestBase() {
 
         assertFalse(panel.toggleExpanded())
         assertFalse(panel.detailsVisible())
+    }
+
+    fun `test cs-cloud not installed error auto-expands install guidance`() {
+        edt {
+            panel.onEvent(SessionControllerEvent.ConnectionChanged.ShowError(
+                "Connection failed",
+                "csc is not installed - install it with `npm install -g @costrict/csc`",
+                code = ConnectionErrorCode.CSC_NOT_INSTALLED,
+            ))
+        }
+
+        assertTrue(panel.isVisible)
+        assertTrue(panel.toggleVisible())
+        assertTrue(panel.toggleExpanded())
+        assertTrue(panel.detailsVisible())
+    }
+
+    fun `test recovery menu offers cs-cloud actions only for cs-cloud failures`() {
+        edt {
+            panel.onEvent(SessionControllerEvent.ConnectionChanged.ShowError("CLI startup failed", null))
+        }
+
+        assertEquals(listOf("Kilo.Restart", "Kilo.Reinstall"), panel.recoveryActionIds())
+
+        edt {
+            panel.onEvent(SessionControllerEvent.ConnectionChanged.ShowError(
+                "Connection failed",
+                "cs-cloud server URL was not found",
+                code = ConnectionErrorCode.CSC_NOT_INSTALLED,
+            ))
+        }
+
+        assertEquals(
+            listOf("Kilo.Restart", "Kilo.Reinstall", "Kilo.StartCsCloud", "Kilo.InstallCsc"),
+            panel.recoveryActionIds(),
+        )
+
+        edt {
+            panel.onEvent(SessionControllerEvent.ConnectionChanged.ShowError(
+                "Connection failed",
+                "connection refused",
+                code = ConnectionErrorCode.DAEMON_DOWN,
+            ))
+        }
+
+        assertEquals(
+            listOf("Kilo.Restart", "Kilo.Reinstall", "Kilo.StartCsCloud"),
+            panel.recoveryActionIds(),
+        )
+
+        edt {
+            panel.onEvent(SessionControllerEvent.ConnectionChanged.ShowError(
+                "Connection failed",
+                "cs-cloud API key is invalid",
+                code = ConnectionErrorCode.UNAUTHORIZED,
+            ))
+        }
+
+        assertEquals(
+            listOf("Kilo.Restart", "Kilo.Reinstall", "Kilo.StartCsCloud"),
+            panel.recoveryActionIds(),
+        )
     }
 
     fun `test workspace error shows retry without details`() {

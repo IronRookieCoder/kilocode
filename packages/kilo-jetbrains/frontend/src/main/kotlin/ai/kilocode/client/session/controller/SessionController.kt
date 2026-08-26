@@ -10,6 +10,7 @@ import ai.kilocode.client.session.model.ModelItem
 import ai.kilocode.client.session.model.SessionModel
 import ai.kilocode.client.session.model.SessionModelEvent
 import ai.kilocode.client.session.model.SessionState
+import ai.kilocode.client.session.model.LoginKind
 import ai.kilocode.client.session.model.Permission
 import ai.kilocode.client.session.model.PermissionFileDiff
 import ai.kilocode.client.session.model.PermissionMeta
@@ -1614,6 +1615,10 @@ class SessionController(
                 idle()
             }
 
+            is ChatEventDto.SessionResult -> {
+                result(event, true)
+            }
+
             is ChatEventDto.SessionQueueChanged -> updateModel { model.setQueued(event.queued.toSet()) }
 
             is ChatEventDto.SessionCompacted -> {
@@ -1655,6 +1660,7 @@ class SessionController(
         is ChatEventDto.SessionStatusChanged,
         is ChatEventDto.SessionUpdated,
         is ChatEventDto.SessionIdle,
+        is ChatEventDto.SessionResult,
         is ChatEventDto.SessionQueueChanged -> {
             edt {
                 if (disposed) return@edt
@@ -1677,6 +1683,7 @@ class SessionController(
             is ChatEventDto.SessionStatusChanged -> status(event.status)
             is ChatEventDto.SessionUpdated -> model.setSession(event.session)
             is ChatEventDto.SessionIdle -> idle()
+            is ChatEventDto.SessionResult -> result(event, false)
             is ChatEventDto.SessionQueueChanged -> model.setQueued(event.queued.toSet())
             else -> Unit
         }
@@ -1692,13 +1699,47 @@ class SessionController(
                 "surface" to "session",
                 "reason" to "paid_model_auth",
             ))
-            model.setState(SessionState.LoginRequired(KiloBundle.message("session.login.required.description")))
+            model.setState(SessionState.LoginRequired(KiloBundle.message("session.login.required.description"), LoginKind.Profile))
+            return
+        }
+        if (isCsCloudAuthRequired(event.error)) {
+            requireCsCloudLogin(event.sessionID, reveal)
             return
         }
         if (event.error?.type == ABORT_ERROR) return
         val msg = event.error?.message ?: event.error?.type ?: KiloBundle.message("session.error.unknown")
         model.setState(SessionState.Error(msg, event.error?.type))
     }
+
+    /**
+     * The cs-cloud daemon never emits `session.error`; it reports an authentication
+     * failure as the assistant text part ("Not logged in · Please run /login") plus a
+     * `session.result` (isError=true) event. Surface the login card from that signal.
+     */
+    private fun result(event: ChatEventDto.SessionResult, reveal: Boolean) {
+        if (!event.isError) return
+        if (!isCsCloudAuthRequiredText(lastAssistantText())) return
+        requireCsCloudLogin(event.sessionID, reveal)
+    }
+
+    private fun requireCsCloudLogin(sessionID: String?, reveal: Boolean) {
+        partType = null
+        tool = null
+        loginRetry = retryPrompt()
+        if (reveal) showSession()
+        capture("Account Overlay Shown", sessionProps(sessionID) + mapOf(
+            "surface" to "session",
+            "reason" to "cs_cloud_auth",
+        ))
+        model.setState(SessionState.LoginRequired(KiloBundle.message("session.login.required.csCloud.description"), LoginKind.CsCloud))
+    }
+
+    private fun lastAssistantText(): String? = model.messages().toList().asReversed()
+        .firstOrNull { it.info.role == "assistant" }
+        ?.parts?.values
+        ?.filterIsInstance<Text>()
+        ?.joinToString("\n") { it.content }
+        ?.takeIf { it.isNotBlank() }
 
     private fun asked(event: ChatEventDto.PermissionAsked) {
         if (autoApprove) {
@@ -1942,6 +1983,9 @@ class SessionController(
 
     private fun resumeAfterLogin() {
         assertEdt()
+        // The cs-cloud daemon only serves the real model catalog once auth is valid, so a workspace
+        // loaded before login holds fallback providers; refresh it so the picker lists costrict models.
+        workspace.reload()
         val retry = loginRetry
         loginRetry = null
         if (retry == null) {
@@ -2254,14 +2298,27 @@ class SessionController(
         else -> "other"
     }
 
+    /** Run `csc auth login` via the backend, then re-dispatch the pending prompt. */
+    fun loginCsCloud() {
+        assertEdt()
+        capture("CsCloud Login Started", sessionProps() + mapOf("surface" to "session"))
+        app.loginCsCloudAsync { ok ->
+            ApplicationManager.getApplication().invokeLater {
+                if (ok) resumeAfterLogin()
+            }
+        }
+    }
+
     fun dismissLoginRequired() {
         assertEdt()
-        val active = model.state is SessionState.LoginRequired
+        val state = model.state
+        val active = state is SessionState.LoginRequired
+        val reason = if (state is SessionState.LoginRequired && state.kind == LoginKind.CsCloud) "cs_cloud_auth" else "paid_model_auth"
         loginRetry = null
         if (active) {
             capture("Account Overlay Dismissed", sessionProps() + mapOf(
                 "surface" to "session",
-                "reason" to "paid_model_auth",
+                "reason" to reason,
             ))
             updateModel { model.setState(SessionState.Idle) }
         }
@@ -2434,6 +2491,7 @@ class SessionController(
             return SessionControllerEvent.ConnectionChanged.ShowError(
                 KiloBundle.message("session.connection.error.app"),
                 app.errors.toErrorText() ?: app.error,
+                code = app.errors.firstOrNull()?.code,
             )
         }
 
@@ -2647,6 +2705,7 @@ private fun matchesSession(event: ChatEventDto, id: String): Boolean = when (eve
     is ChatEventDto.SessionStatusChanged -> event.sessionID == id
     is ChatEventDto.SessionUpdated -> event.sessionID == id
     is ChatEventDto.SessionIdle -> event.sessionID == id
+    is ChatEventDto.SessionResult -> event.sessionID == id
     is ChatEventDto.SessionQueueChanged -> event.sessionID == id
     is ChatEventDto.SessionCompacted -> event.sessionID == id
     is ChatEventDto.SessionDiffChanged -> event.sessionID == id

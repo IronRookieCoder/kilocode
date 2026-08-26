@@ -31,5 +31,7 @@ class CsCloudConnectionProvider : KiloConnectionProvider {
                 .toList()
         },
         starter = { CscCloudStarter(EnvironmentUtil.getEnvironmentMap(), log).start() },
+        installer = { CscInstaller(EnvironmentUtil.getEnvironmentMap(), log).install() },
+        login = { CscLogin(EnvironmentUtil.getEnvironmentMap(), log).login() },
     )
 }

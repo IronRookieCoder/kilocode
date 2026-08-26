@@ -36,7 +36,7 @@ sealed class ConnectionState {
     data object Discovering : ConnectionState() // kilocode_change
     data object Connecting : ConnectionState()
     data class Connected(val port: Int, val password: String) : ConnectionState()
-    data class Error(val message: String, val details: String? = null) : ConnectionState()
+    data class Error(val message: String, val details: String? = null, val code: String? = null) : ConnectionState()
 }
 
 data class SseEvent(val type: String, val data: String)

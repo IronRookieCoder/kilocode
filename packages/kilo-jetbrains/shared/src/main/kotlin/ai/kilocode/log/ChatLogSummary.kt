@@ -33,6 +33,7 @@ object ChatLogSummary {
         is ChatEventDto.SessionStatusChanged -> event.sessionID
         is ChatEventDto.SessionUpdated -> event.sessionID
         is ChatEventDto.SessionIdle -> event.sessionID
+        is ChatEventDto.SessionResult -> event.sessionID
         is ChatEventDto.SessionQueueChanged -> event.sessionID
         is ChatEventDto.SessionCompacted -> event.sessionID
         is ChatEventDto.SessionDiffChanged -> event.sessionID
@@ -224,6 +225,13 @@ object ChatLogSummary {
             "evt=session.idle",
         )
 
+        is ChatEventDto.SessionResult -> join(
+            sid(event.sessionID),
+            "evt=session.result",
+            "isError=${event.isError}",
+            event.subtype?.takeIf { it.isNotBlank() }?.let { "subtype=$it" },
+        )
+
         is ChatEventDto.SessionQueueChanged -> join(
             sid(event.sessionID),
             "evt=session.queue.changed",
@@ -264,6 +272,9 @@ object ChatLogSummary {
         is ChatEventDto.Error -> error(event.error, sid(event.sessionID), "evt=session.error")
         is ChatEventDto.MessageUpdated -> event.info.error?.let { err ->
             error(err, sid(event.sessionID), "evt=message.updated", "mid=${event.info.id}")
+        }
+        is ChatEventDto.SessionResult -> event.isError.takeIf { it }?.let {
+            join(sid(event.sessionID), "evt=session.result", "isError=true", event.subtype?.let { "subtype=$it" })
         }
         else -> null
     }

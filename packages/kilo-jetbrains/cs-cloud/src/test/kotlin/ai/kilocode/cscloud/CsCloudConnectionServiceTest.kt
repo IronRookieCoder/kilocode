@@ -3,6 +3,7 @@ package ai.kilocode.cscloud
 import ai.kilocode.backend.app.ConnectionState
 import ai.kilocode.backend.app.SseEvent
 import ai.kilocode.log.KiloLog
+import ai.kilocode.rpc.ConnectionErrorCode
 import ai.kilocode.rpc.dto.CsCloudStartDto
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -19,9 +20,11 @@ import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
 import kotlin.test.assertIs
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
+import java.util.concurrent.atomic.AtomicBoolean
 
 class CsCloudConnectionServiceTest {
     private val scope = kotlinx.coroutines.CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -113,6 +116,7 @@ class CsCloudConnectionServiceTest {
         service.connect()
         val missingState = assertIs<ConnectionState.Error>(service.state.value)
         assertEquals("cs-cloud server URL was not found", missingState.message)
+        assertEquals(ConnectionErrorCode.CSC_NOT_INSTALLED, missingState.code)
 
         val server = MockWebServer()
         server.enqueue(MockResponse().setResponseCode(503).setBody("{}"))
@@ -126,9 +130,49 @@ class CsCloudConnectionServiceTest {
             unavailable.connect()
             val error = assertIs<ConnectionState.Error>(unavailable.state.value)
             assertEquals("unavailable: Service Unavailable (HTTP 503)", error.message)
+            assertNull(error.code)
             assertFailsWith<CsCloudUnsupportedOperationException> { runBlocking { unavailable.reinstall() } }
         } finally {
             unavailable.dispose()
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun `rejected api key is reported as unauthorized`() = runBlocking {
+        val server = MockWebServer()
+        server.enqueue(MockResponse().setResponseCode(401).setBody("{}"))
+        server.start()
+        val root = Files.createTempDirectory("cs-cloud-unauthorized")
+        Files.createDirectories(root.resolve(".costrict/cs-cloud"))
+        Files.writeString(root.resolve(".costrict/cs-cloud/server_url"), server.url("/").newBuilder().host("127.0.0.1").build().toString())
+        Files.writeString(root.resolve(".costrict/cs-cloud/config.json"), "{\"api_key\":\"secret\"}")
+        val service = CsCloudConnectionService(scope, CsCloudEndpointResolver(root, emptyMap()), TestLog, workspace = root)
+        try {
+            service.connect()
+            val error = assertIs<ConnectionState.Error>(service.state.value)
+            assertEquals(ConnectionErrorCode.UNAUTHORIZED, error.code)
+        } finally {
+            service.dispose()
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun `unreachable daemon is reported as daemon down`() = runBlocking {
+        val server = MockWebServer()
+        server.enqueue(MockResponse().setSocketPolicy(SocketPolicy.DISCONNECT_AT_START))
+        server.start()
+        val root = Files.createTempDirectory("cs-cloud-daemon-down")
+        Files.createDirectories(root.resolve(".costrict/cs-cloud"))
+        Files.writeString(root.resolve(".costrict/cs-cloud/server_url"), server.url("/").newBuilder().host("127.0.0.1").build().toString())
+        val service = CsCloudConnectionService(scope, CsCloudEndpointResolver(root, emptyMap()), TestLog, workspace = root)
+        try {
+            service.connect()
+            val error = assertIs<ConnectionState.Error>(service.state.value)
+            assertEquals(ConnectionErrorCode.DAEMON_DOWN, error.code)
+        } finally {
+            service.dispose()
             server.shutdown()
         }
     }
@@ -203,6 +247,94 @@ class CsCloudConnectionServiceTest {
             val result = service.startCsCloud()
             assertTrue(!result.ok)
             assertEquals("csc not installed", result.message)
+            assertEquals(ConnectionState.Disconnected, service.state.value)
+        } finally {
+            service.dispose()
+        }
+    }
+
+    @Test
+    fun `installCsc installs then starts cs-cloud`() = runBlocking {
+        val root = Files.createTempDirectory("cs-cloud-install")
+        val service = CsCloudConnectionService(
+            scope,
+            CsCloudEndpointResolver(root, emptyMap()),
+            TestLog,
+            installer = { CsCloudStartDto(true, "installed") },
+            starter = { CsCloudStartDto(true, "started") },
+        )
+        try {
+            val result = service.installCsc()
+            assertTrue(result.ok)
+            assertEquals("started", result.message)
+            // Success triggers a connect attempt, which fails discovery here.
+            assertIs<ConnectionState.Error>(service.state.value)
+        } finally {
+            service.dispose()
+        }
+    }
+
+    @Test
+    fun `installCsc failure does not start cs-cloud`() = runBlocking {
+        val root = Files.createTempDirectory("cs-cloud-install-fail")
+        val started = AtomicBoolean(false)
+        val service = CsCloudConnectionService(
+            scope,
+            CsCloudEndpointResolver(root, emptyMap()),
+            TestLog,
+            installer = { CsCloudStartDto(false, "npm not found", ConnectionErrorCode.NPM_NOT_FOUND) },
+            starter = {
+                started.set(true)
+                CsCloudStartDto(true, "started")
+            },
+        )
+        try {
+            val result = service.installCsc()
+            assertTrue(!result.ok)
+            assertEquals(ConnectionErrorCode.NPM_NOT_FOUND, result.code)
+            assertFalse(started.get())
+            assertEquals(ConnectionState.Disconnected, service.state.value)
+        } finally {
+            service.dispose()
+        }
+    }
+
+    @Test
+    fun `loginCsCloud delegates to the login lambda`() = runBlocking {
+        val root = Files.createTempDirectory("cs-cloud-login")
+        var calls = 0
+        val service = CsCloudConnectionService(
+            scope,
+            CsCloudEndpointResolver(root, emptyMap()),
+            TestLog,
+            login = {
+                calls += 1
+                CsCloudStartDto(true, "signed in")
+            },
+        )
+        try {
+            val result = service.loginCsCloud()
+            assertEquals(1, calls)
+            assertTrue(result.ok)
+            assertEquals("signed in", result.message)
+        } finally {
+            service.dispose()
+        }
+    }
+
+    @Test
+    fun `loginCsCloud failure is returned without connecting`() = runBlocking {
+        val root = Files.createTempDirectory("cs-cloud-login-fail")
+        val service = CsCloudConnectionService(
+            scope,
+            CsCloudEndpointResolver(root, emptyMap()),
+            TestLog,
+            login = { CsCloudStartDto(false, "csc auth login failed") },
+        )
+        try {
+            val result = service.loginCsCloud()
+            assertTrue(!result.ok)
+            assertEquals("csc auth login failed", result.message)
             assertEquals(ConnectionState.Disconnected, service.state.value)
         } finally {
             service.dispose()

@@ -63,6 +63,12 @@ interface KiloAppRpcApi : RemoteApi<Unit> {
     /** Run `csc cloud start` to bring up the local cs-cloud daemon. */
     suspend fun startCsCloud(): CsCloudStartDto
 
+    /** Install the `csc` CLI via the found package manager, then start the local cs-cloud daemon. */
+    suspend fun installCsc(): CsCloudStartDto
+
+    /** Run `csc auth login` so the user can sign in to CoStrict in the browser. */
+    suspend fun loginCsCloud(): CsCloudStartDto
+
     /** Load persisted CLI model state such as favorites. */
     suspend fun modelState(): ModelStateDto
 

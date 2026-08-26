@@ -1,10 +1,12 @@
 package ai.kilocode.cscloud
 
 import ai.kilocode.log.KiloLog
+import ai.kilocode.rpc.ConnectionErrorCode
 import java.io.File
 import java.nio.file.Files
 import kotlinx.coroutines.runBlocking
 import kotlin.test.Test
+import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
@@ -33,6 +35,8 @@ class CscCloudStarterTest {
 
         assertFalse(result.ok)
         assertTrue(result.message.orEmpty().contains("csc is not installed"), "message=${result.message}")
+        assertEquals(ConnectionErrorCode.CSC_NOT_INSTALLED, result.code)
+        assertFalse(result.message.orEmpty().contains("restart the IDE"), "message=${result.message}")
     }
 
     @Test

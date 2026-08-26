@@ -9,6 +9,7 @@ import ai.kilocode.client.session.ui.style.SessionEditorStyle
 import ai.kilocode.client.session.ui.style.SessionEditorStyleTarget
 import ai.kilocode.client.session.ui.style.SessionUiStyle
 import ai.kilocode.client.ui.UiStyle
+import ai.kilocode.rpc.ConnectionErrorCode
 import com.intellij.ide.DataManager
 import com.intellij.icons.AllIcons
 import com.intellij.openapi.actionSystem.ActionGroup
@@ -107,6 +108,7 @@ class ConnectionPanel(
 
     private var detail: String? = null
     private var expanded = false
+    private var code: String? = null
 
     init {
         Disposer.register(parent, this)
@@ -130,7 +132,7 @@ class ConnectionPanel(
             is SessionControllerEvent.ConnectionChanged.ShowDownloading -> showDownloading(event.percent, event.version, event.platform)
 
             is SessionControllerEvent.ConnectionChanged.ShowError -> {
-                showError(event.summary, event.detail)
+                showError(event.summary, event.detail, event.code)
                 showPanel()
             }
 
@@ -148,6 +150,7 @@ class ConnectionPanel(
         label.text = KiloBundle.message("session.connection.connecting")
         detail = null
         expanded = false
+        code = null
         toggle.isVisible = false
         retry.isVisible = false
         renderDetails()
@@ -164,18 +167,20 @@ class ConnectionPanel(
         }
         detail = null
         expanded = false
+        code = null
         toggle.isVisible = false
         retry.isVisible = false
         renderDetails()
         showPanel()
     }
 
-    private fun showError(text: String, detail: String?) {
+    private fun showError(text: String, detail: String?, code: String? = null) {
         label.foreground = UiStyle.Colors.errorLabelForeground()
         label.text = text
         retry.isVisible = true
         this.detail = detail?.takeIf { it.isNotBlank() }
-        expanded = false
+        this.code = code
+        expanded = code == ConnectionErrorCode.CSC_NOT_INSTALLED
         toggle.isVisible = this.detail != null
         renderDetails()
     }
@@ -185,6 +190,7 @@ class ConnectionPanel(
         label.text = text
         retry.isVisible = true
         this.detail = detail?.takeIf { it.isNotBlank() }
+        code = null
         expanded = false
         toggle.isVisible = this.detail != null
         renderDetails()
@@ -257,11 +263,20 @@ class ConnectionPanel(
             }
         })
         group.addSeparator()
-        ActionManager.getInstance().getAction("Kilo.Restart")?.let { group.add(it) }
-        ActionManager.getInstance().getAction("Kilo.Reinstall")?.let { group.add(it) }
-        ActionManager.getInstance().getAction("Kilo.InstallCsc")?.let { group.add(it) }
-        ActionManager.getInstance().getAction("Kilo.StartCsCloud")?.let { group.add(it) }
+        recoveryActionIds().forEach { id -> ActionManager.getInstance().getAction(id)?.let { group.add(it) } }
         return group
+    }
+
+    /** Recovery actions offered for the current failure, newest first. */
+    internal fun recoveryActionIds(): List<String> = buildList {
+        add("Kilo.Restart")
+        add("Kilo.Reinstall")
+        if (code == ConnectionErrorCode.CSC_NOT_INSTALLED || code == ConnectionErrorCode.DAEMON_DOWN || code == ConnectionErrorCode.UNAUTHORIZED) {
+            add("Kilo.StartCsCloud")
+        }
+        if (code == ConnectionErrorCode.CSC_NOT_INSTALLED) {
+            add("Kilo.InstallCsc")
+        }
     }
 
     override fun dispose() {

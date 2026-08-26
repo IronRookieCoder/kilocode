@@ -265,7 +265,7 @@ internal class KiloBackendProviderSettingsManager(
         }
     }
 
-    private fun url(path: String) = "http://127.0.0.1:${app.port}$path"
+    private fun url(path: String) = (app.base ?: "http://127.0.0.1:${app.port}") + path
 
     private fun enc(value: String) = URLEncoder.encode(value, StandardCharsets.UTF_8)
 

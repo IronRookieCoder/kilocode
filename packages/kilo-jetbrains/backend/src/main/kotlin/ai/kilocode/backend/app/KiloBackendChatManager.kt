@@ -65,6 +65,7 @@ class KiloBackendChatManager(
             "session.status",
             "session.updated",
             "session.idle",
+            "session.result",
             "session.queue.changed",
             "session.compacted",
             "session.diff",
