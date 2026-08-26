@@ -3,6 +3,7 @@ rootProject.name = "kilo.jetbrains"
 include("shared")
 include("frontend")
 include("backend")
+include("cs-cloud")
 
 pluginManagement {
     includeBuild("build-tasks")
