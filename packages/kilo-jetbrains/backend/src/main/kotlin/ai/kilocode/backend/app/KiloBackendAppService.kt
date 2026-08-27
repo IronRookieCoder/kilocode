@@ -1,9 +1,12 @@
 package ai.kilocode.backend.app
 
+import ai.kilocode.backend.cscloud.CsCloudConnectionProvider
+import ai.kilocode.backend.cscloud.KiloBackendActiveProject
 import ai.kilocode.backend.migration.KiloBackendLegacyMigrationStoreService
 import ai.kilocode.backend.migration.LegacyMigrationDetection
 import ai.kilocode.backend.migration.LegacyMigrationStatus
 import ai.kilocode.backend.telemetry.KiloBackendTelemetry
+import ai.kilocode.backend.vfs.KiloBackendVfsRefresher
 import ai.kilocode.backend.workspace.KiloBackendWorkspaceManager
 import ai.kilocode.connection.BackendEvent
 import ai.kilocode.connection.ConnectionProvider
@@ -66,7 +69,7 @@ class KiloBackendAppService private constructor(
     /** IntelliJ service injection entry point. */
     constructor(cs: CoroutineScope) : this(
         cs,
-        UnconfiguredConnectionProvider(),
+        defaultProvider(cs),
         KiloLog.create(KiloBackendAppService::class.java),
         APP_LOAD_TIMEOUT_MS,
     )
@@ -90,6 +93,17 @@ class KiloBackendAppService private constructor(
             log: KiloLog,
             loadTimeoutMs: Long = APP_LOAD_TIMEOUT_MS,
         ) = KiloBackendAppService(cs, provider, log, loadTimeoutMs)
+
+        /** Builds the cs-cloud backed provider used by the IDE service entry point. */
+        private fun defaultProvider(cs: CoroutineScope): ConnectionProvider {
+            val active = KiloBackendActiveProject().also { it.start() }
+            return CsCloudConnectionProvider(
+                cs = cs,
+                workspace = active::current,
+                log = KiloLog.create(CsCloudConnectionProvider::class.java),
+                onDispose = active::stop,
+            )
+        }
     }
 
     private val mutex = Mutex()
@@ -113,6 +127,7 @@ class KiloBackendAppService private constructor(
     val activity = KiloBackendActivityManager(cs, log)
     val models = KiloBackendModelStateManager(log)
     val workspaces = KiloBackendWorkspaceManager(cs, sessions, log)
+    private val vfs = KiloBackendVfsRefresher(cs, events, sessions::sessionDirectory, log)
 
     private var profile: ProfileDto? = null
     var config: ConfigDto? = null
@@ -280,6 +295,7 @@ class KiloBackendAppService private constructor(
             }
             activity.start(sessions.statuses, sessions::sessionDirectory, chat.events)
             startWatchingGlobalSseEvents()
+            vfs.start()
 
             setTelemetry(true)
             captureBackend()
@@ -555,6 +571,7 @@ class KiloBackendAppService private constructor(
         activity.stop()
         models.stop()
         workspaces.stop()
+        vfs.stop()
     }
 
     // ------ shutdown ------

@@ -189,7 +189,7 @@ class CsCloudConnectionService(
         ): CsCloudConnectionService = CsCloudConnectionService(
             scope = scope,
             resolveEndpoint = resolver::resolve,
-            checkHealth = { endpoint -> defaultHealthCheck(endpoint, clients(endpoint).client) },
+            checkHealth = { endpoint -> defaultHealthCheck(endpoint, clients(endpoint).plainClient) },
             openSse = { endpoint, path, listener -> CsCloudSseClient(endpoint, path, clients(endpoint).sseClient, listener) },
             currentWorkspace = workspace,
             onEvent = onEvent,

@@ -29,6 +29,9 @@ class CsCloudHttpClients(
     /** SSE client: identical headers, no envelope unwrapping, unbounded read timeout. */
     val sseClient: OkHttpClient = buildSseClient()
 
+    /** Plain client: header/route normalization only; raw bodies pass through untouched. */
+    val plainClient: OkHttpClient = baseBuilder().build()
+
     private fun buildClient(): OkHttpClient = baseBuilder()
         .readTimeout(60, TimeUnit.SECONDS)
         .connectionPool(ConnectionPool(5, 5, TimeUnit.MINUTES))

@@ -17,9 +17,12 @@ dependencies {
     }
 
     implementation(project(":shared"))
+    implementation(project(":cs-cloud"))
     implementation(libs.kotlinx.serialization.json)
+    implementation(libs.okhttp)
 
     testImplementation(libs.kotlinx.coroutines.test)
+    testImplementation(libs.okhttp.mockwebserver)
     testImplementation(kotlin("test"))
 }
 
