@@ -1,17 +1,15 @@
 package ai.kilocode.backend.app
 
-import ai.kilocode.backend.cli.KiloCliDataParser
+import ai.kilocode.connection.Transport
 import ai.kilocode.log.KiloLog
 import ai.kilocode.rpc.dto.ModelFavoriteUpdateDto
 import ai.kilocode.rpc.dto.ModelSelectionDto
 import ai.kilocode.rpc.dto.ModelSelectionUpdateDto
 import ai.kilocode.rpc.dto.ModelStateDto
 import ai.kilocode.rpc.dto.ModelVariantUpdateDto
+import ai.kilocode.rpc.dto.PathStateDto
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
-import okhttp3.OkHttpClient
-import okhttp3.Request
-import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.io.path.createDirectories
 import kotlin.io.path.exists
@@ -23,34 +21,32 @@ class KiloBackendModelStateManager(
 ) {
     companion object {
         private val DEFAULT_DIR = Path.of(System.getProperty("user.home"), ".local", "state", "kilo")
+        private val json = kotlinx.serialization.json.Json { ignoreUnknownKeys = true; encodeDefaults = true }
     }
 
     private val mutex = Mutex()
 
-    private var client: OkHttpClient? = null
-    private var base: String? = null
+    private var transport: Transport? = null
     private var file: Path? = null
 
-    fun start(http: OkHttpClient, port: Int) {
-        client = http
-        base = "http://127.0.0.1:$port"
+    fun start(transport: Transport) {
+        this.transport = transport
         file = null
     }
 
     fun stop() {
-        client = null
-        base = null
+        transport?.close()
+        transport = null
         file = null
     }
 
     suspend fun state(): ModelStateDto = mutex.withLock {
-        KiloCliDataParser.parseModelState(read().orEmpty())
+        decode(read().orEmpty())
     }
 
     suspend fun favorite(update: ModelFavoriteUpdateDto): ModelStateDto = mutex.withLock {
-        val raw = read()
+        val state = decode(read().orEmpty())
         val key = update.providerID to update.modelID
-        val state = KiloCliDataParser.parseModelState(raw.orEmpty())
         val current = state.favorite
         val exists = current.any { it.providerID to it.modelID == key }
         val next = when (update.action) {
@@ -59,37 +55,37 @@ class KiloBackendModelStateManager(
             else -> current
         }
         val updated = state.copy(favorite = next)
-        write(KiloCliDataParser.buildModelStateJson(raw, updated))
+        write(json.encodeToString(ModelStateDto.serializer(), updated))
         updated
     }
 
     suspend fun selection(update: ModelSelectionUpdateDto): ModelStateDto = mutex.withLock {
-        val raw = read()
-        val state = KiloCliDataParser.parseModelState(raw.orEmpty())
+        val state = decode(read().orEmpty())
         val next = state.model + (update.agent to ModelSelectionDto(update.providerID, update.modelID))
         val updated = state.copy(model = next)
-        write(KiloCliDataParser.buildModelStateJson(raw, updated))
+        write(json.encodeToString(ModelStateDto.serializer(), updated))
         updated
     }
 
     suspend fun clear(agent: String): ModelStateDto = mutex.withLock {
-        val raw = read()
-        val state = KiloCliDataParser.parseModelState(raw.orEmpty())
+        val state = decode(read().orEmpty())
         val updated = state.copy(model = state.model - agent)
-        write(KiloCliDataParser.buildModelStateJson(raw, updated))
+        write(json.encodeToString(ModelStateDto.serializer(), updated))
         updated
     }
 
     suspend fun variant(update: ModelVariantUpdateDto): ModelStateDto = mutex.withLock {
-        val raw = read()
-        val state = KiloCliDataParser.parseModelState(raw.orEmpty())
+        val state = decode(read().orEmpty())
         val updated = state.copy(variant = state.variant + (update.key to update.value))
-        write(KiloCliDataParser.buildModelStateJson(raw, updated))
+        write(json.encodeToString(ModelStateDto.serializer(), updated))
         updated
     }
 
+    private fun decode(raw: String): ModelStateDto =
+        if (raw.isBlank()) ModelStateDto() else json.decodeFromString(ModelStateDto.serializer(), raw)
+
     private fun read(): String? {
-        val path = resolve() ?: return null
+        val path = file ?: return null
         if (!path.exists()) return null
         return try {
             path.readText()
@@ -100,32 +96,24 @@ class KiloBackendModelStateManager(
     }
 
     private fun write(raw: String) {
-        val path = resolve() ?: return
+        val path = file ?: return
         path.parent?.createDirectories()
         path.writeText(raw)
     }
 
-    private fun resolve(): Path? {
+    private suspend fun resolve(): Path? {
         file?.let { return it }
-        val http = client ?: return null
-        val url = base ?: return null
-        val request = Request.Builder().url("$url/path").get().build()
+        val t = transport ?: return null
         return try {
-            http.newCall(request).execute().use { response ->
-                if (!response.isSuccessful) {
-                    log.warn("path fetch failed: HTTP ${response.code}")
-                    return null
-                }
-                val raw = response.body?.string() ?: return null
-                val dir = KiloCliDataParser.parsePathState(raw)?.let(Path::of) ?: DEFAULT_DIR
-                Files.createDirectories(dir)
-                dir.resolve("model.json").also { file = it }
-            }
+            val raw = t.call("GET", "/path")
+            val dir = json.decodeFromString(PathStateDto.serializer(), raw).path
+                ?.let(Path::of) ?: DEFAULT_DIR
+            dir.createDirectories()
+            dir.resolve("model.json").also { file = it }
         } catch (e: Exception) {
             log.warn("path fetch failed: ${e.message}")
-            Files.createDirectories(DEFAULT_DIR)
+            DEFAULT_DIR.createDirectories()
             DEFAULT_DIR.resolve("model.json").also { file = it }
         }
     }
-
 }

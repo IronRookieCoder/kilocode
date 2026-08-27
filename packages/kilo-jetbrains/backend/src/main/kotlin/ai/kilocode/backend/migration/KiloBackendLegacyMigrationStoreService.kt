@@ -1,7 +1,5 @@
 package ai.kilocode.backend.migration
 
-import ai.kilocode.backend.cli.KiloBackendCliManager
-import ai.kilocode.backend.cli.KiloCliConfigPath
 import ai.kilocode.log.KiloLog
 import com.intellij.openapi.components.Service
 import com.intellij.openapi.components.service
@@ -58,7 +56,7 @@ class KiloBackendLegacyMigrationStoreService {
         }
 
         internal fun resolveSource(log: KiloLog, includeFile: Boolean = false): LegacyMigrationSource {
-            val env = KiloBackendCliManager(log).buildEnv("migration")
+            val env = migrationEnv(log)
             return resolveSource(log, includeFile, env, LegacyV5Sources(log = log::info))
         }
 
@@ -121,8 +119,8 @@ class KiloBackendLegacyMigrationStoreService {
         }
 
         private fun fileStore(log: KiloLog, env: Map<String, String>? = null): FileStore {
-            val cfg = env ?: KiloBackendCliManager(log).buildEnv("migration")
-            val file = KiloCliConfigPath.legacySettingsFile(cfg)
+            val cfg = env ?: migrationEnv(log)
+            val file = LegacyMigrationPaths.legacySettingsFile(cfg)
             val store = LegacySettingsFileMigrationStore(file) { msg, err ->
                 if (err == null) log.warn(msg) else log.warn(msg, err)
             }

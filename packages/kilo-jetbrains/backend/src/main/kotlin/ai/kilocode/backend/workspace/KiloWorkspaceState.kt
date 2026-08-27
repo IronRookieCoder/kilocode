@@ -1,6 +1,7 @@
 package ai.kilocode.backend.workspace
 
 import ai.kilocode.backend.app.LoadError
+import kotlinx.serialization.Serializable
 
 /**
  * Workspace data lifecycle state, combining connection readiness
@@ -27,6 +28,7 @@ sealed class KiloWorkspaceState {
  * Tracks which workspace data fetches have completed during
  * the [KiloWorkspaceState.Loading] phase.
  */
+@Serializable
 data class KiloWorkspaceLoadProgress(
     val providers: Boolean = false,
     val agents: Boolean = false,
@@ -34,12 +36,14 @@ data class KiloWorkspaceLoadProgress(
     val skills: Boolean = false,
 )
 
+@Serializable
 data class ProviderData(
     val providers: List<ProviderInfo>,
     val connected: List<String>,
     val defaults: Map<String, String>,
 )
 
+@Serializable
 data class ProviderInfo(
     val id: String,
     val name: String,
@@ -47,6 +51,7 @@ data class ProviderInfo(
     val models: Map<String, ModelInfo>,
 )
 
+@Serializable
 data class ModelInfo(
     val id: String,
     val name: String,
@@ -73,28 +78,33 @@ data class ModelInfo(
     val mayTrainOnYourPrompts: Boolean = false,
 )
 
+@Serializable
 data class ModelLimitInfo(
     val context: Long = 0,
     val input: Long? = null,
     val output: Long = 0,
 )
 
+@Serializable
 data class ModelCostInfo(
     val input: Double,
     val output: Double,
     val cache: ModelCacheCostInfo? = null,
 )
 
+@Serializable
 data class ModelCacheCostInfo(
     val read: Double,
     val write: Double,
 )
 
+@Serializable
 data class ModelCapabilitiesInfo(
     val reasoning: Boolean = false,
     val input: ModelInputCapabilitiesInfo? = null,
 )
 
+@Serializable
 data class ModelInputCapabilitiesInfo(
     val text: Boolean = false,
     val image: Boolean = false,
@@ -103,25 +113,30 @@ data class ModelInputCapabilitiesInfo(
     val pdf: Boolean = false,
 )
 
+@Serializable
 data class ModelOptionsInfo(
     val description: String? = null,
 )
 
+@Serializable
 data class ModelAutoRoutingInfo(
     val models: List<String> = emptyList(),
 )
 
+@Serializable
 data class ModelTerminalBenchInfo(
     val overallScore: Double,
     val avgAttemptCostUsd: Double,
 )
 
+@Serializable
 data class AgentData(
     val agents: List<AgentInfo>,
     val all: List<AgentInfo>,
     val default: String,
 )
 
+@Serializable
 data class AgentInfo(
     val name: String,
     val displayName: String?,
@@ -133,6 +148,7 @@ data class AgentInfo(
     val deprecated: Boolean?,
 )
 
+@Serializable
 data class CommandInfo(
     val name: String,
     val description: String?,
@@ -144,6 +160,7 @@ data class CommandInfo(
     val subtask: Boolean?,
 )
 
+@Serializable
 data class SkillInfo(
     val name: String,
     val description: String?,

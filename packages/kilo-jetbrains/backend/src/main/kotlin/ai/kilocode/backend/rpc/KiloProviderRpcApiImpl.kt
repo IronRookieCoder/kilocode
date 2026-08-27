@@ -28,12 +28,27 @@ internal class KiloProviderRpcApiImpl : KiloProviderRpcApi {
         get() = KiloBackendProviderSettingsManager(service<KiloBackendAppService>())
 
     override suspend fun state(directory: String): ProviderSettingsDto = logged("state dir=$directory") { manager.state(directory) }
-    override suspend fun connect(input: ProviderConnectDto): ProviderActionResultDto = logged("connect provider=${input.providerId}") { manager.connect(input) }
+    override suspend fun connect(input: ProviderConnectDto): ProviderActionResultDto = logged("connect provider=${input.providerId}") {
+        manager.connect(input)
+        ProviderActionResultDto(state = manager.state(input.directory))
+    }
     override suspend fun authorize(input: ProviderOAuthAuthorizeDto): ProviderOAuthReadyDto = logged("authorize provider=${input.providerId}") { manager.authorize(input) }
-    override suspend fun callback(input: ProviderOAuthCallbackDto): ProviderActionResultDto = logged("callback provider=${input.providerId}") { manager.callback(input) }
-    override suspend fun disconnect(input: ProviderDisconnectDto): ProviderActionResultDto = logged("disconnect provider=${input.providerId}") { manager.disconnect(input) }
-    override suspend fun enable(input: ProviderEnableDto): ProviderActionResultDto = logged("enable provider=${input.providerId}") { manager.enable(input) }
-    override suspend fun saveCustom(input: CustomProviderSaveDto): ProviderActionResultDto = logged("save custom provider=${input.id}") { manager.saveCustom(input) }
+    override suspend fun callback(input: ProviderOAuthCallbackDto): ProviderActionResultDto = logged("callback provider=${input.providerId}") {
+        manager.callback(input)
+        ProviderActionResultDto(state = manager.state(input.directory), profileCleared = true)
+    }
+    override suspend fun disconnect(input: ProviderDisconnectDto): ProviderActionResultDto = logged("disconnect provider=${input.providerId}") {
+        manager.disconnect(input)
+        ProviderActionResultDto(state = manager.state(input.directory), profileCleared = true)
+    }
+    override suspend fun enable(input: ProviderEnableDto): ProviderActionResultDto = logged("enable provider=${input.providerId}") {
+        manager.enable(input)
+        ProviderActionResultDto(state = manager.state(input.directory))
+    }
+    override suspend fun saveCustom(input: CustomProviderSaveDto): ProviderActionResultDto = logged("save custom provider=${input.id}") {
+        manager.saveCustom(input)
+        ProviderActionResultDto(state = manager.state(input.directory))
+    }
     override suspend fun fetchCustomModels(input: CustomModelFetchDto): CustomModelFetchResultDto = logged("fetch custom models") { manager.fetch(input) }
 
     private suspend fun <T> logged(name: String, block: suspend () -> T): T {

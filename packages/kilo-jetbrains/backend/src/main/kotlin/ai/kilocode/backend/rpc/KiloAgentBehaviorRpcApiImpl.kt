@@ -3,68 +3,85 @@
 package ai.kilocode.backend.rpc
 
 import ai.kilocode.backend.app.KiloBackendAppService
-import ai.kilocode.backend.cli.KiloClaudeCompatSettings
-import ai.kilocode.backend.cli.KiloCliDataParser
 import ai.kilocode.log.KiloLog
 import ai.kilocode.rpc.KiloAgentBehaviorRpcApi
 import ai.kilocode.rpc.dto.AgentCreateDto
 import ai.kilocode.rpc.dto.AgentDetailDto
-import ai.kilocode.jetbrains.api.model.AgentBuilderSaveRequest
+import ai.kilocode.rpc.dto.CommandDto
 import ai.kilocode.rpc.dto.CommandFileDto
 import ai.kilocode.rpc.dto.ConfigPatchDto
 import ai.kilocode.rpc.dto.McpConfigDto
 import ai.kilocode.rpc.dto.McpServerConfigDto
+import ai.kilocode.rpc.dto.McpStatusDto
 import ai.kilocode.rpc.dto.PermissionRuleItemDto
 import ai.kilocode.rpc.dto.SkillDto
+import com.intellij.ide.util.PropertiesComponent
 import com.intellij.openapi.components.service
+import com.intellij.openapi.util.SystemInfo
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
-import okhttp3.MediaType.Companion.toMediaType
-import okhttp3.Request
-import okhttp3.RequestBody.Companion.toRequestBody
-import com.intellij.openapi.util.SystemInfo
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.put
 import java.net.URLEncoder
+import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.nio.file.InvalidPathException
 import java.nio.file.Path
-import java.nio.charset.StandardCharsets
 import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.atomic.AtomicInteger
 
 class KiloAgentBehaviorRpcApiImpl(private val backend: KiloBackendAppService? = null) : KiloAgentBehaviorRpcApi {
     companion object {
         private val LOG = KiloLog.create(KiloAgentBehaviorRpcApiImpl::class.java)
-        private val JSON = "application/json".toMediaType()
+        private val json = Json { ignoreUnknownKeys = true }
         private val saved = ConcurrentHashMap<String, SavedMcp>()
-        private val port = AtomicInteger(-1)
         private val extensions = setOf("md", "markdown", "txt", "text", "html", "htm")
+        private const val CLAUDE_COMPAT_KEY = "kilo.claudeCodeCompat"
     }
 
     private val app: KiloBackendAppService get() = backend ?: service()
 
     override suspend fun agents(directory: String): List<AgentDetailDto> {
         app.requireReady()
-        val api = app.api ?: throw IllegalStateException("Kilo API is unavailable")
-        val removable = KiloCliDataParser.parseAgentRemovable(request(directory, "/agent", null))
-        return withContext(Dispatchers.IO) { api.appAgents(directory = directory) }.map { item ->
+        val removable = agentRemovable(request(directory, "/agent", null))
+        return array(request(directory, "/app/agents", null)).mapNotNull { item ->
+            val obj = item.obj() ?: return@mapNotNull null
+            val name = obj.str("name") ?: return@mapNotNull null
             AgentDetailDto(
-                name = item.name,
-                displayName = item.displayName,
-                description = item.description,
-                mode = item.mode.value,
-                native = item.native,
-                removable = removable[item.name] ?: false,
-                hidden = item.hidden,
-                deprecated = item.deprecated,
-                permission = rules(item.permission),
+                name = name,
+                displayName = obj.str("displayName"),
+                description = obj.str("description"),
+                mode = obj.str("mode") ?: "primary",
+                native = obj.flagOrNull("native"),
+                removable = removable[name] ?: false,
+                hidden = obj.flagOrNull("hidden"),
+                deprecated = obj.flagOrNull("deprecated"),
+                permission = rules(obj["permission"]),
             )
         }
     }
 
     override suspend fun skills(directory: String): List<SkillDto> {
-        val items = KiloCliDataParser.parseAgentBehaviorSkills(request(directory, "/skill", null))
+        val items = array(request(directory, "/skill", null)).mapNotNull { item ->
+            val obj = item.obj() ?: return@mapNotNull null
+            val name = obj.str("name") ?: return@mapNotNull null
+            val location = obj.str("location") ?: return@mapNotNull null
+            SkillDto(
+                name = name,
+                description = obj.str("description"),
+                location = location,
+                content = obj.str("content"),
+            )
+        }
         return items.map { item ->
             val editable = editable(item)
             item.copy(content = skillContent(item) ?: item.content, editable = editable)
@@ -121,24 +138,56 @@ class KiloAgentBehaviorRpcApiImpl(private val backend: KiloBackendAppService? = 
 
     override suspend fun createAgent(directory: String, input: AgentCreateDto): Boolean {
         app.requireReady()
-        val api = app.api ?: throw IllegalStateException("Kilo API is unavailable")
-        val req = AgentBuilderSaveRequest(
-            prompt = input.prompt,
-            id = input.name,
-            scope = scope(input.scope),
-            description = input.description,
-            mode = mode(input.mode),
-        )
-        withContext(Dispatchers.IO) {
-            api.agentBuilderSave(input.name, directory = directory, workspace = null, agentBuilderSaveRequest = req)
+        val body = buildJsonObject {
+            put("id", input.name)
+            put("prompt", input.prompt)
+            put("scope", scope(input.scope))
+            put("description", input.description)
+            put("mode", mode(input.mode))
+        }
+        app.transport().use {
+            it.call("PUT", "/agent-builder/${encodePath(input.name)}?directory=${encode(directory)}", body.toString())
         }
         return true
     }
 
-    override suspend fun commands(directory: String) = KiloCliDataParser.parseAgentBehaviorCommands(request(directory, "/command", null))
+    override suspend fun commands(directory: String): List<CommandDto> =
+        array(request(directory, "/command", null)).mapNotNull { item ->
+            val obj = item.obj() ?: return@mapNotNull null
+            val name = obj.str("name") ?: return@mapNotNull null
+            CommandDto(
+                name = name,
+                description = obj.str("description"),
+                agent = obj.str("agent"),
+                model = obj.str("model"),
+                variant = obj.str("variant"),
+                source = obj.str("source"),
+                template = obj.str("template"),
+                subtask = obj.flagOrNull("subtask"),
+                hints = obj.strings("hints") ?: emptyList(),
+            )
+        }
 
     override suspend fun commandFiles(directory: String): List<CommandFileDto> =
-        KiloCliDataParser.parseAgentBehaviorCommandFiles(request(directory, "/kilocode/command/files", null))
+        array(request(directory, "/kilocode/command/files", null)).mapNotNull { item ->
+            val obj = item.obj() ?: return@mapNotNull null
+            val name = obj.str("name") ?: return@mapNotNull null
+            val location = obj.str("location") ?: return@mapNotNull null
+            CommandFileDto(
+                name = name,
+                description = obj.str("description"),
+                agent = obj.str("agent"),
+                model = obj.str("model"),
+                variant = obj.str("variant"),
+                source = obj.str("source"),
+                builtin = obj.bool("builtin"),
+                location = location,
+                editable = obj.bool("editable"),
+                content = obj.str("content"),
+                subtask = obj.flagOrNull("subtask"),
+                hints = obj.strings("hints") ?: emptyList(),
+            )
+        }
 
     override suspend fun removeCommand(directory: String, location: String): Boolean =
         post(directory, "/kilocode/command/remove", JsonObject(mapOf("location" to JsonPrimitive(location))))
@@ -176,15 +225,22 @@ class KiloAgentBehaviorRpcApiImpl(private val backend: KiloBackendAppService? = 
         return true
     }
 
-    override suspend fun mcpStatus(directory: String) = KiloCliDataParser.parseMcpStatus(request(directory, "/mcp", null)).also { items ->
+    override suspend fun mcpStatus(directory: String): List<McpStatusDto> {
+        val root = runCatching { json.parseToJsonElement(request(directory, "/mcp", null)) }.getOrNull()
+        val items = when (root) {
+            is JsonArray -> root.mapNotNull(::mcpStatus)
+            is JsonObject -> root.entries.mapNotNull { (name, item) -> mcpStatus(item, name) }
+            else -> emptyList()
+        }
         LOG.info("MCP status returned dir=$directory count=${items.size}")
+        return items
     }
 
     override suspend fun mcpConfig(directory: String): Map<String, McpServerConfigDto> {
         app.requireReady()
         val global = app.config?.mcp ?: emptyMap()
         val workspace = if (directory.isBlank()) emptyMap() else try {
-            KiloCliDataParser.parseConfig(request(directory, "/config", null)).mcp
+            parseMcpConfig(request(directory, "/config", null))
         } catch (e: Exception) {
             LOG.warn("MCP workspace config fetch failed dir=$directory: ${e.message}", e)
             emptyMap()
@@ -203,11 +259,13 @@ class KiloAgentBehaviorRpcApiImpl(private val backend: KiloBackendAppService? = 
 
     override suspend fun saveMcp(directory: String, name: String, scope: String, config: McpConfigDto?): Boolean {
         app.requireReady()
-        val patch = ConfigPatchDto(mcp = mapOf(name to config))
         if (scope == "workspace") {
-            patchConfig("/config?directory=${encode(directory)}", KiloCliDataParser.buildConfigPatch(patch))
+            val body = JsonObject(mapOf("mcp" to JsonObject(mapOf(name to (config?.let(::mcpJson) ?: JsonNull)))))
+            app.transport().use {
+                it.call("PATCH", "/config?directory=${encode(directory)}", body.toString())
+            }
         } else {
-            app.updateConfig(patch)
+            app.updateConfig(ConfigPatchDto(mcp = mapOf(name to config)))
         }
         saveMcpOverride(directory, name, scope, config)
         return true
@@ -220,12 +278,22 @@ class KiloAgentBehaviorRpcApiImpl(private val backend: KiloBackendAppService? = 
     override suspend fun mcpAuthenticate(directory: String, name: String): Boolean =
         post(directory, "/mcp/${encodePath(name)}/auth/authenticate")
 
-    override suspend fun claudeCodeCompat(): Boolean = KiloClaudeCompatSettings.get()
+    override suspend fun claudeCodeCompat(): Boolean = compat()
 
     override suspend fun setClaudeCodeCompat(value: Boolean): Boolean {
-        KiloClaudeCompatSettings.set(value)
+        compatSet(value)
         app.restart()
         return value
+    }
+
+    // ------ transport helpers ------
+
+    private suspend fun request(directory: String, path: String, body: JsonObject?): String = withContext(Dispatchers.IO) {
+        val route = "$path?directory=${encode(directory)}"
+        val raw = app.transport().use {
+            if (body == null) it.call("GET", route) else it.call("POST", route, body.toString())
+        }
+        raw.ifBlank { "{}" }
     }
 
     private suspend fun post(directory: String, path: String, body: JsonObject = JsonObject(emptyMap())): Boolean {
@@ -233,7 +301,105 @@ class KiloAgentBehaviorRpcApiImpl(private val backend: KiloBackendAppService? = 
         return true
     }
 
-    private fun hasActiveSession(directory: String, label: String): Boolean {
+    // ------ JSON parsing ------
+
+    private fun array(raw: String): List<JsonElement> {
+        val root = runCatching { json.parseToJsonElement(raw) }.getOrNull()
+        return when (root) {
+            is JsonArray -> root.toList()
+            is JsonObject -> (root["data"] as? JsonArray)?.toList() ?: emptyList()
+            else -> emptyList()
+        }
+    }
+
+    private fun agentRemovable(raw: String): Map<String, Boolean> =
+        array(raw).mapNotNull { item ->
+            val obj = item.obj() ?: return@mapNotNull null
+            val name = obj.str("name") ?: return@mapNotNull null
+            name to removable(obj)
+        }.toMap()
+
+    private fun removable(obj: JsonObject): Boolean {
+        if (obj.flagOrNull("native") == true) return false
+        val opts = obj["options"].obj()
+        if (obj.str("source") == "organization" || opts?.str("source") == "organization") return false
+        if (opts?.containsKey("reference") == true || opts?.containsKey("resolved") == true) return false
+        return true
+    }
+
+    private fun mcpStatus(item: JsonElement, fallback: String? = null): McpStatusDto? {
+        val obj = item.obj() ?: return null
+        val name = obj.str("name") ?: fallback ?: return null
+        return McpStatusDto(
+            name = name,
+            status = obj.str("status") ?: obj.str("state") ?: "unknown",
+            error = obj.str("error"),
+        )
+    }
+
+    private fun parseMcpConfig(raw: String): Map<String, McpConfigDto> {
+        val obj = runCatching { json.parseToJsonElement(raw).jsonObject }.getOrNull() ?: return emptyMap()
+        val mcp = obj["mcp"].obj() ?: return emptyMap()
+        return mcp.entries.mapNotNull { (name, elem) ->
+            val item = elem.obj() ?: return@mapNotNull null
+            name to McpConfigDto(
+                type = item.str("type"),
+                command = item.strings("command")?.takeIf { it.isNotEmpty() },
+                url = item.str("url"),
+                environment = item.map("environment")?.takeIf { it.isNotEmpty() }
+                    ?: item.map("env")?.takeIf { it.isNotEmpty() },
+                headers = item.map("headers")?.takeIf { it.isNotEmpty() },
+                enabled = item.flagOrNull("enabled"),
+                timeout = item.longOrNull("timeout"),
+            )
+        }.toMap()
+    }
+
+    private fun mcpJson(cfg: McpConfigDto): JsonObject = buildJsonObject {
+        cfg.type?.let { put("type", it) }
+        cfg.command?.takeIf { it.isNotEmpty() }?.let { put("command", JsonArray(it.map(::JsonPrimitive))) }
+        cfg.url?.let { put("url", it) }
+        cfg.environment?.takeIf { it.isNotEmpty() }?.let { env -> put("environment", JsonObject(env.mapValues { JsonPrimitive(it.value) })) }
+        cfg.headers?.takeIf { it.isNotEmpty() }?.let { headers -> put("headers", JsonObject(headers.mapValues { JsonPrimitive(it.value) })) }
+        cfg.enabled?.let { put("enabled", it) }
+        cfg.timeout?.let { put("timeout", it) }
+    }
+
+    private fun rules(elem: JsonElement?): List<PermissionRuleItemDto> {
+        val list = elem as? JsonArray ?: return emptyList()
+        return list.mapNotNull { item ->
+            val obj = item.obj() ?: return@mapNotNull null
+            val tool = obj.str("tool") ?: return@mapNotNull null
+            val action = obj.str("action") ?: return@mapNotNull null
+            PermissionRuleItemDto(tool = tool, pattern = obj.str("pattern"), action = action)
+        }
+    }
+
+    private fun JsonElement?.obj(): JsonObject? = (this as? JsonObject)
+
+    private fun JsonObject.str(name: String): String? =
+        runCatching { this[name]?.jsonPrimitive?.contentOrNull }.getOrNull()
+
+    private fun JsonObject.flagOrNull(name: String): Boolean? =
+        runCatching { this[name]?.jsonPrimitive?.contentOrNull?.toBooleanStrictOrNull() }.getOrNull()
+
+    private fun JsonObject.bool(name: String): Boolean = flagOrNull(name) ?: false
+
+    private fun JsonObject.longOrNull(name: String): Long? =
+        runCatching { this[name]?.jsonPrimitive?.contentOrNull?.toLongOrNull() }.getOrNull()
+
+    private fun JsonObject.strings(name: String): List<String>? =
+        (this[name] as? JsonArray)?.mapNotNull { runCatching { it.jsonPrimitive.contentOrNull }.getOrNull() }
+
+    private fun JsonObject.map(name: String): Map<String, String>? =
+        this[name].obj()?.entries?.mapNotNull { (key, value) ->
+            val content = runCatching { value.jsonPrimitive.contentOrNull }.getOrNull() ?: return@mapNotNull null
+            key to content
+        }?.toMap()
+
+    // ------ session guards ------
+
+    private suspend fun hasActiveSession(directory: String, label: String): Boolean {
         val active = app.sessions.statuses.value.filterValues { it.type != "idle" }
         if (active.isNotEmpty()) {
             LOG.info("$label reload active statuses dir=$directory count=${active.size} types=${active.values.map { it.type }.distinct()}")
@@ -256,6 +422,8 @@ class KiloAgentBehaviorRpcApiImpl(private val backend: KiloBackendAppService? = 
         return false
     }
 
+    // ------ local skill/command file plumbing ------
+
     private suspend fun skillContent(skill: SkillDto): String? {
         val path = resolveSkillPath(skill.location) ?: return null
         return runCatching {
@@ -274,7 +442,12 @@ class KiloAgentBehaviorRpcApiImpl(private val backend: KiloBackendAppService? = 
     }
 
     private suspend fun knownSkills(directory: String): Set<Path> {
-        val items = KiloCliDataParser.parseAgentBehaviorSkills(request(directory, "/skill", null))
+        val items = array(request(directory, "/skill", null)).mapNotNull { item ->
+            val obj = item.obj() ?: return@mapNotNull null
+            val name = obj.str("name") ?: return@mapNotNull null
+            val location = obj.str("location") ?: return@mapNotNull null
+            SkillDto(name = name, description = obj.str("description"), location = location, content = obj.str("content"))
+        }
         return items.mapNotNull { item -> resolveEditablePath(item) }.toSet()
     }
 
@@ -340,12 +513,18 @@ class KiloAgentBehaviorRpcApiImpl(private val backend: KiloBackendAppService? = 
         return path
     }
 
+    private fun normalizeWorkspacePath(location: String): String? {
+        val trimmed = location.trim()
+        if (trimmed.startsWith("http://") || trimmed.startsWith("https://")) return null
+        return trimmed.takeIf { it.isNotBlank() }
+    }
+
     private suspend fun commandRoots(directory: String): Set<Path> = buildSet {
         addProjectCommandRoots(this, directory)
         val paths = runCatching { request(directory, "/path", null) }.getOrNull()
-        val config = paths?.let(KiloCliDataParser::parsePathConfig)
+        val config = paths?.let { raw -> runCatching { json.parseToJsonElement(raw).jsonObject["config"]?.jsonPrimitive?.contentOrNull }.getOrNull() }
         if (config != null) addConfigCommandRoots(this, config)
-        val home = paths?.let(KiloCliDataParser::parsePathHome)
+        val home = paths?.let { raw -> runCatching { json.parseToJsonElement(raw).jsonObject["home"]?.jsonPrimitive?.contentOrNull }.getOrNull() }
         if (home != null) addHomeCommandRoots(this, home)
     }
 
@@ -405,46 +584,9 @@ class KiloAgentBehaviorRpcApiImpl(private val backend: KiloBackendAppService? = 
         return Path.of(home, ".cache").toString()
     }
 
-    private suspend fun patchConfig(path: String, body: String): Unit = withContext(Dispatchers.IO) {
-        val http = app.http ?: throw IllegalStateException("Kilo HTTP client is unavailable")
-        val url = "http://127.0.0.1:${app.port}$path"
-        val request = Request.Builder().url(url).patch(body.toRequestBody(JSON)).build()
-        http.newCall(request).execute().use { response ->
-            if (!response.isSuccessful) {
-                LOG.warn("MCP config patch failed: $path HTTP ${response.code}")
-                throw RuntimeException("HTTP ${response.code}")
-            }
-        }
-    }
-
-    private suspend fun request(directory: String, path: String, body: JsonObject?): String = withContext(Dispatchers.IO) {
-        val http = app.http ?: throw IllegalStateException("Kilo HTTP client is unavailable")
-        val url = "http://127.0.0.1:${app.port}$path?directory=${encode(directory)}"
-        val request = Request.Builder().url(url).let { builder ->
-            if (body == null) builder.get() else builder.post(body.toString().toRequestBody(JSON))
-        }.build()
-        http.newCall(request).execute().use { response ->
-            val text = response.body?.string().orEmpty()
-            if (!response.isSuccessful) {
-                LOG.warn("Agent Behavior request failed: $path HTTP ${response.code}")
-                throw RuntimeException("HTTP ${response.code}")
-            }
-            text.ifBlank { "{}" }
-        }
-    }
-
-    private fun rules(cfg: Any?): List<PermissionRuleItemDto> {
-        val list = cfg as? List<*> ?: return emptyList()
-        return list.mapNotNull { item ->
-            val obj = item ?: return@mapNotNull null
-            val tool = prop(obj, "tool") as? String ?: return@mapNotNull null
-            val action = prop(obj, "action") as? String ?: return@mapNotNull null
-            PermissionRuleItemDto(tool = tool, pattern = prop(obj, "pattern") as? String, action = action)
-        }
-    }
+    // ------ saved MCP overrides ------
 
     private fun withSavedMcp(directory: String, items: Map<String, McpServerConfigDto>): Map<String, McpServerConfigDto> = buildMap {
-        syncSaved()
         putAll(items)
         for (item in saved.values) {
             if (item.scope == "workspace" && item.directory != directory) continue
@@ -454,7 +596,6 @@ class KiloAgentBehaviorRpcApiImpl(private val backend: KiloBackendAppService? = 
     }
 
     private fun saveMcpOverride(directory: String, name: String, scope: String, config: McpConfigDto?) {
-        syncSaved()
         val key = mcpKey(if (scope == "workspace") directory else "", name)
         saved.remove(mcpKey(directory, name))
         saved.remove(mcpKey("", name))
@@ -472,28 +613,24 @@ class KiloAgentBehaviorRpcApiImpl(private val backend: KiloBackendAppService? = 
 
     private fun mcpKey(directory: String, name: String): String = "$directory\u0000$name"
 
-    private fun syncSaved() {
-        val current = runCatching { app.port }.getOrDefault(-1)
-        val prev = port.getAndSet(current)
-        if (prev != current) saved.clear()
+    // ------ misc ------
+
+    private fun compat(): Boolean =
+        runCatching { PropertiesComponent.getInstance().getBoolean(CLAUDE_COMPAT_KEY, false) }.getOrDefault(false)
+
+    private fun compatSet(value: Boolean) {
+        runCatching { PropertiesComponent.getInstance().setValue(CLAUDE_COMPAT_KEY, value.toString()) }
     }
 
-    private fun prop(obj: Any, name: String): Any? {
-        val suffix = name.replaceFirstChar { if (it.isLowerCase()) it.titlecase() else it.toString() }
-        val getter = obj.javaClass.methods.firstOrNull { it.parameterCount == 0 && it.name == "get$suffix" }
-            ?: obj.javaClass.methods.firstOrNull { it.parameterCount == 0 && it.name == name }
-        return getter?.invoke(obj)
+    private fun scope(value: String): String = when (value) {
+        "global" -> "global"
+        else -> "project"
     }
 
-    private fun scope(value: String): AgentBuilderSaveRequest.Scope = when (value) {
-        AgentBuilderSaveRequest.Scope.GLOBAL.value -> AgentBuilderSaveRequest.Scope.GLOBAL
-        else -> AgentBuilderSaveRequest.Scope.PROJECT
-    }
-
-    private fun mode(value: String): AgentBuilderSaveRequest.Mode = when (value) {
-        AgentBuilderSaveRequest.Mode.SUBAGENT.value -> AgentBuilderSaveRequest.Mode.SUBAGENT
-        AgentBuilderSaveRequest.Mode.ALL.value -> AgentBuilderSaveRequest.Mode.ALL
-        else -> AgentBuilderSaveRequest.Mode.PRIMARY
+    private fun mode(value: String): String = when (value) {
+        "subagent" -> "subagent"
+        "all" -> "all"
+        else -> "primary"
     }
 
     private fun encode(value: String): String = URLEncoder.encode(value, StandardCharsets.UTF_8)

@@ -35,11 +35,8 @@ class KiloMigrationRpcApiImpl : KiloMigrationRpcApi {
     private val app: KiloBackendAppService get() = service()
     private val storeService: KiloBackendLegacyMigrationStoreService get() = service()
 
-    private fun manager(): KiloBackendMigrationManager {
-        val http = app.http ?: throw IllegalStateException("Not connected")
-        val port = app.port
-        return KiloBackendMigrationManager(http, port)
-    }
+    private fun manager(): KiloBackendMigrationManager =
+        KiloBackendMigrationManager { app.transport() }
 
     override suspend fun status(): LegacyMigrationStatusDto? {
         val status = withContext(Dispatchers.IO) { storeService.status() } ?: return null
