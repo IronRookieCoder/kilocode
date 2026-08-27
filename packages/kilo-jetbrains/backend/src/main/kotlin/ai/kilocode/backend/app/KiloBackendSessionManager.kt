@@ -13,6 +13,8 @@ import ai.kilocode.rpc.dto.SessionRevertDto
 import ai.kilocode.rpc.dto.SessionStatusDto
 import ai.kilocode.rpc.dto.SessionSummaryDto
 import ai.kilocode.rpc.dto.SessionTimeDto
+import com.intellij.openapi.application.ApplicationManager
+import com.intellij.openapi.vfs.LocalFileSystem
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -80,6 +82,28 @@ class KiloBackendSessionManager(
                                 "${ChatLogSummary.sid(pair.first)} kind=status route=session-map " +
                                     "${ChatLogSummary.status(pair.second)} prev=${prev?.type ?: "none"} total=$total bytes=${event.data.length}",
                             )
+                        }
+                        // Trigger VFS refresh when session transitions to idle
+                        // This picks up files written by csc directly to the project directory
+                        if (pair.second.type == "idle" && prev?.type != "idle") {
+                            val dir = sessionDirectory(pair.first)
+                            if (dir != null) {
+                                log.info("${ChatLogSummary.sid(pair.first)} kind=vfs-refresh directory=$dir")
+                                ApplicationManager.getApplication().executeOnPooledThread {
+                                    try {
+                                        val lfs = LocalFileSystem.getInstance()
+                                        val root = lfs.refreshAndFindFileByPath(dir)
+                                        if (root != null) {
+                                            root.refresh(true, true)
+                                            log.info("${ChatLogSummary.sid(pair.first)} kind=vfs-refresh success=true directory=$dir")
+                                        } else {
+                                            log.warn("${ChatLogSummary.sid(pair.first)} kind=vfs-refresh directory-not-found=$dir")
+                                        }
+                                    } catch (e: Exception) {
+                                        log.warn("${ChatLogSummary.sid(pair.first)} kind=vfs-refresh failed message=${e.message}", e)
+                                    }
+                                }
+                            }
                         }
                     }
                 }
