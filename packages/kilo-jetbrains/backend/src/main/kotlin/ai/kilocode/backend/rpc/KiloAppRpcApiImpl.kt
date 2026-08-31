@@ -17,6 +17,8 @@ import ai.kilocode.log.KiloLog
 import ai.kilocode.log.LogConfig
 import ai.kilocode.rpc.dto.ConfigPatchDto
 import ai.kilocode.rpc.KiloAppRpcApi
+import ai.kilocode.rpc.dto.CloudFavoriteActionResult
+import ai.kilocode.rpc.dto.CloudFavoritesResult
 import ai.kilocode.rpc.dto.ConfigWarningDto
 import ai.kilocode.rpc.dto.DeviceAuthDto
 import ai.kilocode.rpc.dto.HealthDto
@@ -78,6 +80,12 @@ class KiloAppRpcApiImpl : KiloAppRpcApi {
     override suspend fun installCsc() = app.installCsc()
 
     override suspend fun loginCsCloud() = app.loginCsCloud()
+
+    override suspend fun cloudFavorites(): CloudFavoritesResult = app.cloudFavorites()
+
+    override suspend fun loadCloudFavorite(id: String): CloudFavoriteActionResult = app.loadCloudFavorite(id)
+
+    override suspend fun unloadCloudFavorite(id: String): CloudFavoriteActionResult = app.unloadCloudFavorite(id)
 
     override suspend fun modelState(): ModelStateDto {
         app.requireReady()

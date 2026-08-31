@@ -5,6 +5,8 @@ import ai.kilocode.rpc.dto.AgentConfigDto
 import ai.kilocode.rpc.dto.CompactionConfigDto
 import ai.kilocode.rpc.dto.ConfigDto
 import ai.kilocode.rpc.dto.ConfigPatchDto
+import ai.kilocode.rpc.dto.CloudFavoriteActionResult
+import ai.kilocode.rpc.dto.CloudFavoritesResult
 import ai.kilocode.rpc.dto.CsCloudStartDto
 import ai.kilocode.rpc.dto.DeviceAuthDto
 import ai.kilocode.rpc.dto.HealthDto
@@ -146,6 +148,24 @@ class FakeAppRpcApi : KiloAppRpcApi {
         assertNotEdt("loginCsCloud")
         csCloudLogins += 1
         return csCloudLogin
+    }
+
+    var cloudFavoritesResult = CloudFavoritesResult(ok = true)
+    var cloudFavoriteActionResult = CloudFavoriteActionResult(ok = true)
+
+    override suspend fun cloudFavorites(): CloudFavoritesResult {
+        assertNotEdt("cloudFavorites")
+        return cloudFavoritesResult
+    }
+
+    override suspend fun loadCloudFavorite(id: String): CloudFavoriteActionResult {
+        assertNotEdt("loadCloudFavorite")
+        return cloudFavoriteActionResult
+    }
+
+    override suspend fun unloadCloudFavorite(id: String): CloudFavoriteActionResult {
+        assertNotEdt("unloadCloudFavorite")
+        return cloudFavoriteActionResult
     }
 
     override suspend fun modelState(): ModelStateDto {

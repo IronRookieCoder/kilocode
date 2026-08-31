@@ -21,6 +21,8 @@ import ai.kilocode.jetbrains.api.model.KiloProfile200Response
 import ai.kilocode.jetbrains.api.model.ProviderOauthAuthorizeRequest
 import ai.kilocode.jetbrains.api.model.ProviderOauthCallbackRequest
 import ai.kilocode.rpc.ConnectionErrorCode
+import ai.kilocode.rpc.dto.CloudFavoriteActionResult
+import ai.kilocode.rpc.dto.CloudFavoritesResult
 import ai.kilocode.rpc.dto.ConfigDto
 import ai.kilocode.rpc.dto.DeviceAuthDto
 import ai.kilocode.rpc.dto.ConfigPatchDto
@@ -234,6 +236,15 @@ class KiloBackendAppService private constructor(
 
     /** Run `csc auth login` on the connection so the user can sign in to CoStrict in the browser. */
     suspend fun loginCsCloud(): CsCloudStartDto = connection.loginCsCloud()
+
+    /** List Costrict cloud favorites through the active connection. */
+    suspend fun cloudFavorites(): CloudFavoritesResult = connection.cloudFavorites()
+
+    /** Enable a Costrict cloud favorite through the active connection. */
+    suspend fun loadCloudFavorite(id: String): CloudFavoriteActionResult = connection.loadCloudFavorite(id)
+
+    /** Disable a Costrict cloud favorite through the active connection. */
+    suspend fun unloadCloudFavorite(id: String): CloudFavoriteActionResult = connection.unloadCloudFavorite(id)
 
     /**
      * Synchronous CLI teardown for plugin unload. Confirms process exit but does not wait on the

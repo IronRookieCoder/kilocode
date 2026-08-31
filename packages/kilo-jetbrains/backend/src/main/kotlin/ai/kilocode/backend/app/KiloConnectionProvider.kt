@@ -50,6 +50,30 @@ interface KiloConnection {
     suspend fun loginCsCloud(): ai.kilocode.rpc.dto.CsCloudStartDto =
         ai.kilocode.rpc.dto.CsCloudStartDto(ok = false, message = "csc auth login is not managed by this connection")
 
+    /** List Costrict cloud favorites; unsupported by the locally managed Kilo CLI provider. */
+    suspend fun cloudFavorites(): ai.kilocode.rpc.dto.CloudFavoritesResult =
+        ai.kilocode.rpc.dto.CloudFavoritesResult(
+            ok = false,
+            errorCode = ai.kilocode.rpc.dto.CloudFavoritesErrors.UNAVAILABLE,
+            errorMessage = "cloud favorites are not managed by this connection",
+        )
+
+    /** Enable a Costrict cloud favorite; unsupported by the locally managed Kilo CLI provider. */
+    suspend fun loadCloudFavorite(id: String): ai.kilocode.rpc.dto.CloudFavoriteActionResult =
+        ai.kilocode.rpc.dto.CloudFavoriteActionResult(
+            ok = false,
+            errorCode = ai.kilocode.rpc.dto.CloudFavoritesErrors.UNAVAILABLE,
+            errorMessage = "cloud favorites are not managed by this connection",
+        )
+
+    /** Disable a Costrict cloud favorite; unsupported by the locally managed Kilo CLI provider. */
+    suspend fun unloadCloudFavorite(id: String): ai.kilocode.rpc.dto.CloudFavoriteActionResult =
+        ai.kilocode.rpc.dto.CloudFavoriteActionResult(
+            ok = false,
+            errorCode = ai.kilocode.rpc.dto.CloudFavoritesErrors.UNAVAILABLE,
+            errorMessage = "cloud favorites are not managed by this connection",
+        )
+
     fun shutdownForUnload()
     fun shutdownForAppClose()
     fun dispose()

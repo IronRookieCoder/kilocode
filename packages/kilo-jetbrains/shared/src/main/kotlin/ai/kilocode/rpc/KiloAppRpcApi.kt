@@ -1,5 +1,7 @@
 package ai.kilocode.rpc
 
+import ai.kilocode.rpc.dto.CloudFavoriteActionResult
+import ai.kilocode.rpc.dto.CloudFavoritesResult
 import ai.kilocode.rpc.dto.DeviceAuthDto
 import ai.kilocode.rpc.dto.ConfigPatchDto
 import ai.kilocode.rpc.dto.CsCloudStartDto
@@ -68,6 +70,15 @@ interface KiloAppRpcApi : RemoteApi<Unit> {
 
     /** Run `csc auth login` so the user can sign in to CoStrict in the browser. */
     suspend fun loginCsCloud(): CsCloudStartDto
+
+    /** List Costrict cloud favorites (skills/agents/commands/mcp) from the cs-cloud daemon. */
+    suspend fun cloudFavorites(): CloudFavoritesResult
+
+    /** Enable (install + activate) a Costrict cloud favorite by slug or cloud id. */
+    suspend fun loadCloudFavorite(id: String): CloudFavoriteActionResult
+
+    /** Disable a Costrict cloud favorite by slug or cloud id. */
+    suspend fun unloadCloudFavorite(id: String): CloudFavoriteActionResult
 
     /** Load persisted CLI model state such as favorites. */
     suspend fun modelState(): ModelStateDto
