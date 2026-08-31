@@ -10,6 +10,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.json.Json
+import java.net.SocketTimeoutException
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
@@ -75,6 +76,7 @@ class CsCloudFavoritesApi(
             else -> CloudFavoritesErrors.INTERNAL
         }
         is IllegalArgumentException -> CloudFavoritesErrors.INTERNAL
+        is SocketTimeoutException -> CloudFavoritesErrors.INTERNAL
         else -> CloudFavoritesErrors.UNAVAILABLE
     }
 

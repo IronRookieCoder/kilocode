@@ -9,6 +9,7 @@ import ai.kilocode.client.ui.list.ActiveListBadge
 import ai.kilocode.client.ui.list.ActiveListCell
 import ai.kilocode.client.ui.list.ActiveListConfig
 import ai.kilocode.client.ui.list.ActiveListItem
+import ai.kilocode.log.KiloLog
 import ai.kilocode.rpc.KiloAppRpcApi
 import ai.kilocode.rpc.dto.CloudFavoriteItem
 import ai.kilocode.rpc.dto.CloudFavoritesErrors
@@ -34,6 +35,11 @@ class CloudHubConfigurable : DraftReadyConfigurable<JComponent>() {
 internal class CloudHubSettingsUi(
     scope: CoroutineScope,
 ) : SettingsListPanel(scope, ActiveListConfig.Equal.copy(tooltip = false)) {
+    private companion object {
+        val LOG = KiloLog.create(CloudHubSettingsUi::class.java)
+        val KNOWN_ITEM_TYPES = setOf("skill", "agent", "command", "mcp")
+    }
+
     private var cache: List<CloudFavoriteItem> = emptyList()
 
     /** Authoritative row updates from load/unload responses; merged into the next fetch. */
@@ -47,6 +53,9 @@ internal class CloudHubSettingsUi(
         val result = KiloAppRpcApi.getInstance().cloudFavorites()
         if (!result.ok) throw SettingsMessageException(hubError(result.errorCode, result.errorMessage))
         cache = mergeOverrides(result.items)
+        cache.filterNot { it.itemType in KNOWN_ITEM_TYPES }.forEach {
+            LOG.warn("cloud hub fetch: filtered unknown itemType='${it.itemType}' id='${it.id}'")
+        }
         return HubRowLogic.ordered(cache).map(::row)
     }
 
@@ -128,7 +137,10 @@ internal class CloudHubSettingsUi(
         CloudFavoritesErrors.UNAUTHORIZED -> KiloBundle.message("settings.agentBehavior.cloudHub.error.unauthorized")
         CloudFavoritesErrors.UNAVAILABLE -> KiloBundle.message("settings.agentBehavior.cloudHub.error.unavailable")
         CloudFavoritesErrors.NOT_FOUND -> KiloBundle.message("settings.agentBehavior.cloudHub.error.notfound")
-        else -> fallback?.takeIf { it.isNotBlank() } ?: KiloBundle.message("settings.agentBehavior.cloudHub.error.internal")
+        else -> {
+            fallback?.takeIf { it.isNotBlank() }?.let { LOG.warn("cloud hub internal error detail: $it") }
+            KiloBundle.message("settings.agentBehavior.cloudHub.error.internal")
+        }
     }
 }
 

@@ -5,6 +5,7 @@ import kotlinx.coroutines.runBlocking
 import okhttp3.OkHttpClient
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
+import java.util.concurrent.TimeUnit
 import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -87,6 +88,21 @@ class CsCloudFavoritesApiTest {
         assertFalse(result.ok)
         assertEquals(CloudFavoritesErrors.NOT_FOUND, result.errorCode)
         assertNull(result.item)
+    }
+
+    @Test
+    fun `list maps read timeout to INTERNAL`() = runBlocking {
+        server.enqueue(MockResponse().setBody("[]").setBodyDelay(2, TimeUnit.SECONDS))
+        val slow = CsCloudFavoritesApi(
+            OkHttpClient.Builder()
+                .addInterceptor(CsCloudRoute.responseInterceptor())
+                .readTimeout(100, TimeUnit.MILLISECONDS)
+                .build(),
+            server.url("/").toString().trimEnd('/'),
+        )
+        val result = slow.list()
+        assertFalse(result.ok)
+        assertEquals(CloudFavoritesErrors.INTERNAL, result.errorCode)
     }
 
     @Test
