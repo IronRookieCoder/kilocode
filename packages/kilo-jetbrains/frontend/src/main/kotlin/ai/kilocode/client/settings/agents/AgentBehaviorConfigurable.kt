@@ -1,6 +1,7 @@
 package ai.kilocode.client.settings.agents
 
 import ai.kilocode.client.plugin.KiloBundle
+import ai.kilocode.client.settings.hub.CloudHubConfigurable
 import ai.kilocode.client.settings.rules.RulesConfigurable
 import ai.kilocode.client.ui.UiStyle
 import ai.kilocode.client.ui.layout.Stack
@@ -27,6 +28,7 @@ class AgentBehaviorConfigurable : SearchableConfigurable {
             KiloBundle.message("settings.agentBehavior.agents.displayName") to AgentsConfigurable.ID,
             KiloBundle.message("settings.agentBehavior.mcp.displayName") to McpConfigurable.ID,
             KiloBundle.message("settings.agentBehavior.skills.displayName") to SkillsConfigurable.ID,
+            KiloBundle.message("settings.agentBehavior.cloudHub.displayName") to CloudHubConfigurable.ID,
             KiloBundle.message("settings.agentBehavior.workflows.displayName") to WorkflowsConfigurable.ID,
             KiloBundle.message("settings.agentBehavior.rules.displayName") to RulesConfigurable.ID,
         ).forEach { (label, id) ->

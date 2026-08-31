@@ -31,7 +31,7 @@ class AgentBehaviorConfigurableTest : BasePlatformTestCase() {
         edt {
             val panel = cfg.createComponent()
             val labels = links(panel as Container).map { it.text }
-            assertEquals(listOf("Agents", "MCP Servers", "Skills", "Workflows", "Rules"), labels)
+            assertEquals(listOf("Agents", "MCP Servers", "Skills", "Cloud Hub", "Workflows", "Rules"), labels)
         }
     }
 
