@@ -2,9 +2,13 @@ package ai.kilocode.cscloud
 
 import ai.kilocode.backend.app.ConnectionState
 import ai.kilocode.backend.app.SseEvent
+import ai.kilocode.cscloud.mcp.IdeMcpSessionFactory
 import ai.kilocode.log.KiloLog
 import ai.kilocode.rpc.ConnectionErrorCode
 import ai.kilocode.rpc.dto.CsCloudStartDto
+import com.intellij.openapi.application.ApplicationManager
+import com.intellij.openapi.extensions.ExtensionPoint
+import com.intellij.testFramework.junit5.TestApplication
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
@@ -17,6 +21,7 @@ import okhttp3.mockwebserver.MockWebServer
 import okhttp3.mockwebserver.SocketPolicy
 import java.nio.file.Files
 import kotlin.test.AfterTest
+import kotlin.test.BeforeTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -26,8 +31,24 @@ import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import java.util.concurrent.atomic.AtomicBoolean
 
+@TestApplication
 class CsCloudConnectionServiceTest {
     private val scope = kotlinx.coroutines.CoroutineScope(SupervisorJob() + Dispatchers.Default)
+
+    @BeforeTest
+    fun registerTestExtensionPoints() {
+        // `@TestApplication` starts a bare application that loads no plugin descriptors,
+        // so the `ideMcpSessionFactory` extension point declared in kilo.jetbrains.cs-cloud.xml
+        // is absent. Register it (with no implementations) so the service constructor can read it.
+        val area = ApplicationManager.getApplication().extensionArea
+        if (!area.hasExtensionPoint(IdeMcpSessionFactory.EP)) {
+            area.registerExtensionPoint(
+                "ai.kilocode.jetbrains.ideMcpSessionFactory",
+                "ai.kilocode.cscloud.mcp.IdeMcpSessionFactory",
+                ExtensionPoint.Kind.INTERFACE,
+            )
+        }
+    }
 
     @AfterTest
     fun tearDown() {
