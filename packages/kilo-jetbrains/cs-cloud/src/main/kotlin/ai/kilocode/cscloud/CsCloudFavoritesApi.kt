@@ -34,13 +34,13 @@ class CsCloudFavoritesApi(
         }
     }
 
-    suspend fun load(id: String): CloudFavoriteActionResult = action(LOAD_PATH.format(validate(id)))
+    suspend fun load(id: String): CloudFavoriteActionResult = action(id, LOAD_PATH)
 
-    suspend fun unload(id: String): CloudFavoriteActionResult = action(UNLOAD_PATH.format(validate(id)))
+    suspend fun unload(id: String): CloudFavoriteActionResult = action(id, UNLOAD_PATH)
 
-    private suspend fun action(path: String): CloudFavoriteActionResult = withContext(Dispatchers.IO) {
+    private suspend fun action(id: String, path: String): CloudFavoriteActionResult = withContext(Dispatchers.IO) {
         try {
-            val body = execute("$base$path", method = "POST")
+            val body = execute("$base${path.format(validate(id))}", method = "POST")
             val parsed = json.decodeFromString(ActionBody.serializer(), body)
             CloudFavoriteActionResult(ok = parsed.success, item = parsed.item)
         } catch (e: CancellationException) {

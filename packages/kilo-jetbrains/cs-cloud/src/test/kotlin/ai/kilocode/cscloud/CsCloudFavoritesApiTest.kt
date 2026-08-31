@@ -88,4 +88,16 @@ class CsCloudFavoritesApiTest {
         assertEquals(CloudFavoritesErrors.NOT_FOUND, result.errorCode)
         assertNull(result.item)
     }
+
+    @Test
+    fun `load and unload never throw on invalid ids`() = runBlocking {
+        for (id in listOf("", "..", ".", "a/b", "a\\b")) {
+            val loaded = api().load(id)
+            assertFalse(loaded.ok, id)
+            assertEquals(CloudFavoritesErrors.INTERNAL, loaded.errorCode, id)
+            val unloaded = api().unload(id)
+            assertFalse(unloaded.ok, id)
+            assertEquals(CloudFavoritesErrors.INTERNAL, unloaded.errorCode, id)
+        }
+    }
 }
