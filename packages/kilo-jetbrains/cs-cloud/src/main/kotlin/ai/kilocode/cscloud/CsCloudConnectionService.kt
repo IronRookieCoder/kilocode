@@ -11,6 +11,9 @@ import ai.kilocode.backend.app.SseEvent
 import ai.kilocode.jetbrains.api.client.DefaultApi
 import ai.kilocode.log.KiloLog
 import ai.kilocode.rpc.ConnectionErrorCode
+import ai.kilocode.rpc.dto.CloudFavoriteActionResult
+import ai.kilocode.rpc.dto.CloudFavoritesErrors
+import ai.kilocode.rpc.dto.CloudFavoritesResult
 import ai.kilocode.rpc.dto.CsCloudStartDto
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CancellationException
@@ -120,6 +123,24 @@ class CsCloudConnectionService(
 
     /** Run `csc auth login` so the user can sign in to CoStrict in the browser. */
     override suspend fun loginCsCloud(): CsCloudStartDto = login()
+
+    override suspend fun cloudFavorites(): CloudFavoritesResult =
+        favoritesApi()?.list()
+            ?: CloudFavoritesResult(ok = false, errorCode = CloudFavoritesErrors.UNAVAILABLE, errorMessage = "cs-cloud daemon is not connected")
+
+    override suspend fun loadCloudFavorite(id: String): CloudFavoriteActionResult =
+        favoritesApi()?.load(id)
+            ?: CloudFavoriteActionResult(ok = false, errorCode = CloudFavoritesErrors.UNAVAILABLE, errorMessage = "cs-cloud daemon is not connected")
+
+    override suspend fun unloadCloudFavorite(id: String): CloudFavoriteActionResult =
+        favoritesApi()?.unload(id)
+            ?: CloudFavoriteActionResult(ok = false, errorCode = CloudFavoritesErrors.UNAVAILABLE, errorMessage = "cs-cloud daemon is not connected")
+
+    private fun favoritesApi(): CsCloudFavoritesApi? {
+        val client = clients?.favoritesClient ?: return null
+        val url = endpoint?.base ?: return null
+        return CsCloudFavoritesApi(client, url)
+    }
 
     override fun shutdownForUnload() = shutdown()
 
@@ -264,6 +285,7 @@ class CsCloudConnectionService(
             shutdown(it.apiClient)
             shutdown(it.sseClient)
             shutdown(it.healthClient)
+            shutdown(it.favoritesClient)
         }
     }
 

@@ -12,10 +12,12 @@ data class CsCloudClients(
     val apiClient: OkHttpClient,
     val sseClient: OkHttpClient,
     val healthClient: OkHttpClient,
+    val favoritesClient: OkHttpClient,
 )
 
 object CsCloudHttpClients {
     private const val HEALTH_TIMEOUT_SECONDS = 3L
+    private const val FAVORITES_TIMEOUT_SECONDS = 120L
 
     fun create(endpoint: CsCloudEndpoint, roots: () -> List<Path> = { emptyList() }): CsCloudClients {
         val prefix = endpoint.base.toHttpUrl().encodedPath.trimEnd('/')
@@ -40,11 +42,19 @@ object CsCloudHttpClients {
             .apply { endpoint.key?.let { addInterceptor(auth(it)) } }
             .callTimeout(HEALTH_TIMEOUT_SECONDS, TimeUnit.SECONDS)
             .build()
+        val favoritesClient = OkHttpClient.Builder()
+            .addInterceptor(CsCloudRoute.interceptor(prefix, roots))
+            .addInterceptor(CsCloudRoute.responseInterceptor())
+            .apply { endpoint.key?.let { addInterceptor(auth(it)) } }
+            .callTimeout(FAVORITES_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+            .readTimeout(FAVORITES_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+            .build()
         return CsCloudClients(
             api = DefaultApi(basePath = endpoint.base, client = apiClient),
             apiClient = apiClient,
             sseClient = sseClient,
             healthClient = healthClient,
+            favoritesClient = favoritesClient,
         )
     }
 

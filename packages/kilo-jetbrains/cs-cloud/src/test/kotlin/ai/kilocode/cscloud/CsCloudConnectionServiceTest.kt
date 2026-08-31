@@ -362,6 +362,79 @@ class CsCloudConnectionServiceTest {
         }
     }
 
+    @Test
+    fun `favorites list and actions route through the daemon`() = runBlocking {
+        val server = MockWebServer()
+        server.enqueue(MockResponse().setBody("""{"ok":true,"data":{"status":"ok","version":"1.0.0"}}"""))
+        server.enqueue(
+            MockResponse()
+                .setHeader("Content-Type", "text/event-stream")
+                .setSocketPolicy(SocketPolicy.KEEP_OPEN),
+        )
+        server.enqueue(
+            MockResponse().setBody(
+                """[{"id":"a1","slug":"my-skill","name":"My Skill","itemType":"skill","status":"Cloud"}]""",
+            ),
+        )
+        server.enqueue(
+            MockResponse().setBody(
+                """{"success":true,"item":{"id":"a1","slug":"my-skill","name":"My Skill",""" +
+                    """"itemType":"skill","status":"Active"}}""",
+            ),
+        )
+        server.start()
+        val root = Files.createTempDirectory("cs-cloud-favorites")
+        Files.createDirectories(root.resolve(".costrict/cs-cloud"))
+        Files.writeString(root.resolve(".costrict/cs-cloud/server_url"), server.url("/").newBuilder().host("127.0.0.1").build().toString())
+        Files.writeString(root.resolve(".costrict/cs-cloud/config.json"), "{\"api_key\":\"secret\"}")
+        val service = CsCloudConnectionService(
+            scope,
+            CsCloudEndpointResolver(root, emptyMap()),
+            TestLog,
+            timeout = 5_000,
+            workspace = root,
+        )
+        try {
+            service.connect()
+            val listed = service.cloudFavorites()
+            assertTrue(listed.ok)
+            assertEquals(1, listed.items.size)
+            assertEquals("Cloud", listed.items[0].status)
+            val loaded = service.loadCloudFavorite("my-skill")
+            assertTrue(loaded.ok)
+            assertEquals("Active", loaded.item?.status)
+            assertEquals("Bearer secret", server.takeRequest().getHeader("Authorization")) // health
+            assertEquals("Bearer secret", server.takeRequest().getHeader("Authorization")) // sse
+            assertEquals("/api/v1/agents/favorites", server.takeRequest().path)            // list
+            val action = server.takeRequest()
+            assertEquals("POST", action.method)
+            assertEquals("/api/v1/agents/favorites/my-skill/load", action.path)
+            assertEquals("Bearer secret", action.getHeader("Authorization"))
+        } finally {
+            service.dispose()
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun `favorites degrade to UNAVAILABLE before connect`() = runBlocking {
+        val root = Files.createTempDirectory("cs-cloud-favorites-off")
+        val service = CsCloudConnectionService(
+            scope,
+            CsCloudEndpointResolver(root, emptyMap()),
+            TestLog,
+            timeout = 5_000,
+            workspace = root,
+        )
+        try {
+            val listed = service.cloudFavorites()
+            assertFalse(listed.ok)
+            assertEquals("UNAVAILABLE", listed.errorCode)
+        } finally {
+            service.dispose()
+        }
+    }
+
     private object TestLog : KiloLog {
         override val isDebugEnabled = false
         override fun debug(block: () -> String) = Unit
