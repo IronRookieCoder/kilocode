@@ -47,7 +47,7 @@ internal class CloudHubSettingsUi(
         val result = KiloAppRpcApi.getInstance().cloudFavorites()
         if (!result.ok) throw SettingsMessageException(hubError(result.errorCode, result.errorMessage))
         cache = mergeOverrides(result.items)
-        return cache.map(::row)
+        return HubRowLogic.ordered(cache).map(::row)
     }
 
     override fun onCell(key: String, cellId: String) {
