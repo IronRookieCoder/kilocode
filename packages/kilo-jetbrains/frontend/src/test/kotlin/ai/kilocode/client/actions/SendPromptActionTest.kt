@@ -21,7 +21,7 @@ class SendPromptActionTest : BasePlatformTestCase() {
         assertTrue(event.presentation.isEnabled)
         assertEquals(1, ctx.sent)
         assertEquals("Send Prompt", action.templatePresentation.text)
-        assertEquals("Send the current Kilo prompt", action.templatePresentation.description)
+        assertEquals("Send the current Costrict prompt", action.templatePresentation.description)
     }
 
     fun `test update disables action without prompt context`() {

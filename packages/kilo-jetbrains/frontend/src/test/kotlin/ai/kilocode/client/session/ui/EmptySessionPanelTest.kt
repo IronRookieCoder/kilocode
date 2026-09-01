@@ -154,7 +154,7 @@ class EmptySessionPanelTest : BasePlatformTestCase() {
         val panel = panel()
 
         assertEquals(
-            "Kilo Code is an AI coding assistant. Ask it to build features, fix bugs, or explain your codebase.",
+            "Costrict is an AI coding assistant. Ask it to build features, fix bugs, or explain your codebase.",
             panel.explanationText(),
         )
     }

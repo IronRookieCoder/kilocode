@@ -82,7 +82,7 @@ class UserProfileConfigurableTest : BasePlatformTestCase() {
 
         edt {
             assertTrue(text(panel).contains("Not logged in"))
-            buttons(panel).first { it.text == "Login with Kilo Code" }.doClick()
+            buttons(panel).first { it.text == "Login with Costrict" }.doClick()
         }
         flush()
 
@@ -117,7 +117,7 @@ class UserProfileConfigurableTest : BasePlatformTestCase() {
         edt {
             val t = text(panel)
             assertTrue(t, t.contains("Not logged in"))
-            assertTrue(buttons(panel).any { it.text == "Login with Kilo Code" })
+            assertTrue(buttons(panel).any { it.text == "Login with Costrict" })
         }
     }
 
@@ -211,14 +211,14 @@ class UserProfileConfigurableTest : BasePlatformTestCase() {
 
         edt {
             val t = text(panel)
-            assertTrue(t, t.contains("Kilo Pass"))
+            assertTrue(t, t.contains("Costrict Pass"))
             assertTrue(t, t.contains("$73 / $199"))
             assertTrue(t, t.contains("Bonus"))
             assertTrue(t, t.contains("+$99.50"))
             assertTrue(t, t.contains("Renews"))
             assertTrue(t, t.contains("Jul 1"))
             assertTrue("pass meter should be visible", panelsByName(panel, "kilo.profile.passPanel").single().isVisible)
-            assertFalse(t, t.contains("Get Kilo Pass"))
+            assertFalse(t, t.contains("Get Costrict Pass"))
         }
     }
 
@@ -335,7 +335,7 @@ class UserProfileConfigurableTest : BasePlatformTestCase() {
 
         edt {
             val t = text(panel)
-            assertTrue(t, t.contains("Kilo Pass"))
+            assertTrue(t, t.contains("Costrict Pass"))
             assertTrue(t, t.contains("$73 / $199"))
             assertTrue(t, t.contains("Jul 1"))
             assertFalse(t, t.contains("BALANCE"))
@@ -363,10 +363,10 @@ class UserProfileConfigurableTest : BasePlatformTestCase() {
 
         edt {
             val t = text(panel)
-            assertTrue(t, t.contains("Get Kilo Pass to add credits and earn bonuses"))
+            assertTrue(t, t.contains("Get Costrict Pass to add credits and earn bonuses"))
             buttons(panel).first { it.text == "Dashboard" }.doClick()
             buttons(panel).first { it.text == "Top up" }.doClick()
-            buttons(panel).first { it.text == "Get Kilo Pass to add credits and earn bonuses" }.doClick()
+            buttons(panel).first { it.text == "Get Costrict Pass to add credits and earn bonuses" }.doClick()
         }
 
         assertEquals(listOf("https://app.kilo.ai/profile", "https://app.kilo.ai/credits", "https://kilo.ai/pricing/kilo-pass"), urls)
@@ -401,8 +401,8 @@ class UserProfileConfigurableTest : BasePlatformTestCase() {
 
         edt {
             val t = text(panel)
-            assertFalse(t, t.contains("Kilo Pass"))
-            assertFalse(t, t.contains("Get Kilo Pass"))
+            assertFalse(t, t.contains("Costrict Pass"))
+            assertFalse(t, t.contains("Get Costrict Pass"))
         }
     }
 
@@ -436,9 +436,9 @@ class UserProfileConfigurableTest : BasePlatformTestCase() {
 
     fun `test logged out update retains login button`() {
         edt {
-            val btn = buttons(panel).first { it.text == "Login with Kilo Code" }
+            val btn = buttons(panel).first { it.text == "Login with Costrict" }
             panel.update(null, KiloAppStatusDto.READY)
-            val btn2 = buttons(panel).first { it.text == "Login with Kilo Code" }
+            val btn2 = buttons(panel).first { it.text == "Login with Costrict" }
             assertSame(btn, btn2)
         }
     }
@@ -451,7 +451,7 @@ class UserProfileConfigurableTest : BasePlatformTestCase() {
 
             val logo = labelsByName(panel, "kilo.profile.logo.loggedOut").single()
             val label = labels(panel).first { it.text == "Not logged in" }
-            val btn = buttons(panel).first { it.text == "Login with Kilo Code" }
+            val btn = buttons(panel).first { it.text == "Login with Costrict" }
             val logoLoc = SwingUtilities.convertPoint(logo.parent, logo.location, panel)
             val labelLoc = SwingUtilities.convertPoint(label.parent, label.location, panel)
             val btnLoc = SwingUtilities.convertPoint(btn.parent, btn.location, panel)
@@ -544,14 +544,14 @@ class UserProfileConfigurableTest : BasePlatformTestCase() {
         rpc.completeGate = CompletableDeferred()
 
         edt {
-            buttons(panel).first { it.text == "Login with Kilo Code" }.doClick()
+            buttons(panel).first { it.text == "Login with Costrict" }.doClick()
         }
 
-        flushUntil { text(panel).contains("Sign in to Kilo Code") }
+        flushUntil { text(panel).contains("Sign in to Costrict") }
 
         edt {
             val t = text(panel)
-            assertTrue(t, t.contains("Sign in to Kilo Code"))
+            assertTrue(t, t.contains("Sign in to Costrict"))
             assertTrue(t, t.contains("Step 1:"))
             assertTrue(t, t.contains("Open this URL"))
             assertTrue(t, t.contains("https://auth.kilo.ai/device"))
@@ -587,8 +587,8 @@ class UserProfileConfigurableTest : BasePlatformTestCase() {
         rpc.fakeProfile = ProfileDto(email = "alice@test.com", name = "Alice")
         rpc.completeGate = CompletableDeferred()
 
-        edt { buttons(panel).first { it.text == "Login with Kilo Code" }.doClick() }
-        flushUntil { text(panel).contains("Sign in to Kilo Code") }
+        edt { buttons(panel).first { it.text == "Login with Costrict" }.doClick() }
+        flushUntil { text(panel).contains("Sign in to Costrict") }
 
         // Click Cancel
         edt { buttons(panel).first { it.text == "Cancel" }.doClick() }
@@ -597,7 +597,7 @@ class UserProfileConfigurableTest : BasePlatformTestCase() {
         edt {
             val t = text(panel)
             assertTrue(t, t.contains("Not logged in"))
-            assertTrue(buttons(panel).any { it.text == "Login with Kilo Code" })
+            assertTrue(buttons(panel).any { it.text == "Login with Costrict" })
         }
 
         // Now complete the gate — the stale result should be ignored
@@ -615,7 +615,7 @@ class UserProfileConfigurableTest : BasePlatformTestCase() {
     fun `test login failure shows retry`() {
         rpc.startError = IllegalStateException("HTTP 500 <!doctype html><body>Internal Server Error</body>")
 
-        edt { buttons(panel).first { it.text == "Login with Kilo Code" }.doClick() }
+        edt { buttons(panel).first { it.text == "Login with Costrict" }.doClick() }
         flushUntil { text(panel).contains("Login failed") }
 
         edt {
@@ -629,8 +629,8 @@ class UserProfileConfigurableTest : BasePlatformTestCase() {
         rpc.fakeProfile = ProfileDto(email = "alice@test.com", name = "Alice")
         rpc.completeGate = CompletableDeferred()
 
-        edt { buttons(panel).first { it.text == "Login with Kilo Code" }.doClick() }
-        flushUntil { text(panel).contains("Sign in to Kilo Code") }
+        edt { buttons(panel).first { it.text == "Login with Costrict" }.doClick() }
+        flushUntil { text(panel).contains("Sign in to Costrict") }
 
         val qrBefore = edt { labelsByName(panel, "kilo.login.qr").firstOrNull() }
         assertNotNull(qrBefore)
@@ -651,8 +651,8 @@ class UserProfileConfigurableTest : BasePlatformTestCase() {
         rpc.fakeProfile = ProfileDto(email = "alice@test.com", name = "Alice")
         rpc.completeGate = CompletableDeferred()
 
-        edt { buttons(panel).first { it.text == "Login with Kilo Code" }.doClick() }
-        flushUntil { text(panel).contains("Sign in to Kilo Code") }
+        edt { buttons(panel).first { it.text == "Login with Costrict" }.doClick() }
+        flushUntil { text(panel).contains("Sign in to Costrict") }
 
         edt {
             val t = text(panel)
@@ -671,8 +671,8 @@ class UserProfileConfigurableTest : BasePlatformTestCase() {
         rpc.fakeProfile = ProfileDto(email = "alice@test.com", name = "Alice")
         rpc.completeGate = CompletableDeferred()
 
-        edt { buttons(panel).first { it.text == "Login with Kilo Code" }.doClick() }
-        flushUntil { text(panel).contains("Sign in to Kilo Code") }
+        edt { buttons(panel).first { it.text == "Login with Costrict" }.doClick() }
+        flushUntil { text(panel).contains("Sign in to Costrict") }
 
         edt {
             val field = fieldsByName(panel, "kilo.login.url").firstOrNull()
@@ -709,8 +709,8 @@ class UserProfileConfigurableTest : BasePlatformTestCase() {
         rpc.fakeProfile = ProfileDto(email = "alice@test.com", name = "Alice")
         rpc.completeGate = CompletableDeferred()
 
-        edt { buttons(panel).first { it.text == "Login with Kilo Code" }.doClick() }
-        flushUntil { text(panel).contains("Sign in to Kilo Code") }
+        edt { buttons(panel).first { it.text == "Login with Costrict" }.doClick() }
+        flushUntil { text(panel).contains("Sign in to Costrict") }
 
         edt {
             val codePanel = panelsByName(panel, "kilo.login.codePanel").firstOrNull()
@@ -974,7 +974,7 @@ class UserProfileConfigurableTest : BasePlatformTestCase() {
     fun `test preferred focus for logged-out is login button`() {
         edt {
             val focus = panel.preferredFocus()
-            val loginBtn = buttons(panel).firstOrNull { it.text == "Login with Kilo Code" }
+            val loginBtn = buttons(panel).firstOrNull { it.text == "Login with Costrict" }
             assertNotNull("login button not found", loginBtn)
             assertSame("preferred focus should be login button for logged-out", loginBtn, focus)
         }
@@ -984,8 +984,8 @@ class UserProfileConfigurableTest : BasePlatformTestCase() {
         rpc.fakeProfile = ProfileDto(email = "stale@test.com", name = "Stale")
         rpc.completeGate = CompletableDeferred()
 
-        edt { buttons(panel).first { it.text == "Login with Kilo Code" }.doClick() }
-        flushUntil { text(panel).contains("Sign in to Kilo Code") }
+        edt { buttons(panel).first { it.text == "Login with Costrict" }.doClick() }
+        flushUntil { text(panel).contains("Sign in to Costrict") }
 
         // Dispose while login is in progress
         edt { panel.dispose() }
@@ -1009,8 +1009,8 @@ class UserProfileConfigurableTest : BasePlatformTestCase() {
         // Set device auth response without a code
         rpc.fakeDeviceAuth = DeviceAuthDto(code = null, verificationUrl = "https://auth.kilo.ai/device")
 
-        edt { buttons(panel).first { it.text == "Login with Kilo Code" }.doClick() }
-        flushUntil { text(panel).contains("Sign in to Kilo Code") }
+        edt { buttons(panel).first { it.text == "Login with Costrict" }.doClick() }
+        flushUntil { text(panel).contains("Sign in to Costrict") }
 
         edt {
             // Code panel should be hidden when no code is provided
