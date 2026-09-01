@@ -18,6 +18,11 @@
                            bundle="messages.KiloBundle"
                            key="notification.group.kilo"/>
 
+        <notificationGroup id="Kilo.CodeReview"
+                           displayType="BALLOON"
+                           bundle="messages.KiloBundle"
+                           key="notification.group.codereview"/>
+
         <toolWindow id="Kilo Code"
                     anchor="left"
                     icon="/icons/kilo.svg"
@@ -231,6 +236,7 @@
             <reference ref="Kilo.NewSession"/>
             <reference ref="Kilo.NewWorktree"/>
             <reference ref="Kilo.History"/>
+            <reference ref="Kilo.CodeReview.Changes"/>
             <reference ref="Kilo.Settings"/>
         </group>
 
@@ -284,6 +290,19 @@
 
         <action id="Kilo.WorktreeSession.Delete"
                 class="ai.kilocode.client.actions.DeleteWorktreeSessionAction"/>
+
+        <action id="Kilo.CodeReview.Changes"
+                class="ai.kilocode.client.actions.ReviewChangesAction"/>
+
+        <action id="Kilo.CodeReview.File"
+                class="ai.kilocode.client.actions.ReviewEditorAction">
+            <add-to-group group-id="EditorPopupMenu"/>
+        </action>
+
+        <action id="Kilo.CodeReview.Directory"
+                class="ai.kilocode.client.actions.ReviewDirectoryAction">
+            <add-to-group group-id="ProjectViewPopupMenu"/>
+        </action>
 
         <group id="Kilo.Worktree.RowMenu">
             <reference ref="Kilo.Worktree.Rename"/>
