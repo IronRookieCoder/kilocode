@@ -54,7 +54,7 @@ class CsCloudHealthTest {
                 .addInterceptor(CsCloudRoute.responseInterceptor())
                 .build()
             val response = client.newCall(Request.Builder().url(server.url("/api/v1/runtime/health")).build()).execute()
-            assertEquals("{\"healthy\":true,\"version\":\"9.0.0\"}", response.body!!.string())
+            assertEquals("{\"healthy\":true,\"version\":\"9.0.0\",\"capabilities\":[]}", response.body!!.string())
         } finally {
             server.shutdown()
         }

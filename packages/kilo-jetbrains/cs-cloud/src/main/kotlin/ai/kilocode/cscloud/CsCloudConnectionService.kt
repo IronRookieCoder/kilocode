@@ -50,7 +50,9 @@ class CsCloudConnectionService(
     private val installer: suspend () -> CsCloudStartDto = { CsCloudStartDto(false, "cs-cloud installer is not configured") },
     private val login: suspend () -> CsCloudStartDto = { CsCloudStartDto(false, "cs-cloud login is not configured") },
 ) : KiloConnection {
-    private val bridge = CsCloudMcpBridge(cs, { endpoint }, { clients?.apiClient }, IdeMcpSessionFactory.EP.extensionList.singleOrNull(), log)
+    private val bridge: Lazy<CsCloudMcpBridge> = lazy {
+        CsCloudMcpBridge(cs, { endpoint }, { clients?.apiClient }, IdeMcpSessionFactory.EP.extensionList.singleOrNull(), log)
+    }
     private val _state = MutableStateFlow<ConnectionState>(ConnectionState.Disconnected)
     private val _events = MutableSharedFlow<SseEvent>(extraBufferCapacity = 128)
     private var reconnect: Job? = null
@@ -67,7 +69,7 @@ class CsCloudConnectionService(
     override val apiClient: OkHttpClient? get() = clients?.apiClient
     override val target: ConnectionTarget? get() = endpoint?.let { ConnectionTarget(it.base) }
     override val port: Int get() = 0
-    override val capabilities: KiloSessionCapabilities get() = bridge
+    override val capabilities: KiloSessionCapabilities get() = bridge.value
 
     override suspend fun connect() {
         if (disposed) return
@@ -154,7 +156,7 @@ class CsCloudConnectionService(
         poll?.cancel()
         poll = null
         closeTransport()
-        cs.launch { bridge.releaseAll(CapabilityReleaseReason.SHUTDOWN) }
+        if (bridge.isInitialized()) cs.launch { bridge.value.releaseAll(CapabilityReleaseReason.SHUTDOWN) }
         _state.value = ConnectionState.Disconnected
     }
 
@@ -272,7 +274,7 @@ class CsCloudConnectionService(
         poll?.cancel()
         poll = null
         closeTransport()
-        cs.launch { bridge.releaseAll(CapabilityReleaseReason.SHUTDOWN) }
+        if (bridge.isInitialized()) cs.launch { bridge.value.releaseAll(CapabilityReleaseReason.SHUTDOWN) }
         _state.value = ConnectionState.Disconnected
     }
 
