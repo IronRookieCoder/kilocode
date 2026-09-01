@@ -23,6 +23,7 @@
             <option value="$PROJECT_DIR$/packages/kilo-jetbrains/backend" />
             <option value="$PROJECT_DIR$/packages/kilo-jetbrains/build-tasks" />
             <option value="$PROJECT_DIR$/packages/kilo-jetbrains/cs-cloud" />
+            <option value="$PROJECT_DIR$/packages/kilo-jetbrains/cs-cloud-mcp" />
             <option value="$PROJECT_DIR$/packages/kilo-jetbrains/frontend" />
             <option value="$PROJECT_DIR$/packages/kilo-jetbrains/shared" />
           </set>
