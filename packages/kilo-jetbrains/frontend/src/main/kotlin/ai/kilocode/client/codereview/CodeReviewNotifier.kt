@@ -102,16 +102,22 @@ class CodeReviewNotifier internal constructor(
         cs.launch {
             try {
                 val api = rpc
-                if (api != null) api.cloudReviewReports().collect { onReport(it) }
-                else durable { KiloAppRpcApi.getInstance().cloudReviewReports().collect { onReport(it) } }
+                if (api != null) api.cloudReviewReports().collect { onReportCatching(it) }
+                else durable { KiloAppRpcApi.getInstance().cloudReviewReports().collect { onReportCatching(it) } }
             } catch (e: Exception) {
                 LOG.warn("kind=codereview-subscription failed message=${e.message}", e)
             }
         }
     }
 
+    private fun onReportCatching(report: CodeReviewReportDto) {
+        runCatching { onReport(report) }.onFailure {
+            LOG.warn("kind=codereview-report failed directory=${report.directory}", it)
+        }
+    }
+
     private fun onReport(report: CodeReviewReportDto) {
-        val directory = service<KiloChatAccess>().workspaceDirectory ?: project.basePath
+        val directory = project.service<KiloChatAccess>().workspaceDirectory ?: project.basePath
         if (!matches(report, directory)) return
         ApplicationManager.getApplication().invokeLater({ handler(report) }, ModalityState.nonModal())
     }
