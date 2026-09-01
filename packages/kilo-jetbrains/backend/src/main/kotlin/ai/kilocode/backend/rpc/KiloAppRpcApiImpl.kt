@@ -19,6 +19,7 @@ import ai.kilocode.rpc.dto.ConfigPatchDto
 import ai.kilocode.rpc.KiloAppRpcApi
 import ai.kilocode.rpc.dto.CloudFavoriteActionResult
 import ai.kilocode.rpc.dto.CloudFavoritesResult
+import ai.kilocode.rpc.dto.CodeReviewReportDto
 import ai.kilocode.rpc.dto.ConfigWarningDto
 import ai.kilocode.rpc.dto.DeviceAuthDto
 import ai.kilocode.rpc.dto.HealthDto
@@ -60,6 +61,8 @@ class KiloAppRpcApiImpl : KiloAppRpcApi {
 
     override suspend fun state(): Flow<KiloAppStateDto> =
         app.appState.map(::dto).distinctUntilChanged()
+
+    override suspend fun cloudReviewReports(): Flow<CodeReviewReportDto> = app.codeReviewReports
 
     override suspend fun health(): HealthDto = app.health()
 

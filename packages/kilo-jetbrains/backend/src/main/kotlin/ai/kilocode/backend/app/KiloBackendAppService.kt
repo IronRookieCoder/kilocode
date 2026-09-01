@@ -23,6 +23,7 @@ import ai.kilocode.jetbrains.api.model.ProviderOauthCallbackRequest
 import ai.kilocode.rpc.ConnectionErrorCode
 import ai.kilocode.rpc.dto.CloudFavoriteActionResult
 import ai.kilocode.rpc.dto.CloudFavoritesResult
+import ai.kilocode.rpc.dto.CodeReviewReportDto
 import ai.kilocode.rpc.dto.ConfigDto
 import ai.kilocode.rpc.dto.DeviceAuthDto
 import ai.kilocode.rpc.dto.ConfigPatchDto
@@ -40,9 +41,11 @@ import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.Dispatchers
@@ -173,6 +176,10 @@ class KiloBackendAppService private constructor(
     val activity = KiloBackendActivityManager(cs, log)
     val models = KiloBackendModelStateManager(log)
     val workspaces = KiloBackendWorkspaceManager(cs, sessions, log)
+
+    private val _codeReviewReports = MutableSharedFlow<CodeReviewReportDto>(extraBufferCapacity = 32)
+    val codeReviewReports: SharedFlow<CodeReviewReportDto> get() = _codeReviewReports.asSharedFlow()
+
     @Volatile var profile: KiloProfile200Response? = null
         private set
 

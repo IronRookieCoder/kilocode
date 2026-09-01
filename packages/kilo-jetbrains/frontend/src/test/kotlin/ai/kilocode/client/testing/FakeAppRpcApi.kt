@@ -7,6 +7,7 @@ import ai.kilocode.rpc.dto.ConfigDto
 import ai.kilocode.rpc.dto.ConfigPatchDto
 import ai.kilocode.rpc.dto.CloudFavoriteActionResult
 import ai.kilocode.rpc.dto.CloudFavoritesResult
+import ai.kilocode.rpc.dto.CodeReviewReportDto
 import ai.kilocode.rpc.dto.CsCloudStartDto
 import ai.kilocode.rpc.dto.DeviceAuthDto
 import ai.kilocode.rpc.dto.HealthDto
@@ -27,6 +28,7 @@ import ai.kilocode.rpc.dto.TelemetryCaptureDto
 import ai.kilocode.rpc.dto.WatcherConfigDto
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 
 /**
@@ -82,6 +84,13 @@ class FakeAppRpcApi : KiloAppRpcApi {
     override suspend fun state(): Flow<KiloAppStateDto> {
         assertNotEdt("state")
         return state
+    }
+
+    val cloudReviewReports = MutableSharedFlow<CodeReviewReportDto>(extraBufferCapacity = 32)
+
+    override suspend fun cloudReviewReports(): Flow<CodeReviewReportDto> {
+        assertNotEdt("cloudReviewReports")
+        return cloudReviewReports
     }
 
     override suspend fun health(): HealthDto {

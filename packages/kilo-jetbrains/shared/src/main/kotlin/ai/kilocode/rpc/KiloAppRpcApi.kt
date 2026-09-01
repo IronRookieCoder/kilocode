@@ -2,6 +2,7 @@ package ai.kilocode.rpc
 
 import ai.kilocode.rpc.dto.CloudFavoriteActionResult
 import ai.kilocode.rpc.dto.CloudFavoritesResult
+import ai.kilocode.rpc.dto.CodeReviewReportDto
 import ai.kilocode.rpc.dto.DeviceAuthDto
 import ai.kilocode.rpc.dto.ConfigPatchDto
 import ai.kilocode.rpc.dto.CsCloudStartDto
@@ -131,4 +132,7 @@ interface KiloAppRpcApi : RemoteApi<Unit> {
 
     /** Fire-and-forget behavior telemetry routed through the CLI server. */
     suspend fun captureTelemetry(capture: TelemetryCaptureDto)
+
+    /** Observe completed CoStrict code-review reports written under open workspaces. */
+    suspend fun cloudReviewReports(): Flow<CodeReviewReportDto>
 }
