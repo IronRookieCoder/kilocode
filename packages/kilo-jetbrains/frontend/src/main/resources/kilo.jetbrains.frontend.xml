@@ -23,6 +23,8 @@
                            bundle="messages.KiloBundle"
                            key="notification.group.codereview"/>
 
+        <postStartupActivity implementation="ai.kilocode.client.codereview.CodeReviewStartupActivity"/>
+
         <toolWindow id="Kilo Code"
                     anchor="left"
                     icon="/icons/kilo.svg"
