@@ -3,6 +3,7 @@ package ai.kilocode.client
 import ai.kilocode.client.app.KiloWorkspaceService
 import ai.kilocode.client.app.Workspace
 import ai.kilocode.client.app.KiloSessionService
+import ai.kilocode.client.app.KiloChatAccess
 import ai.kilocode.client.session.SessionManager
 import ai.kilocode.client.session.SessionSidePanelManager
 import ai.kilocode.client.telemetry.Telemetry
@@ -147,6 +148,16 @@ internal class KiloToolWindowSetupService(
             Disposer.register(manager) { toolWindow.contentManager.removeContentManagerListener(listener) }
             toolWindow.contentManager.setSelectedContent(chatContent)
             manager.newSession()
+
+            val access = project.service<KiloChatAccess>()
+            access.manager = manager
+            access.workspaceDirectory = workspace.directory
+            Disposer.register(manager) {
+                if (access.manager === manager) {
+                    access.manager = null
+                    access.workspaceDirectory = null
+                }
+            }
 
             val actions = listOfNotNull(
                 ActionManager.getInstance().getAction("Kilo.NewSession"),

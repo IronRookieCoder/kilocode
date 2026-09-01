@@ -93,6 +93,11 @@ abstract class SessionHost(
     }
 
     @RequiresEdt
+    override fun sendCommand(command: String, args: String) {
+        currentUi()?.sendCommand(command, args)
+    }
+
+    @RequiresEdt
     override fun emptyPanel(parent: Disposable, controller: SessionController): EmptySessionPanel = EmptySessionPanel(
         parent,
         controller,

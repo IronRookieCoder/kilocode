@@ -27,6 +27,9 @@ interface SessionManager {
 
     fun focusPrompt() {}
 
+    /** Send a slash command with arguments into the current session. No-op when unsupported. */
+    fun sendCommand(command: String, args: String) {}
+
     val showsBranchBadgeInHeader: Boolean get() = true
 
     val hostedInEditorTab: Boolean get() = false

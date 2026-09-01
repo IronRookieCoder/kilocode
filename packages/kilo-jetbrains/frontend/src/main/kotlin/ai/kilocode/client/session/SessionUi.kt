@@ -741,6 +741,12 @@ class SessionUi(
         }
     }
 
+    /** Send a slash command into this session's controller (used by review actions). */
+    fun sendCommand(command: String, args: String) {
+        if (readonly) return
+        controller.command(command, args)
+    }
+
     private fun sendPrompt(text: String, files: List<PromptPartDto>, select: PromptSelection? = null) {
         if (readonly) return
         if (text.isBlank() && files.isEmpty()) return
