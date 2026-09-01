@@ -742,6 +742,7 @@ class SessionUi(
     }
 
     /** Send a slash command into this session's controller (used by review actions). */
+    @RequiresEdt
     fun sendCommand(command: String, args: String) {
         if (readonly) return
         controller.command(command, args)

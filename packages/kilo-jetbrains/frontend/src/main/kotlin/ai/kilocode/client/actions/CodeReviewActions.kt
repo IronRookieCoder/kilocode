@@ -28,7 +28,8 @@ abstract class CodeReviewAction(private val surface: String) : AnAction(), DumbA
     final override fun update(e: AnActionEvent) {
         val available = e.getData(SessionManager.KEY) != null || e.project?.service<KiloChatAccess>()?.manager != null
         e.presentation.isEnabled = available
-        if (!available) e.presentation.description = KiloBundle.message("codereview.disabled.tooltip")
+        e.presentation.description =
+            if (available) templatePresentation.description else KiloBundle.message("codereview.disabled.tooltip")
         customize(e)
     }
 

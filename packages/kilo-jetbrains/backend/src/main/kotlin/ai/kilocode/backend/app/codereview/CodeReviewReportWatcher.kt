@@ -9,6 +9,7 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.attribute.BasicFileAttributes
 import java.util.concurrent.ConcurrentHashMap
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -48,7 +49,7 @@ class CodeReviewReportWatcher(
         internal fun reportPath(root: Path, event: SseEvent): Path? =
             KiloBackendWorkspaceRefresh.paths(root, event).firstOrNull { path ->
                 path.fileName?.toString() == REPORT_JSON &&
-                    path.toString().replace('\\', '/').endsWith(REPORT_SUFFIX)
+                    path.toString().replace('\\', '/').endsWith("/$REPORT_SUFFIX")
             }
 
         /** Parse the report body into a DTO; degraded when marker/schema unknown. */
@@ -56,7 +57,7 @@ class CodeReviewReportWatcher(
             val md = jsonPath.resolveSibling(REPORT_MD)
             val obj = runCatching { json.parseToJsonElement(body).jsonObject }.getOrNull()
                 ?: return degraded(directory, jsonPath, md)
-            val marker = obj["report"]?.jsonPrimitive?.contentOrNull ?: ""
+            val marker = obj.stringOf("report") ?: ""
             val issues = runCatching { obj["issues"]?.jsonArray }.getOrNull()
             if (marker != REPORT_MARKER || issues == null || !issues.all { it is JsonObject }) {
                 return degraded(directory, jsonPath, md)
@@ -65,7 +66,7 @@ class CodeReviewReportWatcher(
             var middle = 0
             var low = 0
             for (issue in issues) {
-                when (issue.jsonObject["severity"]?.jsonPrimitive?.contentOrNull) {
+                when (issue.jsonObject.stringOf("severity")) {
                     "高" -> high += 1
                     "中" -> middle += 1
                     "低" -> low += 1
@@ -79,7 +80,7 @@ class CodeReviewReportWatcher(
                 highCount = high,
                 middleCount = middle,
                 lowCount = low,
-                qualitySummary = qualityLine(obj["conclusion"]?.jsonPrimitive?.contentOrNull),
+                qualitySummary = qualityLine(obj.stringOf("conclusion")),
                 degraded = false,
             )
         }
@@ -92,6 +93,10 @@ class CodeReviewReportWatcher(
                 ?.replace(Regex("[*#]"), "")
                 ?.trim()
                 ?.takeIf { it.isNotEmpty() }
+
+        /** String value of [key], or null when absent or not a JSON string (schema type mutation). */
+        private fun JsonObject.stringOf(key: String): String? =
+            runCatching { this[key]?.jsonPrimitive?.contentOrNull }.getOrNull()
 
         private fun degraded(directory: String, jsonPath: Path, md: Path) = CodeReviewReportDto(
             directory = directory,
@@ -133,6 +138,8 @@ class CodeReviewReportWatcher(
                             "high=${dto.highCount} middle=${dto.middleCount} low=${dto.lowCount} path=$key",
                     )
                     emit(dto)
+                } catch (e: CancellationException) {
+                    throw e
                 } catch (e: Exception) {
                     log.warn("kind=codereview-report failed path=$report", e)
                 }

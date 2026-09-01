@@ -163,6 +163,7 @@ internal class KiloToolWindowSetupService(
                 ActionManager.getInstance().getAction("Kilo.NewSession"),
                 ActionManager.getInstance().getAction("Kilo.NewWorktree"),
                 ActionManager.getInstance().getAction("Kilo.History"),
+                ActionManager.getInstance().getAction("Kilo.CodeReview.Changes"),
             )
             toolWindow.setTitleActions(actions)
             // Settings moves off the toolbar into the header gear (options) menu: Open Settings…,

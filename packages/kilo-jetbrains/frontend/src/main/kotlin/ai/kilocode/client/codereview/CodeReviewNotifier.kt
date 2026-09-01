@@ -16,6 +16,7 @@ import com.intellij.openapi.components.Service
 import com.intellij.openapi.components.service
 import com.intellij.openapi.fileEditor.FileEditorManager
 import com.intellij.openapi.project.Project
+import com.intellij.openapi.util.io.FileUtil
 import com.intellij.openapi.vfs.VirtualFileManager
 import com.intellij.openapi.vfs.VfsUtilCore
 import fleet.rpc.client.durable
@@ -48,8 +49,7 @@ class CodeReviewNotifier internal constructor(
         /** True when [report] belongs to this project's [directory] (normalized comparison). */
         internal fun matches(report: CodeReviewReportDto, directory: String?): Boolean {
             if (directory == null) return false
-            return report.directory.replace('\\', '/').trimEnd('/') ==
-                directory.replace('\\', '/').trimEnd('/')
+            return FileUtil.pathsEqual(report.directory, directory)
         }
 
         internal fun content(report: CodeReviewReportDto): String = when {
