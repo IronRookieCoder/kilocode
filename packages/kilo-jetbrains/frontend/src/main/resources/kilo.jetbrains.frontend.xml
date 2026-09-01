@@ -25,7 +25,7 @@
 
         <postStartupActivity implementation="ai.kilocode.client.codereview.CodeReviewStartupActivity"/>
 
-        <toolWindow id="Kilo Code"
+        <toolWindow id="Costrict"
                     anchor="left"
                     icon="/icons/kilo.svg"
                     factoryClass="ai.kilocode.client.KiloToolWindowFactory"/>
