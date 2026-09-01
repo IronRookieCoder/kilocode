@@ -1,5 +1,6 @@
 package ai.kilocode.backend.app
 
+import ai.kilocode.backend.app.codereview.CodeReviewReportWatcher
 import ai.kilocode.backend.cli.CliServer
 import ai.kilocode.backend.cli.KiloBackendCliManager
 import ai.kilocode.backend.cli.KiloCliDataParser
@@ -179,6 +180,21 @@ class KiloBackendAppService private constructor(
 
     private val _codeReviewReports = MutableSharedFlow<CodeReviewReportDto>(extraBufferCapacity = 32)
     val codeReviewReports: SharedFlow<CodeReviewReportDto> get() = _codeReviewReports.asSharedFlow()
+
+    private val codeReviewWatcher = CodeReviewReportWatcher(
+        cs = cs,
+        roots = {
+            ProjectManager.getInstance().openProjects
+                .filterNot { it.isDefault }
+                .mapNotNull { it.basePath }
+        },
+        emit = { report ->
+            if (!_codeReviewReports.tryEmit(report)) {
+                log.warn("kind=codereview-report emit=false directory=${report.directory}")
+            }
+        },
+        log = log,
+    )
 
     @Volatile var profile: KiloProfile200Response? = null
         private set
@@ -920,7 +936,10 @@ class KiloBackendAppService private constructor(
                             if (current is KiloAppState.Ready) load()
                         }
                         "host.file.created",
-                        "host.file.updated",
+                        "host.file.updated" -> {
+                            refreshWorkspaces(event)
+                            codeReviewWatcher.handle(event)
+                        }
                         "host.file.deleted",
                         "host.file.renamed",
                         "session.idle" -> refreshWorkspaces(event)
