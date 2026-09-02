@@ -1,6 +1,7 @@
 // kilocode_change - new file
 package ai.kilocode.backend.app
 
+import ai.kilocode.KiloPlugin
 import ai.kilocode.backend.cli.CliServer
 import ai.kilocode.backend.testing.TestLog
 import ai.kilocode.jetbrains.api.client.DefaultApi
@@ -29,6 +30,12 @@ class KiloConnectionProviderTest {
     @AfterTest
     fun tearDown() {
         scope.cancel()
+    }
+
+    @Test
+    fun `connection extension point uses Costrict plugin id`() {
+        assertEquals("ai.costrict.jetbrains", KiloPlugin.ID)
+        assertEquals("${KiloPlugin.ID}.connectionProvider", KiloConnectionProvider.EP_NAME.name)
     }
 
     @Test

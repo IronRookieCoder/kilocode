@@ -9,7 +9,7 @@
                         interface="ai.kilocode.cscloud.mcp.IdeMcpSessionFactory"/>
     </extensionPoints>
 
-    <extensions defaultExtensionNs="ai.kilocode.jetbrains">
+    <extensions defaultExtensionNs="ai.costrict.jetbrains">
         <connectionProvider implementation="ai.kilocode.cscloud.CsCloudConnectionProvider"/>
     </extensions>
 </idea-plugin>

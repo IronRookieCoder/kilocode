@@ -1,6 +1,7 @@
 // kilocode_change - new file
 package ai.kilocode.backend.app
 
+import ai.kilocode.KiloPlugin
 import ai.kilocode.backend.cli.CliServer
 import ai.kilocode.jetbrains.api.client.DefaultApi
 import ai.kilocode.log.KiloLog
@@ -17,7 +18,7 @@ interface KiloConnectionProvider {
 
     companion object {
         val EP_NAME: ExtensionPointName<KiloConnectionProvider> =
-            ExtensionPointName.create("ai.kilocode.jetbrains.connectionProvider")
+            ExtensionPointName.create("${KiloPlugin.ID}.connectionProvider")
     }
 }
 

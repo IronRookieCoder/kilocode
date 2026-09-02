@@ -1,5 +1,6 @@
 package ai.kilocode.cscloud.mcp
 
+import ai.kilocode.KiloPlugin
 import com.intellij.openapi.extensions.ExtensionPointName
 
 interface IdeMcpSessionFactory {
@@ -8,6 +9,6 @@ interface IdeMcpSessionFactory {
 
     companion object {
         val EP: ExtensionPointName<IdeMcpSessionFactory> =
-            ExtensionPointName.create("ai.kilocode.jetbrains.ideMcpSessionFactory")
+            ExtensionPointName.create("${KiloPlugin.ID}.ideMcpSessionFactory")
     }
 }

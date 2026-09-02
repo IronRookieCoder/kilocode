@@ -4,7 +4,7 @@
         <plugin id="com.intellij.mcpServer"/>
     </dependencies>
 
-    <extensions defaultExtensionNs="ai.kilocode.jetbrains">
+    <extensions defaultExtensionNs="ai.costrict.jetbrains">
         <ideMcpSessionFactory implementation="ai.kilocode.cscloud.mcp.JetBrainsMcpSessionFactory"/>
     </extensions>
 </idea-plugin>

@@ -1,5 +1,6 @@
 package ai.kilocode.cscloud
 
+import ai.kilocode.KiloPlugin
 import ai.kilocode.backend.app.ConnectionState
 import ai.kilocode.backend.app.SseEvent
 import ai.kilocode.cscloud.mcp.IdeMcpSessionFactory
@@ -43,7 +44,7 @@ class CsCloudConnectionServiceTest {
         val area = ApplicationManager.getApplication().extensionArea
         if (!area.hasExtensionPoint(IdeMcpSessionFactory.EP)) {
             area.registerExtensionPoint(
-                "ai.kilocode.jetbrains.ideMcpSessionFactory",
+                IdeMcpSessionFactory.EP.name,
                 "ai.kilocode.cscloud.mcp.IdeMcpSessionFactory",
                 ExtensionPoint.Kind.INTERFACE,
             )
@@ -53,6 +54,14 @@ class CsCloudConnectionServiceTest {
     @AfterTest
     fun tearDown() {
         scope.cancel()
+    }
+
+    @Test
+    fun `cloud extension points use Costrict plugin id`() {
+        val xml = checkNotNull(javaClass.classLoader.getResource("kilo.jetbrains.cs-cloud.xml")).readText()
+
+        assertTrue(xml.contains("""<extensions defaultExtensionNs="${KiloPlugin.ID}">"""))
+        assertEquals("${KiloPlugin.ID}.ideMcpSessionFactory", IdeMcpSessionFactory.EP.name)
     }
 
     @Test
