@@ -226,11 +226,16 @@ class KiloBackendChatManager(
             .build()
 
         http.newCall(request).execute().use { response ->
-            if (!response.isSuccessful) {
-                log.warn("abort failed: HTTP ${response.code}")
-                return
+            when {
+                response.isSuccessful -> log.debug { "${ChatLogSummary.sid(id)} kind=abort op=abort ok=true code=${response.code}" }
+                // 404/410 — the daemon no longer knows the run (e.g. it restarted mid-session),
+                // so there is nothing left to abort and reporting failure would only confuse callers.
+                response.code == 404 || response.code == 410 -> log.info("${ChatLogSummary.sid(id)} kind=abort op=abort noop=true code=${response.code}")
+                else -> {
+                    log.warn("${ChatLogSummary.sid(id)} kind=abort op=abort failed code=${response.code}")
+                    throw RuntimeException("abort failed: HTTP ${response.code}")
+                }
             }
-            log.debug { "${ChatLogSummary.sid(id)} kind=abort op=abort ok=true code=${response.code}" }
         }
     }
 

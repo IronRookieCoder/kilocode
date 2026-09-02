@@ -435,6 +435,20 @@ class SessionController(
             } catch (e: Exception) {
                 capture("Session Error", sessionProps(id) + mapOf("context" to "abort", "errorClass" to e::class.java.name))
                 LOG.warn("${ChatLogSummary.sid(id)} kind=abort dir=${ChatLogSummary.dir(directory)} failed message=${e.message}", e)
+            } finally {
+                // A stop click must always land visually. After a cs-cloud stop/restart the daemon
+                // may have lost the run, so no session.idle/turn.close event will ever arrive and
+                // the spinner would spin forever. If a run really is still streaming server-side,
+                // the next turn.open/part event flips the state back to Busy.
+                edt {
+                    if (disposed || sid != id) return@edt
+                    updateModel {
+                        val state = model.state
+                        if (state is SessionState.Busy || state is SessionState.Retry || state is SessionState.Offline) {
+                            model.setState(SessionState.Idle)
+                        }
+                    }
+                }
             }
         }
     }

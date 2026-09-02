@@ -580,7 +580,9 @@ private fun readPath(tool: Tool): String {
         if (target.type == "file") return tail(target.path).ifBlank { target.path }
         return target.path
     }
-    val path = tool.input["filePath"] ?: tool.input["path"] ?: tool.title ?: return tool.name
+    // While the call streams in, no path is known yet — an empty subtitle beats echoing the tool
+    // name back under its own localized title ("Read read").
+    val path = tool.input["filePath"] ?: tool.input["path"] ?: tool.title ?: return ""
     return tail(path).ifBlank { path }
 }
 

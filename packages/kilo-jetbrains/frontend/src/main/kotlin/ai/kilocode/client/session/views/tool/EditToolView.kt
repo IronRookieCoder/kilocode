@@ -228,7 +228,10 @@ class EditToolView(
         val count = editFiles(item).size
         val titleText = if (count > 1) KiloBundle.message("session.part.tool.patch") else title(item)
         changed = setText(parts.title, titleText) || changed
-        val path = if (count > 1) null else editPath(item)
+        // While a tool call streams in, no file path is known yet and editPath() falls back to the
+        // tool name — showing that name as a file link would duplicate the localized title
+        // (e.g. "编辑 edit"). Only show a link once a real path exists.
+        val path = if (count > 1) null else editPath(item).takeUnless { it == item.name }
         changed = setFileTarget(parts, path, if (path == null) "" else tail(path)) || changed
         changed = setForeground(parts.title, titleColor(item)) || changed
         changed = setForeground(parts.link, SessionUiStyle.Colors.foreground()) || changed

@@ -19,7 +19,6 @@ import com.intellij.icons.AllIcons
 import com.intellij.ide.BrowserUtil
 import com.intellij.openapi.Disposable
 import com.intellij.openapi.util.Disposer
-import com.intellij.openapi.util.IconLoader
 import com.intellij.util.concurrency.annotations.RequiresEdt
 import com.intellij.ui.components.JBLabel
 import com.intellij.util.ui.Centerizer
@@ -74,7 +73,7 @@ class EmptySessionPanel(
     private val feedback = EmptySessionFeedback(browse)
 
     private val logo = JBLabel(
-        IconLoader.getIcon("/icons/kilo-content.svg", EmptySessionPanel::class.java),
+        BrandLogoIcon.at(BrandLogoIcon.PANEL_SIZE),
     ).apply {
         horizontalAlignment = JBLabel.CENTER
     }

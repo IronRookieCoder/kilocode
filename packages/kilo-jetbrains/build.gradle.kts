@@ -2,6 +2,7 @@ import org.jetbrains.changelog.Changelog
 import org.jetbrains.intellij.platform.gradle.IntelliJPlatformType
 import org.jetbrains.intellij.platform.gradle.TestFrameworkType
 import org.jetbrains.intellij.platform.gradle.tasks.InstrumentCodeTask
+import org.jetbrains.intellij.platform.gradle.tasks.PrepareSandboxTask
 import org.jetbrains.intellij.platform.gradle.tasks.RunIdeTask
 import org.jetbrains.intellij.platform.gradle.tasks.aware.SplitModeAware.PluginInstallationTarget
 import java.io.File
@@ -115,8 +116,14 @@ plugins {
     alias(libs.plugins.detekt)
     alias(libs.plugins.changelog)
 
-    alias(libs.plugins.kotlin) apply false
+    alias(libs.plugins.kotlin)
     alias(libs.plugins.kotlin.serialization) apply false
+}
+
+// The integrationTest source set hosts Starter-based integration tests that run a real IDE
+// (see `intellijPlatformTesting.testIdeUi` below); Kotlin is needed to compile them.
+kotlin {
+    jvmToolchain(21)
 }
 
 changelog {
@@ -153,6 +160,16 @@ subprojects {
         buildUponDefaultConfig = true
         source.setFrom("src/main/kotlin")
     }
+
+    tasks.withType<PrepareSandboxTask>().configureEach {
+        // kotlinx-serialization ships with the IntelliJ Platform. Bundling our own copy puts the
+        // classes on two classpaths, and in split mode different plugin classloaders then bind to
+        // different copies — cross-module calls with KSerializer in the signature die with
+        // "LinkageError: loader constraint violation" (e.g. KiloAppRpcApi#cloudFavorites).
+        // Keep the platform's single copy; modules compile against the Maven artifact and tests
+        // keep it on their own classpath, so only the sandbox is affected.
+        exclude("kotlinx-serialization-*.jar")
+    }
 }
 
 detekt {
@@ -171,6 +188,25 @@ allprojects {
     }
 }
 
+// kotlinx-serialization ships with the IntelliJ Platform; see the PrepareSandboxTask exclusion in
+// `subprojects` for why the plugin must never bundle a second copy.
+tasks.withType<PrepareSandboxTask>().configureEach {
+    exclude("kotlinx-serialization-*.jar")
+}
+
+// Integration tests (https://plugins.jetbrains.com/docs/intellij/integration-tests-intro.html) run a
+// real IDE in a separate process: the JUnit 5 test process drives it through the Starter/Driver
+// frameworks while the plugin under test is installed from the `buildPlugin` ZIP.
+sourceSets {
+    create("integrationTest") {
+        compileClasspath += sourceSets.main.get().output
+        runtimeClasspath += sourceSets.main.get().output
+    }
+}
+val integrationTestImplementation by configurations.getting {
+    extendsFrom(configurations.testImplementation.get())
+}
+
 dependencies {
     intellijPlatform {
         intellijIdea(libs.versions.intellij.platform)
@@ -181,6 +217,23 @@ dependencies {
         pluginModule(implementation(project(":cs-cloud")))
         pluginModule(implementation(project(":cs-cloud-mcp")))
         testFramework(TestFrameworkType.Platform)
+        // Starter + Driver frameworks land on `integrationTestImplementation`, not the classic test config.
+        testFramework(TestFrameworkType.Starter, configurationName = "integrationTestImplementation")
+    }
+
+    integrationTestImplementation(libs.junit.jupiter)
+    integrationTestImplementation(libs.kodein.di.jvm)
+    integrationTestImplementation(libs.kotlinx.coroutines.core.jvm)
+}
+
+// Runs the `integrationTest` source set against a real IDE. The task automatically depends on
+// `buildPlugin` and exposes the plugin ZIP to tests via the `path.to.build.plugin` system property.
+val integrationTest by intellijPlatformTesting.testIdeUi.registering {
+    task {
+        val integrationTestSourceSet = sourceSets.getByName("integrationTest")
+        testClassesDirs = integrationTestSourceSet.output.classesDirs
+        classpath = integrationTestSourceSet.runtimeClasspath
+        useJUnitPlatform()
     }
 }
 
