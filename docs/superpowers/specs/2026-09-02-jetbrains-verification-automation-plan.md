@@ -1,8 +1,7 @@
 # Costrict 验证自动化改造方案（人工项 → 自动化映射）
 
-> 日期：2026-09-02。本文为[合并版验证方案](2026-09-02-jetbrains-verification-plan.md)的**自动化分册**，A/B/C/M/R/X/E 编号沿用母方案。
+> 日期：2026-09-02。
 > 依据：`packages/kilo-jetbrains/docs/integration-test.md`（Starter/Driver 集成测试，已端到端跑通）+ JetBrains IDE MCP 工具（IDEA 内置 MCP server）。
-> 目标：合并版方案中的人工项（A7-A13、B5-B15、C6-C15、M10-M28、X3/X4、R1/R2）尽可能转为可重复执行的自动化，残留人工收敛到"视觉 / 多窗口 / 真实云端"三类。
 
 ## 1. 自动化层级定义
 
@@ -35,12 +34,13 @@ class FakeCsCloudDaemon(val port: Int = FIXED_PORT) {
 | 能力 | 支撑的验证项 |
 |---|---|
 | `/api/v1/runtime/health` + `/api/v1/events` SSE 正常剧本 | M10.1 就绪、M4 联动 |
+| 基础只读端点（`/api/v1/agents/models`、`/agents/commands`、`/agents/config`、`/agents/session-modes`、`/runtime/path` 等） | M10.2 模型目录、J3/J5 目录数据及会话前置数据 |
 | 延迟响应（可配 delay） | B9/B15 busy 态 |
 | 401 / 404 / 503 / 5xx / `{ok:false}` envelope | B7、M18、M28、M26、B12 |
 | 不监听端口 / 畸形 / 非 loopback server_url | B6、M17、M25、M20b |
 | favorites 四类混合数据 + Enable/Disable POST 记录 | B8、B10/B11（UI 侧） |
 | `/conversations*` CRUD（含重命名/删除/abort） + `/prompt/async` + **脚本化 SSE 事件流回放**（assistant delta / tool call / status / permission / question / compact / revert） | M11-M14 会话闭环、C7 阶段渲染 |
-| `/api/v1/permissions*`、`/api/v1/questions*` 的 **POST 回执记录** | M13.1-M13.4 批准/拒绝/作答回执断言 |
+| `/api/v1/permissions*`、`/api/v1/questions*` 的 **POST 回执记录** | M13.1-M13.4 批准/拒绝/作答回执、J6 自动回执断言 |
 | SSE 中途 close 再恢复 | M16.1-M16.3、M21 |
 | IDE 关闭期间未收到 stop 类请求 | M22 关闭语义 |
 | 请求记录断言 `X-Workspace-Directory` 恒等项目根 | M15、M23.1（单窗口侧） |
@@ -76,6 +76,20 @@ dev IDE（打开本仓的 IDEA 实例）内置 MCP server，Claude 可直接驱�
 > 分组规则：**功能性（F）**=正常输入与正常环境下设计行为的正确性（品牌呈现、正常渲染、CRUD 与闭环）；**非功能性（NF）**=异常环境/畸形输入/安全/长时运行/兼容下的行为（诊断、容错、恢复、安全、性能、长稳）。执行顺序 F 先于 NF（§6/§8）。编号沿用母方案 A/B/C/M/X/R，与母方案逐节对照关系不变；同一测试文件可同时承载 F 与 NF 场景段（见 §5 标注）。
 
 ### 4.1 功能性（F）
+
+#### 用户旅程（J，基础功能主线）
+
+> J 编号为本分册新增（不对应母方案编号）：从最终用户视角的横向旅程组合，补齐纵向切片（A-M）之间的完整性缝隙。凡与既有项断言重复处已标锚点、不重复计数——**验收仍按母方案编号项判定，J 项全绿作为附加完整性检查**。
+
+| 项 | 级别 | 目标 | 自动化方式 | 残留人工 |
+|---|---|---|---|---|
+| J1 首次使用引导 | P0 | T2+T1 | 未登录态（mock 对鉴权接口回 401）打开工具窗 → 连接面板显示登录引导而非裸错误（`LoginRequiredView`，T1 已有）；登录入口为恢复动作（`CscLogin` 退出码语义 T1 已有）→ 就绪后接 M10.1 | 登录真流程 T3/人工抽验 |
+| J2 多轮对话上下文 | P0 | T2 | 同会话连发两轮 prompt → mock 断言第二次 `/prompt/async` 请求体携带前轮 messages（上下文连贯的协议基础）；消息列表两轮完整渲染 | 真实 agent 语义 → T3 抽验 |
+| J3 模型/模式切换即时生效 | P1 | T2 | 会话中经选择器切换模型/模式（`ModePicker`）→ mock 断言后续请求体携带新值；UI 徽标同步更新 | — |
+| J4 输入辅助（@提及/附件） | P1 | T1+T2 | @文件补全与引用组装（PromptMentionParts T1 已有）；T2 断言 prompt 请求体含被引用文件路径；附件链路以 MVP 设计 spec 为准 | — |
+| J5 slash 命令使用 | P1 | T2 | mock 提供 commands 目录 → 输入 `/` 出命令列表（`SlashAction`）→ 选择后 mock 收到的 prompt 为命令展开内容（`/review` 特例已由 C7 覆盖） | — |
+| J6 设置页自动批准规则 | P1 | T2 | 设置页（`AutoApproveConfigurable`）增/删规则 → 会话中同类操作不再弹卡 / 恢复弹卡，mock 记录自动回执 POST（区别于 M13.4 会话内 always 与 M20c「无全局批准」底线） | — |
+| J7 空态与加载态 | P2 | T2 | mock 返回空集合（无历史/无收藏/无模型）→ 空态文案而非白屏（EmptySessionPanel 同族）；加载中显示 loading 占位 | 视觉 |
 
 #### 品牌（A）
 
@@ -114,7 +128,7 @@ dev IDE（打开本仓的 IDEA 实例）内置 MCP server，Claude 可直接驱�
 | B11 Disable | P0 | T2+T3 | 同上（Disable 路径） | 同上 |
 | B14 中英文 | P1 | T1 | bundle 断言（en 缺失回退逻辑为资源束标准行为） | — |
 
-> **Settings modal 前置 gate 与降级路径**（适用于全部 B 行，含 §4.2 诊断容错表中的 B5-B7/B12）：Cloud Hub 宿主为 Settings 对话框子页（`CloudHubConfigurable`），而 Driver 驱动 modal Settings（打开 → 树导航至子页 → 断言面板渲染 → 点行内按钮）在本仓无验证记录。基建批先跑通 **gate 用例**（§8 步骤 1）作为 B 组准入；若 Driver 无法驱动 Settings，B 组 UI 断言统一降级为 ConnectionService/favorites **服务层状态断言**（RPC 层），Settings 渲染退回人工截图 1 轮——降级后 B8 分组/B10-B11 行状态以服务层状态为准，并在结果模板标注「UI 层未覆盖」。权限/问答弹卡（M13）为工具窗内 inline 视图（`PermissionView`/`QuestionView`，非 modal），不在此降级范围内。
+> **Settings modal 前置 gate 与降级路径**（适用于全部 B 行，含 §4.2 的 B5-B7/B12 及 B15）：Cloud Hub 宿主为 Settings 对话框子页（`CloudHubConfigurable`），而 Driver 驱动 modal Settings（打开 → 树导航至子页 → 断言面板渲染 → 点行内按钮）在本仓无验证记录。基建批先跑通 **gate 用例**（§8 步骤 1）作为 B 组准入；若 Driver 无法驱动 Settings，B 组 UI 断言统一降级为 ConnectionService/favorites **服务层状态断言**（RPC 层），Settings 渲染退回人工截图 1 轮——降级后 B8 分组/B10-B11 行状态以服务层状态为准，并在结果模板标注「UI 层未覆盖」。权限/问答弹卡（M13）为工具窗内 inline 视图（`PermissionView`/`QuestionView`，非 modal），不在此降级范围内。
 
 #### Code Review 闭环（C6-C10、C12、C14-C15）
 
@@ -198,7 +212,7 @@ frontend/（T1 增补，均为 F）
 build.gradle.kts                仅一处增补：integrationTest 显式 maxParallelForks = 1（固化串行）；源集与任务已在，mock 用 JDK 内置 HttpServer 故零新增依赖（B5 若选注入点方案，另涉 CsCloudStarter 一行级改动）
 ```
 
-预估（按 §2 要点 2 的「类 = IDE 会话」编排）：T2 新增 5 文件、约 25-30 个场景段，对应 5-8 次 IDE 启动，单轮 `integrationTest` 约 15-25 分钟（含 Settings gate 用例；IDE 安装复用本地缓存）。若改为「每用例独立 IDE」（CI 失败定位更准）则为 25-30 次启动 ≈ 50-70 分钟——两模式的取舍已在 §2 要点 2 论证，默认取前者。
+预估（按 §2 要点 2 的「类 = IDE 会话」编排）：T2 新增 5 文件、约 25-30 个场景段（含 §4.1 用户旅程 J1-J7——复用上述 T2 类，不新增文件），对应 5-8 次 IDE 启动，单轮 `integrationTest` 约 15-25 分钟（含 Settings gate 用例；IDE 安装复用本地缓存）。若改为「每用例独立 IDE」（CI 失败定位更准）则为 25-30 次启动 ≈ 50-70 分钟——两模式的取舍已在 §2 要点 2 论证，默认取前者。
 
 ## 6. 改造后执行顺序（替代母方案 §13）
 
@@ -221,13 +235,13 @@ build.gradle.kts                仅一处增补：integrationTest 显式 maxPara
 - 原「P0 全过」中所有 T2 可达项改为以 `integrationTest` 全绿为验收依据；T3 抽样项以探针记录回填结论
 - 新增前置：`FakeCsCloudDaemon` 场景剧本纳入代码评审（剧本即测试语义，需与设计 spec 协议章节对照）
 - B 系列若触发 §4.1 Hub gate 降级路径，以降级后判据为准，并在结果模板标注「UI 层未覆盖」
-- **功能批（F）全绿是非功能批（NF）执行的前提**；NF 项失败按母方案 §15 级别规则处理（P1 记缺陷不阻塞、P2 可选降级）
+- **功能批（F）自动化项全绿是非功能批（NF）执行的前提**（F 组残留人工目检项不阻塞 NF）；NF 项失败按母方案 §15 级别规则处理（P1 记缺陷不阻塞、P2 可选降级）
 - 残留人工项失败处理不变：视觉项按缺陷记录；多窗口/长稳项不阻塞
 
 ## 8. 实施顺序建议
 
 1. **基建**：IntegrationTestBase（fixture 生成/场景段编排/还原双保险）+ FakeCsCloudDaemon（固定端口）+ health/SSE 正常剧本 + **Settings gate 用例**（打开 Settings → 定位 Cloud Hub 子页 → 断言面板存在；不过则启用 §4.1 Hub gate 降级路径）（跑通 M10.1 一条 T2）
-2. **功能批（F）**：M10-M15 会话闭环（SSE 事件回放器在此落地，工作量最大）→ Hub 正常态 B8-B11/B14 → Review 闭环 C6-C10/C12/C14-C15（B 组以 gate 通过为前提）
+2. **功能批（F）**：M10-M15 会话闭环（SSE 事件回放器在此落地，工作量最大）→ Hub 正常态 B8-B11/B14 → Review 闭环 C6-C10/C12/C14-C15（B 组以 gate 通过为前提）→ 用户旅程 J1-J7（复用上述场景基建做横向组合断言）
 3. **非功能批·诊断容错（NF）**：M16-M21/M25/M26/M28（纯 mock 协议侧）→ B5-B7/B12、C11 异常态（B5 遮蔽机制在此步落地——先 CI-only，需要本机回归时再补注入点）
 4. **非功能批·安全与长稳/多窗口（NF）**：M20a-d → M22/B15/M24/M27 → 双窗口人工 B13/C13/M23
 5. **T1 增补批**：4 个单测文件（均为 F，独立于 T2，可随功能批先行）
