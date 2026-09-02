@@ -224,16 +224,36 @@ dependencies {
     integrationTestImplementation(libs.junit.jupiter)
     integrationTestImplementation(libs.kodein.di.jvm)
     integrationTestImplementation(libs.kotlinx.coroutines.core.jvm)
+    // The Starter framework pulls kotlin-reflect built with the platform's Kotlin (2.3.x), but its
+    // metadata does not raise kotlin-stdlib accordingly; without this, the test process initializes
+    // kodein against an older stdlib and dies on missing kotlin.jvm.internal.* classes.
+    integrationTestImplementation(kotlin("stdlib"))
+    // Gradle 9 no longer injects the JUnit Platform launcher from its own distribution.
+    // String notation: the configuration is created in this script, so no type-safe accessor exists.
+    "integrationTestRuntimeOnly"(libs.junit.platform.launcher)
 }
 
 // Runs the `integrationTest` source set against a real IDE. The task automatically depends on
 // `buildPlugin` and exposes the plugin ZIP to tests via the `path.to.build.plugin` system property.
+val integrationTestIdeHome = providers.provider {
+    // Reuse a full IDE install cached by verifyPlugin (.intellijPlatform/ides, e.g. IU-2026.1)
+    // instead of downloading a release; empty value lets Starter download one instead.
+    val idesDir = layout.projectDirectory.dir(".intellijPlatform/ides").asFile
+    val platformVersion = libs.versions.intellij.platform.get()
+    idesDir.listFiles { file: File -> file.isDirectory && file.name.endsWith(platformVersion) }
+        ?.maxByOrNull { it.name }
+        ?.absolutePath
+        .orEmpty()
+}
+
 val integrationTest by intellijPlatformTesting.testIdeUi.registering {
     task {
         val integrationTestSourceSet = sourceSets.getByName("integrationTest")
         testClassesDirs = integrationTestSourceSet.output.classesDirs
         classpath = integrationTestSourceSet.runtimeClasspath
         useJUnitPlatform()
+        // Not a Provider: Test.systemProperty does not unpack providers, it would stringify them.
+        systemProperty("kilo.integrationTest.ideHome", integrationTestIdeHome.getOrElse(""))
     }
 }
 
