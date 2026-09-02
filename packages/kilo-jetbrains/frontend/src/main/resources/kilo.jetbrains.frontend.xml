@@ -233,7 +233,13 @@
         <action id="Kilo.History"
                 class="ai.kilocode.client.actions.HistoryAction"/>
 
+        <action id="Kilo.CodeReview.Changes"
+                class="ai.kilocode.client.actions.ReviewChangesAction"/>
+
         <!-- Declarative toolbar group for the Kilo tool window title bar -->
+        <!-- NOTE: keep every <action> declared above any <group> that references it —
+             the platform registers actions in document order, so a <reference> to a
+             later <action> fails with "action specified by reference isn't registered". -->
         <group id="Kilo.ToolWindowToolbar">
             <reference ref="Kilo.NewSession"/>
             <reference ref="Kilo.NewWorktree"/>
@@ -245,7 +251,7 @@
         <action id="Kilo.SendPrompt"
                 class="ai.kilocode.client.actions.SendPromptAction"
                 text="Send Prompt"
-                description="Send the current Kilo prompt">
+                description="Send the current Costrict prompt">
             <keyboard-shortcut keymap="$default"
                                first-keystroke="ENTER"/>
             <keyboard-shortcut keymap="Mac OS X 10.5+"
@@ -257,7 +263,7 @@
         <action id="Kilo.StopSession"
                 class="ai.kilocode.client.actions.StopSessionAction"
                 text="Stop Session"
-                description="Stop the current Kilo session">
+                description="Stop the current Costrict session">
             <keyboard-shortcut keymap="$default"
                                first-keystroke="alt S"/>
         </action>
@@ -292,9 +298,6 @@
 
         <action id="Kilo.WorktreeSession.Delete"
                 class="ai.kilocode.client.actions.DeleteWorktreeSessionAction"/>
-
-        <action id="Kilo.CodeReview.Changes"
-                class="ai.kilocode.client.actions.ReviewChangesAction"/>
 
         <action id="Kilo.CodeReview.File"
                 class="ai.kilocode.client.actions.ReviewEditorAction">
