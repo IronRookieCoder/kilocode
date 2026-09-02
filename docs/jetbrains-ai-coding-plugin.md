@@ -1,4 +1,4 @@
-# JetBrains AI 编程插件 · 技术方案评审材料
+# JetBrains AI 编程插件技术方案
 
 > **定位：** 技术方向已定，本文聚焦三件事——Kilo Code 现状架构、改造目标架构、改造边界与关键技术事项。不含代码级细节。
 > **前置结论（已定）：** 以 Kilo Code 插件为基础改造，采用 **JetBrains 原生 UI + cs-cloud + csc** 的三层技术方向。
