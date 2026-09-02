@@ -93,7 +93,7 @@ class KiloAgentBehaviorRpcApiImplTest {
         """.trimMargin()
         Files.writeString(file, content)
         mock.skills = """[
-            {"name":"plan","description":"Plan work","location":"$file","content":"# Stale Plan"},
+            {"name":"plan","description":"Plan work","location":"${jsonPath(file)}","content":"# Stale Plan"},
             {"name":"builtin","location":"builtin"}
         ]""".trimIndent()
         val rpc = rpc()
@@ -106,7 +106,7 @@ class KiloAgentBehaviorRpcApiImplTest {
         assertEquals(false, skills.single { it.name == "builtin" }.editable)
 
         assertTrue(rpc.removeSkill("/test project", file.toString()))
-        assertEquals("{\"location\":\"$file\"}", mock.lastSkillRemoveBody)
+        assertEquals("{\"location\":\"${jsonPath(file)}\"}", mock.lastSkillRemoveBody)
         assertEquals(1, mock.requestCount("/kilocode/skill/remove"))
 
         mock.skillRemoveStatus = 400
@@ -125,7 +125,7 @@ class KiloAgentBehaviorRpcApiImplTest {
         val file = Files.createDirectories(dir.resolve("command")).resolve("review.md")
         Files.writeString(file, "---\ndescription: Review code\n---\n\nReview $" + "ARGUMENTS")
         mock.commandFiles = """[
-            {"name":"review","description":"Review code","agent":"reviewer","model":"anthropic/claude-sonnet-4-6","variant":"high","source":"command","builtin":false,"location":"$file","editable":true,"content":"Review","subtask":true},
+            {"name":"review","description":"Review code","agent":"reviewer","model":"anthropic/claude-sonnet-4-6","variant":"high","source":"command","builtin":false,"location":"${jsonPath(file)}","editable":true,"content":"Review","subtask":true},
             {"name":"init","source":"command","builtin":true,"location":"builtin","editable":false,"content":"Init"}
         ]""".trimIndent()
         val rpc = rpc()
@@ -140,7 +140,7 @@ class KiloAgentBehaviorRpcApiImplTest {
         assertEquals(false, commands.single { it.name == "init" }.editable)
 
         assertTrue(rpc.removeCommand("/test project", file.toString()))
-        assertEquals("{\"location\":\"$file\"}", mock.lastCommandRemoveBody)
+        assertEquals("{\"location\":\"${jsonPath(file)}\"}", mock.lastCommandRemoveBody)
         assertEquals(1, mock.requestCount("/kilocode/command/remove"))
 
         mock.commandRemoveStatus = 400
@@ -162,7 +162,7 @@ class KiloAgentBehaviorRpcApiImplTest {
         Files.writeString(known, "old")
         Files.writeString(other, "old")
         mock.commandFiles = """[
-            {"name":"known","source":"command","builtin":false,"location":"$known","editable":true,"content":"old"}
+            {"name":"known","source":"command","builtin":false,"location":"${jsonPath(known)}","editable":true,"content":"old"}
         ]""".trimIndent()
         val rpc = rpc()
 
@@ -180,7 +180,7 @@ class KiloAgentBehaviorRpcApiImplTest {
         val project = Files.createTempDirectory("kilo-command-project")
         val config = Files.createTempDirectory("kilo-command-config")
         val added = config.resolve("commands/global.md")
-        mock.path = """{"home":"/tmp","state":"/tmp","config":"$config","worktree":"$project","directory":"$project"}"""
+        mock.path = """{"home":"/tmp","state":"/tmp","config":"${jsonPath(config)}","worktree":"${jsonPath(project)}","directory":"${jsonPath(project)}"}"""
         val rpc = rpc()
 
         assertTrue(rpc.saveCommands(project.toString(), mapOf(added.toString() to "global command")))
@@ -195,7 +195,7 @@ class KiloAgentBehaviorRpcApiImplTest {
         val file = Files.createDirectories(cache).resolve("SKILL.md")
         Files.writeString(file, "# Remote")
         mock.skills = """[
-            {"name":"remote","description":"Remote","location":"$file","content":"# Remote"}
+            {"name":"remote","description":"Remote","location":"${jsonPath(file)}","content":"# Remote"}
         ]""".trimIndent()
 
         val skill = rpc().skills("/test project").single()
@@ -210,7 +210,7 @@ class KiloAgentBehaviorRpcApiImplTest {
         val file = Files.createDirectories(dir.resolve("cache/kilo/skills/custom")).resolve("SKILL.md")
         Files.writeString(file, "# Custom")
         mock.skills = """[
-            {"name":"custom","description":"Custom","location":"$file","content":"# Custom"}
+            {"name":"custom","description":"Custom","location":"${jsonPath(file)}","content":"# Custom"}
         ]""".trimIndent()
 
         val skill = rpc().skills("/test project").single()
@@ -224,7 +224,7 @@ class KiloAgentBehaviorRpcApiImplTest {
         val file = dir.resolve("test.md")
         Files.writeString(file, "old")
         mock.skills = """[
-            {"name":"test","description":"Test","location":"$file","content":"old"}
+            {"name":"test","description":"Test","location":"${jsonPath(file)}","content":"old"}
         ]""".trimIndent()
         val rpc = rpc()
 
@@ -239,7 +239,7 @@ class KiloAgentBehaviorRpcApiImplTest {
         val file = Files.createDirectories(dir.resolve("plan")).resolve("SKILL.md")
         Files.writeString(file, "old")
         mock.skills = """[
-            {"name":"plan","description":"Plan work","location":"$file","content":"old"}
+            {"name":"plan","description":"Plan work","location":"${jsonPath(file)}","content":"old"}
         ]""".trimIndent()
         val rpc = rpc()
 
@@ -258,8 +258,8 @@ class KiloAgentBehaviorRpcApiImplTest {
         Files.writeString(plan, "old plan")
         Files.writeString(review, "old review")
         mock.skills = """[
-            {"name":"plan","description":"Plan work","location":"$plan","content":"old plan"},
-            {"name":"review","description":"Review work","location":"$review","content":"old review"}
+            {"name":"plan","description":"Plan work","location":"${jsonPath(plan)}","content":"old plan"},
+            {"name":"review","description":"Review work","location":"${jsonPath(review)}","content":"old review"}
         ]""".trimIndent()
         val rpc = rpc()
         mock.resetCounts()
@@ -279,7 +279,7 @@ class KiloAgentBehaviorRpcApiImplTest {
         Files.writeString(known, "known")
         Files.writeString(other, "old")
         mock.skills = """[
-            {"name":"known","description":"Known","location":"$known","content":"known"}
+            {"name":"known","description":"Known","location":"${jsonPath(known)}","content":"known"}
         ]""".trimIndent()
 
         assertFalse(rpc().saveSkill("/test project", other.toString(), "new content"))
@@ -358,6 +358,13 @@ class KiloAgentBehaviorRpcApiImplTest {
     }
 
     private suspend fun rpc(): KiloAgentBehaviorRpcApiImpl = KiloAgentBehaviorRpcApiImpl(app())
+
+    /**
+     * Paths interpolated into mock JSON payloads must be escaped: on Windows the backslashes of
+     * `C:\Users\...` would otherwise form invalid JSON escapes (`\U`, `\A`, ...) which
+     * [ai.kilocode.backend.cli.KiloCliDataParser] silently turns into an empty list.
+     */
+    private fun jsonPath(path: Path): String = path.toString().replace("\\", "\\\\")
 
     private suspend fun app(): KiloBackendAppService {
         val app = KiloBackendAppService.create(scope, FakeCliServer(mock), TestLog())

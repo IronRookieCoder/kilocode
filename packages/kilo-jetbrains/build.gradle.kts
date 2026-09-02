@@ -137,17 +137,14 @@ changelog {
     combinePreReleases = false
 }
 
+// "What's New" shown on the plugin detail page. Releases inject the real notes through the
+// `kilo.changeNotes` Gradle property; the fallback must stay Costrict-branded — CHANGELOG.md
+// still carries upstream Kilo-Org entries that must not surface in the Costrict listing.
 val notes = providers.gradleProperty("kilo.changeNotes").orElse(
     provider {
-        val versions = selected(ver).filter { changelog.has(it) }
-        if (versions.isNotEmpty()) return@provider versions.joinToString("\n") { item ->
-            changelog.renderItem(
-                changelog.get(item).withHeader(true).withEmptySections(false),
-                Changelog.OutputType.HTML,
-            )
-        }
-        val item = if (changelog.has(ver)) changelog.get(ver) else changelog.getUnreleased()
-        changelog.renderItem(item.withHeader(false).withEmptySections(false), Changelog.OutputType.HTML)
+        "Costrict $ver — open-source AI coding agent with inline autocomplete, Agent Manager " +
+            "worktrees, MCP integrations and multi-model support. Visit https://costrict.ai " +
+            "for release highlights and documentation."
     },
 )
 
@@ -162,13 +159,16 @@ subprojects {
     }
 
     tasks.withType<PrepareSandboxTask>().configureEach {
-        // kotlinx-serialization ships with the IntelliJ Platform. Bundling our own copy puts the
-        // classes on two classpaths, and in split mode different plugin classloaders then bind to
-        // different copies — cross-module calls with KSerializer in the signature die with
-        // "LinkageError: loader constraint violation" (e.g. KiloAppRpcApi#cloudFavorites).
+        // kotlinx-serialization and kotlin-stdlib ship with the IntelliJ Platform. Bundling our own
+        // copies puts the classes on two classpaths, and in split mode different plugin classloaders
+        // then bind to different copies — cross-module calls with KSerializer in the signature die
+        // with "LinkageError: loader constraint violation" (e.g. KiloAppRpcApi#cloudFavorites, and
+        // the kotlin-stdlib copy that okhttp/okio pull in transitively broke every settings page
+        // whose fleet RPC descriptor serializes String/Boolean via BuiltinSerializersKt).
         // Keep the platform's single copy; modules compile against the Maven artifact and tests
         // keep it on their own classpath, so only the sandbox is affected.
         exclude("kotlinx-serialization-*.jar")
+        exclude("kotlin-stdlib*.jar")
     }
 }
 
@@ -188,10 +188,11 @@ allprojects {
     }
 }
 
-// kotlinx-serialization ships with the IntelliJ Platform; see the PrepareSandboxTask exclusion in
-// `subprojects` for why the plugin must never bundle a second copy.
+// kotlinx-serialization and kotlin-stdlib ship with the IntelliJ Platform; see the
+// PrepareSandboxTask exclusion in `subprojects` for why the plugin must never bundle a second copy.
 tasks.withType<PrepareSandboxTask>().configureEach {
     exclude("kotlinx-serialization-*.jar")
+    exclude("kotlin-stdlib*.jar")
 }
 
 // Integration tests (https://plugins.jetbrains.com/docs/intellij/integration-tests-intro.html) run a
@@ -265,7 +266,9 @@ intellijPlatform {
     pluginInstallationTarget = PluginInstallationTarget.BOTH
 
     pluginConfiguration {
-        id = "ai.kilocode.jetbrains"
+        // Distinct from upstream ai.kilocode.jetbrains so marketplace lookups resolve to the
+        // Costrict listing instead of Kilo Code's overview/reviews/changelog.
+        id = "ai.costrict.jetbrains"
         name = "Costrict"
         version = provider { ver }
         changeNotes = notes

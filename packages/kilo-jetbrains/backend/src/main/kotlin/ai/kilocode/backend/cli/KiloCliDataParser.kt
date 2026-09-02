@@ -12,6 +12,7 @@ import ai.kilocode.backend.workspace.ModelOptionsInfo
 import ai.kilocode.backend.workspace.ModelTerminalBenchInfo
 import ai.kilocode.backend.workspace.ProviderData
 import ai.kilocode.backend.workspace.ProviderInfo
+import ai.kilocode.log.KiloLog
 import ai.kilocode.rpc.dto.AgentConfigDto
 import ai.kilocode.rpc.dto.ChatEventDto
 import ai.kilocode.rpc.dto.CloudSessionDto
@@ -112,6 +113,7 @@ import java.util.concurrent.ConcurrentHashMap
  */
 object KiloCliDataParser {
 
+    private val LOG = KiloLog.create(KiloCliDataParser::class.java)
     private val json = Json { ignoreUnknownKeys = true }
     private val pretty = Json { ignoreUnknownKeys = true; prettyPrint = true }
     private val TYPE_REGEX = Regex(""""type"\s*:\s*"([^"]+)"""")
@@ -721,7 +723,12 @@ object KiloCliDataParser {
         return when (root) {
             is JsonArray -> root
             is JsonObject -> root["data"] as? JsonArray ?: JsonArray(emptyList())
-            else -> JsonArray(emptyList())
+            else -> {
+                // A blank/invalid payload must not vanish silently: an empty list here surfaces
+                // downstream as an inexplicably blank settings page (agents/skills/workflows).
+                LOG.warn("CLI response is not a JSON array (len=${length}): ${take(200)}")
+                JsonArray(emptyList())
+            }
         }
     }
 
