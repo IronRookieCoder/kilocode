@@ -1,11 +1,18 @@
 package ai.kilocode.client.app
 
+import ai.kilocode.client.plugin.KiloBundle
 import ai.kilocode.client.testing.FakeAppRpcApi
+import ai.kilocode.rpc.ConnectionErrorCode
+import ai.kilocode.rpc.dto.CsCloudStartDto
 import ai.kilocode.rpc.dto.KiloAppStateDto
 import ai.kilocode.rpc.dto.KiloAppStatusDto
 import ai.kilocode.rpc.dto.ProfileBalanceDto
 import ai.kilocode.rpc.dto.ProfileDto
 import ai.kilocode.rpc.dto.ProfileOrganizationDto
+import com.intellij.notification.Notification
+import com.intellij.notification.NotificationType
+import com.intellij.notification.Notifications
+import com.intellij.openapi.application.ApplicationManager
 import com.intellij.testFramework.fixtures.BasePlatformTestCase
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
@@ -27,6 +34,7 @@ class KiloAppServiceTest : BasePlatformTestCase() {
     private lateinit var scope: CoroutineScope
     private lateinit var rpc: FakeAppRpcApi
     private lateinit var app: KiloAppService
+    private val notifications = mutableListOf<Notification>()
 
     override fun setUp() {
         super.setUp()
@@ -34,6 +42,7 @@ class KiloAppServiceTest : BasePlatformTestCase() {
         rpc = FakeAppRpcApi()
         app = KiloAppService(scope, rpc)
         app._state.value = KiloAppStateDto(KiloAppStatusDto.READY)
+        notifications.clear()
     }
 
     override fun tearDown() {
@@ -56,6 +65,83 @@ class KiloAppServiceTest : BasePlatformTestCase() {
         withTimeout(5_000) {
             while (!done()) yield()
         }
+    }
+
+    // ------ installCscAsync notifications ------
+
+    /** Records the notifications the service raises, whatever project (or none) it attaches them to. */
+    private fun recordNotifications() {
+        val subscriber = object : Notifications {
+            override fun notify(notification: Notification) {
+                notifications.add(notification)
+            }
+        }
+        val disposable = testRootDisposable
+        project.messageBus.connect(disposable).subscribe(Notifications.TOPIC, subscriber)
+        ApplicationManager.getApplication().messageBus.connect(disposable).subscribe(Notifications.TOPIC, subscriber)
+    }
+
+    private suspend fun runInstallAndAwaitErrors(): Notification {
+        recordNotifications()
+        app.installCscAsync()
+        // installCscAsync always announces the install before the outcome.
+        waitUntil { notifications.size == 2 }
+        return notifications.last()
+    }
+
+    fun `test installCscAsync keeps the install failure title for the install stage`() = runBlocking(Dispatchers.Default) {
+        rpc.csCloudInstall = CsCloudStartDto(ok = false, message = "npm install failed", stage = CsCloudStartDto.STAGE_INSTALL)
+
+        val error = runInstallAndAwaitErrors()
+
+        assertEquals(KiloBundle.message("csCloud.install.failed"), error.title)
+        assertEquals("npm install failed", error.content)
+    }
+
+    fun `test installCscAsync reports the start failure when only cs-cloud fails to start`() = runBlocking(Dispatchers.Default) {
+        rpc.csCloudInstall = CsCloudStartDto(ok = false, message = "port 3000 busy", stage = CsCloudStartDto.STAGE_START)
+
+        val error = runInstallAndAwaitErrors()
+
+        assertEquals(KiloBundle.message("csCloud.install.failed.start"), error.title)
+        assertEquals("port 3000 busy", error.content)
+    }
+
+    fun `test installCscAsync falls back to the install title when the stage is unknown`() = runBlocking(Dispatchers.Default) {
+        rpc.csCloudInstall = CsCloudStartDto(ok = false, message = "cs-cloud daemon is not managed by this connection")
+
+        val error = runInstallAndAwaitErrors()
+
+        assertEquals(KiloBundle.message("csCloud.install.failed"), error.title)
+        assertEquals("cs-cloud daemon is not managed by this connection", error.content)
+    }
+
+    fun `test installCscAsync offers installation docs and the npm page when npm is missing`() = runBlocking(Dispatchers.Default) {
+        rpc.csCloudInstall = CsCloudStartDto(
+            ok = false,
+            message = "no package manager was found",
+            code = ConnectionErrorCode.NPM_NOT_FOUND,
+            stage = CsCloudStartDto.STAGE_INSTALL,
+        )
+
+        val error = runInstallAndAwaitErrors()
+
+        assertEquals(KiloBundle.message("csCloud.install.failed"), error.title)
+        assertEquals(KiloBundle.message("csCloud.install.npmMissing.desc"), error.content)
+        assertEquals(2, error.actions.size)
+        assertEquals(KiloBundle.message("csCloud.install.npmMissing.docs"), error.actions[0].templateText)
+        assertEquals(KiloBundle.message("action.Kilo.OpenCscNpm.text"), error.actions[1].templateText)
+    }
+
+    fun `test installCscAsync announces success without an error notice`() = runBlocking(Dispatchers.Default) {
+        rpc.csCloudInstall = CsCloudStartDto(ok = true, message = "installed")
+
+        recordNotifications()
+        app.installCscAsync()
+        waitUntil { notifications.size == 2 }
+
+        assertEquals(KiloBundle.message("csCloud.install.ok"), notifications.last().title)
+        assertTrue(notifications.none { it.type == NotificationType.ERROR })
     }
 
     fun `test fetchCoreInfoAsync dedupes in flight requests`() = runBlocking(Dispatchers.Default) {

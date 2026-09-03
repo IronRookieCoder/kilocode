@@ -12,6 +12,7 @@ import com.intellij.openapi.extensions.ExtensionPoint
 import com.intellij.testFramework.junit5.TestApplication
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.serialization.json.Json
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.first
@@ -157,11 +158,14 @@ class CsCloudConnectionServiceTest {
         Files.writeString(root.resolve(".costrict/cs-cloud/config.json"), "{\"api_key\":\"secret\"}")
         val unavailable = CsCloudConnectionService(scope, CsCloudEndpointResolver(root, emptyMap()), TestLog, workspace = root)
         try {
+            // `reinstall` throws unconditionally; kept first so the test's last expression stays
+            // Unit — a trailing `assertFailsWith` makes the @Test return a value and JUnit skips it.
+            assertFailsWith<CsCloudUnsupportedOperationException> { runBlocking { unavailable.reinstall() } }
             unavailable.connect()
             val error = assertIs<ConnectionState.Error>(unavailable.state.value)
-            assertEquals("unavailable: Service Unavailable (HTTP 503)", error.message)
+            // The middle segment is the HTTP reason phrase, which okhttp/MockWebServer may vary.
+            assertTrue(error.message.startsWith("unavailable: ") && error.message.endsWith("(HTTP 503)"), error.message)
             assertNull(error.code)
-            assertFailsWith<CsCloudUnsupportedOperationException> { runBlocking { unavailable.reinstall() } }
         } finally {
             unavailable.dispose()
             server.shutdown()
@@ -255,10 +259,13 @@ class CsCloudConnectionServiceTest {
         )
         try {
             val result = service.startCsCloud()
+            // Success triggers a connect attempt, which fails discovery here. Kept ahead of the
+            // Unit-returning asserts — a trailing `assertIs` makes the @Test return a value and
+            // JUnit silently skips it.
+            assertIs<ConnectionState.Error>(service.state.value)
             assertTrue(result.ok)
             assertEquals("started", result.message)
-            // Success triggers a connect attempt, which fails discovery here.
-            assertIs<ConnectionState.Error>(service.state.value)
+            assertEquals(CsCloudStartDto.STAGE_START, result.stage)
         } finally {
             service.dispose()
         }
@@ -277,6 +284,7 @@ class CsCloudConnectionServiceTest {
             val result = service.startCsCloud()
             assertTrue(!result.ok)
             assertEquals("csc not installed", result.message)
+            assertEquals(CsCloudStartDto.STAGE_START, result.stage)
             assertEquals(ConnectionState.Disconnected, service.state.value)
         } finally {
             service.dispose()
@@ -295,10 +303,13 @@ class CsCloudConnectionServiceTest {
         )
         try {
             val result = service.installCsc()
+            // Success triggers a connect attempt, which fails discovery here. Kept ahead of the
+            // Unit-returning asserts — a trailing `assertIs` makes the @Test return a value and
+            // JUnit silently skips it.
+            assertIs<ConnectionState.Error>(service.state.value)
             assertTrue(result.ok)
             assertEquals("started", result.message)
-            // Success triggers a connect attempt, which fails discovery here.
-            assertIs<ConnectionState.Error>(service.state.value)
+            assertEquals(CsCloudStartDto.STAGE_START, result.stage)
         } finally {
             service.dispose()
         }
@@ -322,11 +333,40 @@ class CsCloudConnectionServiceTest {
             val result = service.installCsc()
             assertTrue(!result.ok)
             assertEquals(ConnectionErrorCode.NPM_NOT_FOUND, result.code)
+            assertEquals(CsCloudStartDto.STAGE_INSTALL, result.stage)
             assertFalse(started.get())
             assertEquals(ConnectionState.Disconnected, service.state.value)
         } finally {
             service.dispose()
         }
+    }
+
+    @Test
+    fun `installCsc reports the start stage when only the daemon fails to start`() = runBlocking {
+        val root = Files.createTempDirectory("cs-cloud-install-start-fail")
+        val service = CsCloudConnectionService(
+            scope,
+            CsCloudEndpointResolver(root, emptyMap()),
+            TestLog,
+            installer = { CsCloudStartDto(true, "installed") },
+            starter = { CsCloudStartDto(false, "csc cloud start failed", ConnectionErrorCode.CSC_NOT_INSTALLED) },
+        )
+        try {
+            val result = service.installCsc()
+            assertTrue(!result.ok)
+            assertEquals("csc cloud start failed", result.message)
+            assertEquals(CsCloudStartDto.STAGE_START, result.stage)
+            assertEquals(ConnectionState.Disconnected, service.state.value)
+        } finally {
+            service.dispose()
+        }
+    }
+
+    @Test
+    fun `start payload written before the stage field still decodes`() {
+        val dto = Json.decodeFromString<CsCloudStartDto>("""{"ok":false,"message":"legacy"}""")
+        assertEquals("legacy", dto.message)
+        assertNull(dto.stage)
     }
 
     @Test

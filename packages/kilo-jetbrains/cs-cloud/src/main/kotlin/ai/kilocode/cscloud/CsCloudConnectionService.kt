@@ -113,13 +113,16 @@ class CsCloudConnectionService(
     override suspend fun startCsCloud(): CsCloudStartDto {
         val result = starter()
         if (result.ok) connect()
-        return result
+        // Every result of this call describes the start phase, standalone or via installCsc().
+        return result.copy(stage = CsCloudStartDto.STAGE_START)
     }
 
     /** Install the csc CLI, then start the daemon so the fresh install takes effect. */
     override suspend fun installCsc(): CsCloudStartDto {
         val installed = installer()
-        if (!installed.ok) return installed
+        if (!installed.ok) return installed.copy(stage = CsCloudStartDto.STAGE_INSTALL)
+        // startCsCloud() already tags its results with STAGE_START, so a caller can tell an
+        // install failure from an install success whose daemon failed to come up.
         return startCsCloud()
     }
 

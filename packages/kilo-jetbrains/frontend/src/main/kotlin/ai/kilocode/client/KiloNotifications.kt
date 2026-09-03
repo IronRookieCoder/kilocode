@@ -17,20 +17,35 @@ object KiloNotifications {
     }
 
     fun error(project: Project?, title: String, content: String? = null) {
-        val notification = NotificationGroupManager.getInstance()
-            .getNotificationGroup(GROUP)
-            ?.createNotification(title, content ?: "", NotificationType.ERROR)
-            ?: Notification(GROUP, title, content ?: "", NotificationType.ERROR)
-        notification.notify(project)
+        error(project, title, content, emptyList())
     }
 
     /** Error notification with a single expiring action (e.g. a retry). */
     fun error(project: Project?, title: String, content: String?, actionLabel: String, action: () -> Unit) {
+        error(project, title, content, listOf(actionLabel to action))
+    }
+
+    /** Error notification with two expiring actions, e.g. the primary fix plus a fallback link. */
+    fun error(
+        project: Project?,
+        title: String,
+        content: String?,
+        primaryLabel: String,
+        primaryAction: () -> Unit,
+        secondaryLabel: String,
+        secondaryAction: () -> Unit,
+    ) {
+        error(project, title, content, listOf(primaryLabel to primaryAction, secondaryLabel to secondaryAction))
+    }
+
+    private fun error(project: Project?, title: String, content: String?, actions: List<Pair<String, () -> Unit>>) {
         val notification = NotificationGroupManager.getInstance()
             .getNotificationGroup(GROUP)
             ?.createNotification(title, content ?: "", NotificationType.ERROR)
             ?: Notification(GROUP, title, content ?: "", NotificationType.ERROR)
-        notification.addAction(NotificationAction.createSimpleExpiring(actionLabel) { action() })
+        actions.forEach { (label, action) ->
+            notification.addAction(NotificationAction.createSimpleExpiring(label) { action() })
+        }
         notification.notify(project)
     }
 

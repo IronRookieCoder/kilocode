@@ -4,6 +4,7 @@ package ai.kilocode.client.app
 
 import ai.kilocode.rpc.KiloAppRpcApi
 import ai.kilocode.rpc.dto.ConfigPatchDto
+import ai.kilocode.rpc.dto.CsCloudStartDto
 import ai.kilocode.rpc.dto.DeviceAuthDto
 import ai.kilocode.rpc.dto.HealthDto
 import ai.kilocode.rpc.dto.KiloAppStateDto
@@ -21,6 +22,7 @@ import ai.kilocode.log.KiloLog
 import ai.kilocode.client.KiloNotifications
 import ai.kilocode.client.actions.InstallCscAction
 import ai.kilocode.client.plugin.KiloBundle
+import ai.kilocode.client.session.ui.CSC_INSTALL_DOCS_URL
 import ai.kilocode.client.settings.KiloLogSettingsService
 import ai.kilocode.rpc.ConnectionErrorCode
 import com.intellij.ide.BrowserUtil
@@ -226,14 +228,20 @@ class KiloAppService internal constructor(
                     KiloNotifications.info(KiloBundle.message("csCloud.install.ok"))
                 } else if (result.code == ConnectionErrorCode.NPM_NOT_FOUND) {
                     val project = ProjectManager.getInstance().openProjects.firstOrNull { !it.isDefault }
+                    LOG.warn("installCscAsync: no package manager found - ${result.message}")
                     KiloNotifications.error(
                         project,
                         KiloBundle.message("csCloud.install.failed"),
-                        result.message,
-                        KiloBundle.message("action.Kilo.OpenCscNpm.text"),
-                    ) {
-                        BrowserUtil.browse(InstallCscAction.CSC_NPM_URL)
-                    }
+                        KiloBundle.message("csCloud.install.npmMissing.desc"),
+                        primaryLabel = KiloBundle.message("csCloud.install.npmMissing.docs"),
+                        primaryAction = { BrowserUtil.browse(CSC_INSTALL_DOCS_URL) },
+                        secondaryLabel = KiloBundle.message("action.Kilo.OpenCscNpm.text"),
+                        secondaryAction = { BrowserUtil.browse(InstallCscAction.CSC_NPM_URL) },
+                    )
+                } else if (result.stage == CsCloudStartDto.STAGE_START) {
+                    // Install itself succeeded — only the daemon failed to come up, so the copy
+                    // must not send the user back to reinstalling csc.
+                    KiloNotifications.error(KiloBundle.message("csCloud.install.failed.start"), result.message)
                 } else {
                     KiloNotifications.error(KiloBundle.message("csCloud.install.failed"), result.message)
                 }
