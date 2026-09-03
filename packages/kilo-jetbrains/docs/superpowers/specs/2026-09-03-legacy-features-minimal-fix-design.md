@@ -57,8 +57,9 @@
 
 ## D 组：构建链（只做 D1）
 
-- `KiloProps.kt:23`：`cli.runtime` 默认值 true → **false**。
-- 从默认构建链摘除 `generateOpenApiSpec`（经 compileKotlin 挂载）与 `writeCliChecksums`（挂 processResources）；`StageBundledCliTask`/`StageRepoCliTask` 需显式 `-P` 参数、本就不在默认链，直接删除任务定义。
+- `KiloProps.kt:23`：`cli.runtime` 默认值 true → **false**（同步 `backend/build.gradle.kts:27` 的 `orElse(true)`）。
+- 删除 `writeCliChecksums`/`stageRepoCli`/`stageBundledCli`/`buildRepoCli` 任务注册与 `WriteCliChecksumsTask`/`StageRepoCliTask`/`StageBundledCliTask` 定义及全部条件挂载行——runtime=false 后发行包不再含 CLI 下载/捆绑/校验能力。
+- **勘误（2026-09-03 计划侦察）**：`generateOpenApiSpec`/`normalizeOpenApiSpec`/`openApiGenerate`/`fixGeneratedApi` 链**保留**——`ai.kilocode.jetbrains.api` 客户端（DefaultApi 等）是编译期代码生成且未入库，compileKotlin 依赖之，摘除将导致后端整体编译失败；原方案"从默认构建链摘除 generateOpenApiSpec"不可行，且该任务仅构建期触达 spec 生成、不向发行包输出 CLI 资产，D1 目标由 runtime=false + 删除 staging/checksums 任务完全达成。
 - `cli.version`/`cli.pinned` 等内部标识保持不动（F 组豁免）；D2 记为后续项，不在本轮。
 
 ## E 组：品牌残留
