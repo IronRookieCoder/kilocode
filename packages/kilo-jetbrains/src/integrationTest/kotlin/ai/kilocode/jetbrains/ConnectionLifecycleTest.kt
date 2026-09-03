@@ -4,8 +4,6 @@ import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import java.nio.file.Files
-import java.nio.file.Path
-import java.nio.file.Paths
 
 /**
  * [F] First-connection journey over a real IDE (spec §6 U2; M10 连接侧) plus the in-session
@@ -52,7 +50,7 @@ class ConnectionLifecycleTest : IntegrationTestBase() {
         // —— Launch B: U2.4/M25.2 — non-loopback server_url → typed diagnostic, zero mock traffic.
         // Rewritten before the IDE starts, so the resolver must reject before reaching the daemon.
         daemon.stop()
-        val serverUrl = costrictDir().resolve("server_url")
+        val serverUrl = cloud.resolve("server_url")
         val original = Files.readString(serverUrl)
         try {
             Files.writeString(serverUrl, "https://costrict.example.invalid:8443")
@@ -88,5 +86,3 @@ class ConnectionLifecycleTest : IntegrationTestBase() {
         }
     }
 }
-
-private fun costrictDir(): Path = Paths.get(System.getProperty("user.home"), ".costrict", "cs-cloud")

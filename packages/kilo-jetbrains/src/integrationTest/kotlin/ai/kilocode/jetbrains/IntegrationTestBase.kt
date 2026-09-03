@@ -31,8 +31,6 @@ import org.kodein.di.bindSingleton
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.Paths
-import java.util.concurrent.locks.ReentrantLock
-import kotlin.concurrent.withLock
 
 /**
  * Base for Starter/Driver integration tests that run the built plugin against a real IDE
@@ -41,11 +39,8 @@ import kotlin.concurrent.withLock
  * Per test it:
  *  - starts the mock daemon on a fixed port (high convention value; `M16.3` depends on it),
  *  - generates a throwaway fixture project (README + empty `src/`, no machine-specific paths),
- *  - redirects `~/.costrict/cs-cloud/server_url` at the mock and blanks `config.json`'s
- *    `api_key` (backup + restore in tearDown **and** a JVM shutdown hook as double insurance
- *    against a killed process leaking the mock address),
- *  - holds a JVM-wide lock: `~/.costrict` is machine-shared state, tests must run serially
- *    (`maxParallelForks = 1` in build.gradle.kts is the build-side guard).
+ *  - creates an isolated home for the sandbox IDE and points only that home's
+ *    `.costrict/cs-cloud/server_url` at the mock.
  *
  * "Class = one IDE session, scenario segment = one ordered assertion block" (spec §3.1): keep
  * 1-2 long test methods per class; each [runPluginIde] call costs one IDE launch (~2 min).
@@ -53,9 +48,6 @@ import kotlin.concurrent.withLock
 abstract class IntegrationTestBase {
 
     companion object {
-        /** Guards the machine-wide `~/.costrict` rewrite plus the fixed daemon port. */
-        private val MACHINE_LOCK = ReentrantLock()
-
         /** G1 冷启动基线: connection must reach ready within this window after IDE startup. */
         const val READY_TIMEOUT_MS = 60_000L
 
@@ -69,11 +61,10 @@ abstract class IntegrationTestBase {
     protected lateinit var fixtureProjectDir: Path
         private set
 
-    private var serverUrlBackup: Path? = null
-    private var serverUrlContent: String? = null
-    private var daemonConfigBackup: Path? = null
-    private var daemonConfigContent: String? = null
-    private var restoreHook: Thread? = null
+    protected lateinit var cloud: Path
+        private set
+
+    private lateinit var home: Path
 
     init {
         // Same DI overrides as PluginTest: use the locally cached IDE and turn IDE-process
@@ -116,27 +107,14 @@ abstract class IntegrationTestBase {
 
     @BeforeEach
     fun setUpDaemonAndFixture() {
-        MACHINE_LOCK.withLock {
-            System.setProperty("kilo.integrationTest.mock.requestLog", mockRequestLog.toString())
-            Files.createDirectories(mockRequestLog.parent)
-            Files.writeString(mockRequestLog, "\n==== ${getClass()}: new mock session ====\n")
-            daemon = FakeCsCloudDaemon(FakeCsCloudDaemon.portFromProperty(), foreignRoots = readForeignWorkspaces()).start()
-            fixtureProjectDir = createFixtureProject()
-            redirectDaemonEndpoint()
-        }
-    }
-
-    /**
-     * Workspace roots of every other Costrict client on this machine (`recent_workspaces.json`
-     * written by the real daemon). While server_url is redirected, those clients may reconnect
-     * to the mock; their traffic is not the plugin-under-test's.
-     */
-    private fun readForeignWorkspaces(): Set<String> {
-        val file = Paths.get(System.getProperty("user.home"), ".costrict", "cs-cloud", "recent_workspaces.json")
-        if (!Files.exists(file)) return emptySet()
-        return runCatching {
-            Regex("\"([^\"]+)\"").findAll(Files.readString(file)).map { it.groupValues[1] }.toSet()
-        }.getOrDefault(emptySet())
+        System.setProperty("kilo.integrationTest.mock.requestLog", mockRequestLog.toString())
+        Files.createDirectories(mockRequestLog.parent)
+        Files.writeString(mockRequestLog, "\n==== ${getClass()}: new mock session ====\n")
+        daemon = FakeCsCloudDaemon(FakeCsCloudDaemon.portFromProperty()).start()
+        fixtureProjectDir = createFixtureProject()
+        home = Files.createTempDirectory("costrict-it-home")
+        cloud = home.resolve(".costrict").resolve("cs-cloud")
+        configureDaemonEndpoint()
     }
 
     /** Every request the mock serves during this test, appended in arrival order. */
@@ -147,16 +125,9 @@ abstract class IntegrationTestBase {
 
     @AfterEach
     fun tearDownDaemonAndFixture() {
-        MACHINE_LOCK.withLock {
-            try {
-                restoreDaemonEndpoint()
-            } finally {
-                daemon.stop()
-                restoreHook?.let { Runtime.getRuntime().removeShutdownHook(it) }
-                restoreHook = null
-                fixtureProjectDir.takeIf { Files.exists(it) }?.let { deleteRecursively(it) }
-            }
-        }
+        daemon.stop()
+        fixtureProjectDir.takeIf { Files.exists(it) }?.let { deleteRecursively(it) }
+        home.takeIf { Files.exists(it) }?.let { deleteRecursively(it) }
     }
 
     // ------------------------------------------------------------------
@@ -182,6 +153,7 @@ abstract class IntegrationTestBase {
         // dialog, menus). Force the platform UI to English.
         context.ide.vmOptions.addSystemProperty("user.language", "en")
         context.ide.vmOptions.addSystemProperty("user.country", "US")
+        context.ide.vmOptions.addSystemProperty("user.home", home.toString())
         return context.runIdeWithDriver().useDriverAndCloseIde { driverAssertions() }
     }
 
@@ -337,7 +309,7 @@ abstract class IntegrationTestBase {
     }
 
     // ------------------------------------------------------------------
-    // Machine state: fixture project + daemon endpoint redirect
+    // Isolated state: fixture project + daemon endpoint
     // ------------------------------------------------------------------
 
     private fun createFixtureProject(): Path {
@@ -347,51 +319,11 @@ abstract class IntegrationTestBase {
         return dir
     }
 
-    private fun costrictDir(): Path = userHome().resolve(".costrict").resolve("cs-cloud")
-
-    private fun userHome(): Path = Paths.get(System.getProperty("user.home"))
-
-    /** Point `~/.costrict/cs-cloud/server_url` at the mock; blank the config key if present. */
-    private fun redirectDaemonEndpoint() {
-        val dir = costrictDir()
-        Files.createDirectories(dir)
-        val serverUrl = dir.resolve("server_url")
-        if (Files.exists(serverUrl)) {
-            serverUrlBackup = serverUrl
-            serverUrlContent = Files.readString(serverUrl)
-        }
-        Files.writeString(serverUrl, daemon.baseUrl)
-        val config = dir.resolve("config.json")
-        if (Files.exists(config)) {
-            // Key resolution order is CS_BRIDGE_API_KEY > CS_CLOUD_API_KEY > config.json; a blank
-            // config key keeps the daemon unauthenticated for the mock (M1.1 semantics).
-            daemonConfigBackup = config
-            daemonConfigContent = Files.readString(config)
-            Files.writeString(config, """{"api_key":""}""")
-        }
-        // Double insurance: even a killed test JVM must not leave the mock address behind.
-        val hook = Thread {
-            runCatching {
-                serverUrlBackup?.let { Files.writeString(it, serverUrlContent.orEmpty()) }
-                    ?: Files.deleteIfExists(dir.resolve("server_url"))
-                daemonConfigBackup?.let { Files.writeString(it, daemonConfigContent.orEmpty()) }
-            }
-        }
-        Runtime.getRuntime().addShutdownHook(hook)
-        restoreHook = hook
-    }
-
-    private fun restoreDaemonEndpoint() {
-        restoreHook?.let { Runtime.getRuntime().removeShutdownHook(it) }
-        restoreHook = null
-        val dir = costrictDir()
-        serverUrlBackup?.let { Files.writeString(it, serverUrlContent.orEmpty()) }
-            ?: Files.deleteIfExists(dir.resolve("server_url"))
-        daemonConfigBackup?.let { Files.writeString(it, daemonConfigContent.orEmpty()) }
-        serverUrlBackup = null
-        serverUrlContent = null
-        daemonConfigBackup = null
-        daemonConfigContent = null
+    /** Point only the sandbox IDE's home at the mock daemon. */
+    private fun configureDaemonEndpoint() {
+        Files.createDirectories(cloud)
+        Files.writeString(cloud.resolve("server_url"), daemon.baseUrl)
+        Files.writeString(cloud.resolve("config.json"), """{"api_key":""}""")
     }
 
     private fun deleteRecursively(root: Path) {

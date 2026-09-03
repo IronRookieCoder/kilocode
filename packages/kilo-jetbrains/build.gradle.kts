@@ -255,8 +255,8 @@ val integrationTest by intellijPlatformTesting.testIdeUi.registering {
         useJUnitPlatform()
         // Not a Provider: Test.systemProperty does not unpack providers, it would stringify them.
         systemProperty("kilo.integrationTest.ideHome", integrationTestIdeHome.getOrElse(""))
-        // Tests redirect the machine-wide `~/.costrict/cs-cloud/server_url` at the in-process mock
-        // daemon and restore it afterwards; parallel forks would race on that shared state.
+        // Tests share one fixed mock daemon port, so keep their forks serial even though each
+        // sandbox IDE now receives an isolated user.home.
         maxParallelForks = 1
     }
 }
