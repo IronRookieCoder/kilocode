@@ -49,7 +49,7 @@ import kotlinx.coroutines.launch
 class KiloAppService internal constructor(
     private val cs: CoroutineScope,
     private val rpc: KiloAppRpcApi?,
-    private val csCloudTasks: CsCloudTaskRunner = BackgroundableCsCloudTask(cs),
+    private val csCloudTasks: CsCloudTaskRunner = BackgroundableCsCloudTask(),
 ) {
     /** Platform constructor — resolves RPC from the service container. */
     constructor(cs: CoroutineScope) : this(cs, null)
@@ -192,7 +192,7 @@ class KiloAppService internal constructor(
             return
         }
         LOG.info("startCsCloudAsync: launching csc cloud start")
-        csCloudTasks.queue(KiloBundle.message("csCloud.progress.start")) {
+        runCsCloudTask(KiloBundle.message("csCloud.progress.start"), release = { csCloudStarting.set(false) }) {
             try {
                 val result = call { startCsCloud() }
                 if (result.ok) {
@@ -216,10 +216,22 @@ class KiloAppService internal constructor(
             } catch (e: Exception) {
                 LOG.warn("startCsCloudAsync failed", e)
                 KiloNotifications.error(KiloBundle.message("csCloud.start.failed"), e.message)
-            } finally {
-                csCloudStarting.set(false)
             }
         }
+    }
+
+    /**
+     * Runs the cs-cloud work in the app scope, ties the lock release to the job, and shows the
+     * job as a cancellable background task titled [title].
+     *
+     * The release must be tied to the job rather than to a `finally` inside [work]: a cancel that
+     * lands before the coroutine is first dispatched skips its body entirely, and a `finally`
+     * there would never run — leaking the lock until the IDE restarts.
+     */
+    private fun runCsCloudTask(title: String, release: () -> Unit, work: suspend () -> Unit) {
+        val job = cs.launch { work() }
+        job.invokeOnCompletion { release() }
+        csCloudTasks.queue(title, job)
     }
 
     private val csCloudInstalling = AtomicBoolean(false)
@@ -231,7 +243,7 @@ class KiloAppService internal constructor(
             return
         }
         LOG.info("installCscAsync: launching csc install")
-        csCloudTasks.queue(KiloBundle.message("csCloud.progress.install")) {
+        runCsCloudTask(KiloBundle.message("csCloud.progress.install"), release = { csCloudInstalling.set(false) }) {
             try {
                 val result = call { installCsc() }
                 if (result.ok) {
@@ -261,8 +273,6 @@ class KiloAppService internal constructor(
             } catch (e: Exception) {
                 LOG.warn("installCscAsync failed", e)
                 KiloNotifications.error(KiloBundle.message("csCloud.install.failed"), e.message)
-            } finally {
-                csCloudInstalling.set(false)
             }
         }
     }

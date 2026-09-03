@@ -5,7 +5,7 @@ package ai.kilocode.client.app
 import com.intellij.openapi.progress.ProgressIndicator
 import com.intellij.openapi.progress.ProgressManager
 import com.intellij.openapi.progress.Task
-import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
@@ -14,39 +14,35 @@ import kotlinx.coroutines.runBlocking
 private const val CANCEL_POLL_MILLIS = 100L
 
 /**
- * Queues the cs-cloud install/start work as a cancellable background progress task.
+ * Queues an already-running [Job] as a cancellable background progress task.
  *
- * Injectable so tests can run the work directly instead of through the platform's
- * progress machinery (see [BackgroundableCsCloudTask] for the production runner).
+ * The caller creates the job (and owns its completion), so the runner only owns the UI and the
+ * Cancel button. Injectable so tests can run without the platform's progress machinery.
  */
 internal fun interface CsCloudTaskRunner {
-    /** Queues [work] under a progress task titled [title] and returns immediately. */
-    fun queue(title: String, work: suspend () -> Unit)
+    /** Shows [job] under a progress task titled [title] and returns immediately. */
+    fun queue(title: String, job: Job)
 }
 
-/** Production runner: the work shows up as a cancellable [Task.Backgroundable] in the IDE. */
-internal class BackgroundableCsCloudTask(private val cs: CoroutineScope) : CsCloudTaskRunner {
-    override fun queue(title: String, work: suspend () -> Unit) {
+/** Production runner: the job's work shows up as a cancellable [Task.Backgroundable] in the IDE. */
+internal class BackgroundableCsCloudTask : CsCloudTaskRunner {
+    override fun queue(title: String, job: Job) {
         ProgressManager.getInstance().run(object : Task.Backgroundable(null, title, true) {
             override fun run(indicator: ProgressIndicator) {
-                runCancellable(cs, { indicator.isCanceled }, work)
+                cancelWhenRequested(job, { indicator.isCanceled })
             }
         })
     }
 }
 
 /**
- * Runs [work] in [cs] and cancels it once [isCancelled] turns true, blocking the caller until
- * the work has fully unwound.
+ * Cancels [job] once [isCancelled] turns true, blocking the caller until the job has settled.
  *
- * Blocking until unwind matters: the work's `finally` releases the `csCloudInstalling`/
- * `csCloudStarting` locks, so the progress task must not be reported finished before that.
- *
- * The work keeps the app scope's dispatcher — the bridge only owns cancellation, it does not
- * move the work onto the (pooled) calling thread.
+ * Blocking until settle means the task never reports finished before the job's completion
+ * handlers (the install/start lock release) have run. Polling the indicator is enough: the
+ * platform offers no callback for "Cancel was pressed" on the task thread.
  */
-internal fun runCancellable(cs: CoroutineScope, isCancelled: () -> Boolean, work: suspend () -> Unit) {
-    val job = cs.launch { work() }
+internal fun cancelWhenRequested(job: Job, isCancelled: () -> Boolean) {
     runBlocking {
         val watch = launch {
             while (job.isActive) {
