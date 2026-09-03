@@ -96,7 +96,7 @@ class ConnectionPanelTest : SessionControllerTestBase() {
         assertTrue(panel.detailsVisible())
     }
 
-    fun `test recovery menu offers cs-cloud actions only for cs-cloud failures`() {
+    fun `test recovery menu maps each failure code to its fix`() {
         edt {
             panel.onEvent(SessionControllerEvent.ConnectionChanged.ShowError("CLI startup failed", null))
         }
@@ -111,10 +111,7 @@ class ConnectionPanelTest : SessionControllerTestBase() {
             ))
         }
 
-        assertEquals(
-            listOf("Kilo.Restart", "Kilo.Reinstall", "Kilo.StartCsCloud", "Kilo.InstallCsc"),
-            panel.recoveryActionIds(),
-        )
+        assertEquals(listOf("Kilo.InstallCsc"), panel.recoveryActionIds())
 
         edt {
             panel.onEvent(SessionControllerEvent.ConnectionChanged.ShowError(
@@ -124,23 +121,37 @@ class ConnectionPanelTest : SessionControllerTestBase() {
             ))
         }
 
-        assertEquals(
-            listOf("Kilo.Restart", "Kilo.Reinstall", "Kilo.StartCsCloud"),
-            panel.recoveryActionIds(),
-        )
+        assertEquals(listOf("Kilo.StartCsCloud"), panel.recoveryActionIds())
 
         edt {
             panel.onEvent(SessionControllerEvent.ConnectionChanged.ShowError(
                 "Connection failed",
-                "cs-cloud API key is invalid",
+                "cs-cloud rejected the current credentials",
                 code = ConnectionErrorCode.UNAUTHORIZED,
             ))
         }
 
-        assertEquals(
-            listOf("Kilo.Restart", "Kilo.Reinstall", "Kilo.StartCsCloud"),
-            panel.recoveryActionIds(),
-        )
+        assertEquals(listOf("Kilo.SignInCsCloud"), panel.recoveryActionIds())
+
+        edt {
+            panel.onEvent(SessionControllerEvent.ConnectionChanged.ShowError(
+                "Connection failed",
+                "could not run npm: not found",
+                code = ConnectionErrorCode.NPM_NOT_FOUND,
+            ))
+        }
+
+        assertEquals(listOf("Kilo.InstallCsc"), panel.recoveryActionIds())
+
+        edt {
+            panel.onEvent(SessionControllerEvent.ConnectionChanged.ShowError(
+                "Workspace failed",
+                "workspace did not start",
+                code = "workspace",
+            ))
+        }
+
+        assertEquals(listOf("Kilo.Restart", "Kilo.Reinstall"), panel.recoveryActionIds())
     }
 
     fun `test workspace error shows retry without details`() {
@@ -250,6 +261,169 @@ class ConnectionPanelTest : SessionControllerTestBase() {
         assertFalse(panel.isOpaque)
         assertEquals(SessionEditorStyle.current().editorScheme.defaultBackground.rgb, panel.background.rgb)
         assertFalse(panel.hasSeparator())
+    }
+
+    fun `test guide card offers install csc for a missing csc`() {
+        val clicked = mutableListOf<String>()
+        val browsed = mutableListOf<String>()
+        val guide = ConnectionPanel(parent, controller, browse = { browsed.add(it) }, runGuideAction = { clicked.add(it) })
+
+        edt {
+            guide.onEvent(SessionControllerEvent.ConnectionChanged.ShowError(
+                KiloBundle.message("csCloud.error.csc_not_installed.title"),
+                "csc is not installed",
+                code = ConnectionErrorCode.CSC_NOT_INSTALLED,
+            ))
+        }
+
+        assertTrue(guide.isVisible)
+        assertTrue(guide.guideVisible())
+        // The banner summary already shows csCloud.error.<code>.title, so the card must not repeat it.
+        assertEquals("", guide.guideTitleText())
+        assertEquals(KiloBundle.message("csCloud.guide.installCsc"), guide.guideActionText())
+        assertEquals(KiloBundle.message("csCloud.guide.docs"), guide.guideDocsText())
+        assertTrue(guide.guideDocsVisible())
+
+        edt { guide.clickGuideAction() }
+        edt { guide.clickGuideDocs() }
+
+        assertEquals(listOf("Kilo.InstallCsc"), clicked)
+        assertEquals(listOf(CSC_INSTALL_DOCS_URL), browsed)
+    }
+
+    fun `test guide card offers start cs-cloud for a stopped daemon`() {
+        val clicked = mutableListOf<String>()
+        val guide = ConnectionPanel(parent, controller, runGuideAction = { clicked.add(it) })
+
+        edt {
+            guide.onEvent(SessionControllerEvent.ConnectionChanged.ShowError(
+                KiloBundle.message("csCloud.error.daemon_down.title"),
+                "connection refused",
+                code = ConnectionErrorCode.DAEMON_DOWN,
+            ))
+        }
+
+        assertTrue(guide.guideVisible())
+        assertEquals(KiloBundle.message("csCloud.guide.startCsCloud"), guide.guideActionText())
+        assertFalse(guide.guideDocsVisible())
+
+        edt { guide.clickGuideAction() }
+
+        assertEquals(listOf("Kilo.StartCsCloud"), clicked)
+    }
+
+    fun `test guide card offers sign in for unauthorized`() {
+        val clicked = mutableListOf<String>()
+        val guide = ConnectionPanel(parent, controller, runGuideAction = { clicked.add(it) })
+
+        edt {
+            guide.onEvent(SessionControllerEvent.ConnectionChanged.ShowError(
+                KiloBundle.message("csCloud.error.unauthorized.title"),
+                "cs-cloud rejected the current credentials",
+                code = ConnectionErrorCode.UNAUTHORIZED,
+            ))
+        }
+
+        assertTrue(guide.guideVisible())
+        assertEquals(KiloBundle.message("csCloud.guide.signIn"), guide.guideActionText())
+        assertFalse(guide.guideDocsVisible())
+
+        edt { guide.clickGuideAction() }
+
+        assertEquals(listOf("Kilo.SignInCsCloud"), clicked)
+    }
+
+    fun `test guide card stays hidden without a guide eligible code`() {
+        val banner = ConnectionPanel(parent, controller)
+
+        edt { banner.onEvent(SessionControllerEvent.ConnectionChanged.ShowError("Connection failed", null)) }
+        assertFalse(banner.guideVisible())
+
+        edt {
+            banner.onEvent(SessionControllerEvent.ConnectionChanged.ShowError(
+                "Connection failed",
+                "could not run npm: not found",
+                code = ConnectionErrorCode.NPM_NOT_FOUND,
+            ))
+        }
+        assertFalse(banner.guideVisible())
+
+        edt {
+            banner.onEvent(SessionControllerEvent.ConnectionChanged.ShowError(
+                "Workspace failed",
+                "workspace did not start",
+                code = "workspace",
+            ))
+        }
+        assertFalse(banner.guideVisible())
+    }
+
+    fun `test guide card resets when connecting or hiding`() {
+        val banner = ConnectionPanel(parent, controller)
+
+        edt {
+            banner.onEvent(SessionControllerEvent.ConnectionChanged.ShowError(
+                KiloBundle.message("csCloud.error.daemon_down.title"),
+                null,
+                code = ConnectionErrorCode.DAEMON_DOWN,
+            ))
+        }
+        assertTrue(banner.guideVisible())
+
+        edt { banner.onEvent(SessionControllerEvent.ConnectionChanged.ShowConnecting) }
+
+        assertFalse(banner.guideVisible())
+
+        edt {
+            banner.onEvent(SessionControllerEvent.ConnectionChanged.ShowError(
+                KiloBundle.message("csCloud.error.daemon_down.title"),
+                null,
+                code = ConnectionErrorCode.DAEMON_DOWN,
+            ))
+            banner.onEvent(SessionControllerEvent.ConnectionChanged.Hide)
+        }
+
+        assertFalse(banner.isVisible)
+        assertFalse(banner.guideVisible())
+    }
+
+    fun `test guide card contributes its height to the banner`() {
+        val banner = ConnectionPanel(parent, controller)
+        edt {
+            banner.onEvent(SessionControllerEvent.ConnectionChanged.ShowError("Connection failed", null))
+            banner.size = Dimension(480, 1000)
+        }
+        val plain = banner.preferredSize.height
+
+        edt {
+            banner.onEvent(SessionControllerEvent.ConnectionChanged.ShowError(
+                KiloBundle.message("csCloud.error.daemon_down.title"),
+                null,
+                code = ConnectionErrorCode.DAEMON_DOWN,
+            ))
+        }
+
+        assertFalse(banner.detailsVisible())
+        assertTrue(banner.guideVisible())
+        assertTrue(banner.preferredSize.height > plain)
+    }
+
+    fun `test guide card is laid out after the banner relayouts`() {
+        val banner = ConnectionPanel(parent, controller)
+        edt {
+            banner.onEvent(SessionControllerEvent.ConnectionChanged.ShowError(
+                KiloBundle.message("csCloud.error.daemon_down.title"),
+                null,
+                code = ConnectionErrorCode.DAEMON_DOWN,
+            ))
+            banner.size = Dimension(480, 600)
+            banner.doLayout()
+        }
+
+        // The card reached the bottom (SOUTH) region of the banner with real bounds.
+        assertTrue(banner.guideVisible())
+        assertTrue(banner.guideBounds().height > 0)
+        assertEquals(480, banner.guideBounds().width)
     }
 
     private fun lines(count: Int) = (1..count).joinToString("\n") { "line $it" }

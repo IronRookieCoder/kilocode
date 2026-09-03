@@ -10,6 +10,7 @@ import ai.kilocode.client.session.ui.style.SessionEditorStyleTarget
 import ai.kilocode.client.session.ui.style.SessionUiStyle
 import ai.kilocode.client.ui.UiStyle
 import ai.kilocode.rpc.ConnectionErrorCode
+import com.intellij.ide.BrowserUtil
 import com.intellij.ide.DataManager
 import com.intellij.icons.AllIcons
 import com.intellij.openapi.actionSystem.ActionGroup
@@ -39,6 +40,8 @@ import javax.swing.ScrollPaneConstants
 class ConnectionPanel(
     parent: Disposable,
     private val controller: SessionController,
+    private val browse: (String) -> Unit = BrowserUtil::browse,
+    private val runGuideAction: (String) -> Unit = ::runRegisteredAction,
 ) : BorderLayoutPanel(), SessionControllerListener, Disposable, SessionEditorStyleTarget {
 
     companion object {
@@ -106,6 +109,12 @@ class ConnectionPanel(
         isVisible = false
     }
 
+    // The banner summary already shows csCloud.error.<code>.title, so the card adds only the fix.
+    private val guide = CsCloudGuideCard(browse = browse, runAction = runGuideAction, showTitle = false).apply {
+        isOpaque = false
+        border = JBUI.Borders.empty(UiStyle.Gap.sm(), UiStyle.Gap.lg(), UiStyle.Gap.sm(), 0)
+    }
+
     private var detail: String? = null
     private var expanded = false
     private var code: String? = null
@@ -119,6 +128,7 @@ class ConnectionPanel(
         header.add(left, BorderLayout.CENTER)
         header.add(retry, BorderLayout.EAST)
         add(header, BorderLayout.NORTH)
+        add(guide, BorderLayout.SOUTH)
         controller.addListener(this, this)
         hidePanel()
     }
@@ -153,6 +163,7 @@ class ConnectionPanel(
         code = null
         toggle.isVisible = false
         retry.isVisible = false
+        guide.sync(null)
         renderDetails()
         showPanel()
     }
@@ -170,6 +181,7 @@ class ConnectionPanel(
         code = null
         toggle.isVisible = false
         retry.isVisible = false
+        guide.sync(null)
         renderDetails()
         showPanel()
     }
@@ -182,7 +194,11 @@ class ConnectionPanel(
         this.code = code
         expanded = code == ConnectionErrorCode.CSC_NOT_INSTALLED
         toggle.isVisible = this.detail != null
+        guide.sync(code)
         renderDetails()
+        // A visibility flip (e.g. Connecting -> Error while details stay collapsed) needs its
+        // own layout pass — nothing else here necessarily adds or removes a component.
+        refresh()
     }
 
     private fun showWarning(text: String, detail: String?) {
@@ -193,7 +209,9 @@ class ConnectionPanel(
         code = null
         expanded = false
         toggle.isVisible = this.detail != null
+        guide.sync(null)
         renderDetails()
+        refresh()
     }
 
     private fun renderDetails() {
@@ -227,6 +245,8 @@ class ConnectionPanel(
     }
 
     private fun hidePanel() {
+        // Reset the guidance so a later error never shows a stale fix.
+        guide.sync(null)
         if (isVisible) {
             isVisible = false
             refresh()
@@ -268,15 +288,10 @@ class ConnectionPanel(
     }
 
     /** Recovery actions offered for the current failure, newest first. */
-    internal fun recoveryActionIds(): List<String> = buildList {
-        add("Kilo.Restart")
-        add("Kilo.Reinstall")
-        if (code == ConnectionErrorCode.CSC_NOT_INSTALLED || code == ConnectionErrorCode.DAEMON_DOWN || code == ConnectionErrorCode.UNAUTHORIZED) {
-            add("Kilo.StartCsCloud")
-        }
-        if (code == ConnectionErrorCode.CSC_NOT_INSTALLED) {
-            add("Kilo.InstallCsc")
-        }
+    internal fun recoveryActionIds(): List<String> {
+        CsCloudGuideCard.fixActionId(code)?.let { return listOf(it) }
+        // Legacy Core fallback chain and codes without a dedicated fix.
+        return listOf("Kilo.Restart", "Kilo.Reinstall")
     }
 
     override fun dispose() {
@@ -310,10 +325,13 @@ class ConnectionPanel(
 
     override fun getPreferredSize(): Dimension {
         val size = super.getPreferredSize()
-        if (!scroll.isVisible) return size
+        if (!scroll.isVisible && !guide.isVisible) return size
         // header/scroll heights are already scaled px; assign with plain Dimension so IDE
         // zoom does not scale them a second time via the user scale factor.
-        return Dimension(size.width, header.preferredSize.height + scrollHeight())
+        var height = header.preferredSize.height
+        if (scroll.isVisible) height += scrollHeight()
+        if (guide.isVisible) height += guide.preferredSize.height
+        return Dimension(size.width, height)
     }
 
     private fun scrollHeight(): Int {
@@ -363,4 +381,20 @@ class ConnectionPanel(
     internal fun retryFocusable() = retry.isFocusable
 
     internal fun hasSeparator() = border != null
+
+    internal fun guideVisible() = guide.isVisible
+
+    internal fun guideBounds() = guide.bounds
+
+    internal fun guideTitleText() = guide.guideTitle()
+
+    internal fun guideActionText() = guide.guideActionLabel()
+
+    internal fun guideDocsVisible() = guide.guideDocsVisible()
+
+    internal fun guideDocsText() = guide.guideDocsLabel()
+
+    internal fun clickGuideAction() = guide.clickGuideAction()
+
+    internal fun clickGuideDocs() = guide.clickGuideDocs()
 }

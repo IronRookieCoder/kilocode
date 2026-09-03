@@ -116,6 +116,30 @@ class KiloRecoveryActionsTest : BasePlatformTestCase() {
         assertEquals(KiloBundle.message("action.Kilo.StartCsCloud.text"), event.presentation.text)
     }
 
+    fun `test sign in cs-cloud action shows sign-in text in connection retry popup`() {
+        val action = SignInCsCloudAction()
+        val event = event(action, place = KiloActionPlaces.connectionRetryPopup())
+
+        update(action, event)
+
+        assertTrue("Sign in action should stay enabled", event.presentation.isEnabled)
+        assertEquals(KiloBundle.message("action.Kilo.SignInCsCloud.text"), event.presentation.text)
+    }
+
+    fun `test sign in action is registered before any group references it`() {
+        val xml = requireNotNull(javaClass.classLoader.getResourceAsStream("kilo.jetbrains.frontend.xml"))
+            .bufferedReader()
+            .use { it.readText() }
+
+        val declaration = xml.indexOf("<action id=\"Kilo.SignInCsCloud\"")
+        assertTrue("Kilo.SignInCsCloud must be declared in the plugin xml", declaration >= 0)
+        assertTrue(xml.contains("class=\"ai.kilocode.client.actions.SignInCsCloudAction\""))
+        // The platform registers actions in document order, so the declaration has to
+        // precede the first <group> that could reference it.
+        val firstGroup = xml.indexOf("<group ")
+        assertTrue("Kilo.SignInCsCloud must be declared before the first <group>", declaration < firstGroup)
+    }
+
     fun `test core group has visible menu text and info action`() {
         val xml = requireNotNull(javaClass.classLoader.getResourceAsStream("kilo.jetbrains.frontend.xml"))
             .bufferedReader()

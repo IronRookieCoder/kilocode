@@ -3,11 +3,11 @@ package ai.kilocode.cscloud
 import ai.kilocode.log.KiloLog
 import ai.kilocode.rpc.ConnectionErrorCode
 import ai.kilocode.rpc.dto.CsCloudStartDto
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.IOException
-import java.util.concurrent.TimeUnit
 
 /**
  * Installs the `csc` CLI with the package manager found on the IDE PATH
@@ -43,7 +43,7 @@ class CscInstaller(
             return@withContext CsCloudStartDto(false, "could not run ${tool.name}: ${error.message}", ConnectionErrorCode.NPM_NOT_FOUND)
         }
         try {
-            if (!proc.waitFor(timeoutSeconds, TimeUnit.SECONDS)) {
+            if (!proc.awaitExitOrTimeout(timeoutSeconds)) {
                 proc.destroyForcibly()
                 return@withContext CsCloudStartDto(false, "csc install did not finish within ${timeoutSeconds}s")
             }
@@ -54,6 +54,12 @@ class CscInstaller(
                 log.warn("csc install failed: $out")
                 CsCloudStartDto(false, out.takeIf { it.isNotBlank() } ?: "csc install failed (exit ${proc.exitValue()})")
             }
+        } catch (error: CancellationException) {
+            // The user cancelled the background task, which cancelled this coroutine through the
+            // backend RPC: stop the package manager so no half-finished npm run is left behind.
+            proc.terminate()
+            log.info("csc install cancelled - stopped the ${tool.name} process")
+            throw error
         } catch (error: Throwable) {
             log.warn("csc install failed", error)
             CsCloudStartDto(false, error.message ?: "csc install failed")

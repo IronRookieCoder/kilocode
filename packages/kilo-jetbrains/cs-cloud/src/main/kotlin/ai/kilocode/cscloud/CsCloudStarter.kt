@@ -3,11 +3,11 @@ package ai.kilocode.cscloud
 import ai.kilocode.log.KiloLog
 import ai.kilocode.rpc.ConnectionErrorCode
 import ai.kilocode.rpc.dto.CsCloudStartDto
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.IOException
-import java.util.concurrent.TimeUnit
 
 /** Starts the local cs-cloud daemon. */
 interface CsCloudStarter {
@@ -45,7 +45,7 @@ class CscCloudStarter(
             return@withContext CsCloudStartDto(false, "csc could not be started - reinstall it with `npm install -g @costrict/csc`, then try Start cs-cloud again", ConnectionErrorCode.CSC_NOT_INSTALLED)
         }
         try {
-            if (!proc.waitFor(timeoutSeconds, TimeUnit.SECONDS)) {
+            if (!proc.awaitExitOrTimeout(timeoutSeconds)) {
                 proc.destroyForcibly()
                 return@withContext CsCloudStartDto(false, "csc cloud start did not finish within ${timeoutSeconds}s")
             }
@@ -56,6 +56,12 @@ class CscCloudStarter(
                 log.warn("csc cloud start failed: $out")
                 CsCloudStartDto(false, out.takeIf { it.isNotBlank() } ?: "csc cloud start failed (exit ${proc.exitValue()})")
             }
+        } catch (error: CancellationException) {
+            // The user cancelled the background task, which cancelled this coroutine through the
+            // backend RPC: stop the daemon start so no stray csc process is left behind.
+            proc.terminate()
+            log.info("csc cloud start cancelled - stopped the csc process")
+            throw error
         } catch (error: Throwable) {
             log.warn("csc cloud start failed", error)
             CsCloudStartDto(false, error.message ?: "csc cloud start failed")

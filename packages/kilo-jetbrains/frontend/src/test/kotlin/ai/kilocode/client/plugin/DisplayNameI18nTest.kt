@@ -1,5 +1,6 @@
 package ai.kilocode.client.plugin
 
+import ai.kilocode.rpc.ConnectionErrorCode
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
@@ -95,6 +96,71 @@ class DisplayNameI18nTest {
             val value = zh[key] ?: throw AssertionError("zh_CN bundle misses $key")
             assertTrue(value.isNotBlank(), "zh_CN value for $key must not be blank")
             assertTrue(!value.contains("Kilo"), "zh_CN value for $key must not mention Kilo: $value")
+        }
+    }
+
+    @Test
+    fun `cs-cloud connection error copy is localized in en zh_CN and zh_TW`() {
+        val en = bundle("KiloBundle.properties")
+        val localized = listOf(
+            "zh_CN" to bundle("KiloBundle_zh_CN.properties"),
+            "zh_TW" to bundle("KiloBundle_zh_TW.properties"),
+        )
+        for (code in listOf(
+            ConnectionErrorCode.CSC_NOT_INSTALLED,
+            ConnectionErrorCode.DAEMON_DOWN,
+            ConnectionErrorCode.UNAUTHORIZED,
+            ConnectionErrorCode.NPM_NOT_FOUND,
+        )) {
+            for (suffix in listOf("title", "desc")) {
+                val key = "csCloud.error.$code.$suffix"
+                val baseline = en[key] ?: throw AssertionError("default bundle misses $key")
+                assertTrue(baseline.isNotBlank(), "default value for $key must not be blank")
+                for ((locale, values) in localized) {
+                    val value = values[key] ?: throw AssertionError("$locale bundle misses $key")
+                    assertTrue(value.isNotBlank(), "$locale value for $key must not be blank")
+                    assertTrue(value != baseline, "$locale must translate $key, still the English copy: $value")
+                }
+            }
+        }
+    }
+
+    @Test
+    fun `zh bundles translate the cs-cloud install failure and npm fallback copy`() {
+        val en = bundle("KiloBundle.properties")
+        for ((locale, values) in listOf(
+            "zh_CN" to bundle("KiloBundle_zh_CN.properties"),
+            "zh_TW" to bundle("KiloBundle_zh_TW.properties"),
+        )) {
+            for (key in listOf(
+                "csCloud.install.failed.start",
+                "csCloud.install.npmMissing.desc",
+                "csCloud.install.npmMissing.docs",
+            )) {
+                val value = values[key] ?: throw AssertionError("$locale bundle misses $key")
+                assertTrue(value.isNotBlank(), "$locale value for $key must not be blank")
+                assertTrue(value != en[key], "$locale must translate $key, still the English copy: $value")
+            }
+        }
+    }
+
+    @Test
+    fun `zh bundles translate the cs-cloud login card`() {
+        val en = bundle("KiloBundle.properties")
+        for ((locale, values) in listOf(
+            "zh_CN" to bundle("KiloBundle_zh_CN.properties"),
+            "zh_TW" to bundle("KiloBundle_zh_TW.properties"),
+        )) {
+            for (key in listOf(
+                "session.login.required.csCloud.title",
+                "session.login.required.csCloud.description",
+                "session.login.required.csCloud.button",
+            )) {
+                val value = values[key] ?: throw AssertionError("$locale bundle misses $key")
+                assertTrue(value.isNotBlank(), "$locale value for $key must not be blank")
+                assertTrue(value != en[key], "$locale must translate $key, still the English copy: $value")
+                assertTrue(value.contains("CoStrict"), "$locale value for $key must use the CoStrict brand: $value")
+            }
         }
     }
 }
