@@ -146,7 +146,7 @@ class KiloAppRpcApiImpl : KiloAppRpcApi {
     }
 
     private fun dto(state: KiloAppState): KiloAppStateDto =
-        appStateDto(state)
+        appStateDto(state).copy(providerId = app.providerId)
 }
 
 internal fun appStateDto(state: KiloAppState): KiloAppStateDto =

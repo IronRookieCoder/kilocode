@@ -7,6 +7,8 @@ import ai.kilocode.client.session.controller.SessionControllerTestBase
 import ai.kilocode.client.session.ui.style.SessionEditorStyle
 import ai.kilocode.client.ui.UiStyle
 import ai.kilocode.rpc.ConnectionErrorCode
+import ai.kilocode.rpc.dto.KiloAppStatusDto
+import ai.kilocode.rpc.dto.KiloAppStateDto
 import com.intellij.ui.components.JBScrollPane
 import java.awt.Dimension
 import javax.swing.border.CompoundBorder
@@ -141,6 +143,22 @@ class ConnectionPanelTest : SessionControllerTestBase() {
             listOf("Kilo.Restart", "Kilo.Reinstall", "Kilo.StartCsCloud"),
             panel.recoveryActionIds(),
         )
+    }
+
+    fun `test recovery menu hides reinstall on cs-cloud provider`() {
+        edt {
+            controller.model.app = KiloAppStateDto(
+                KiloAppStatusDto.ERROR,
+                providerId = "cs-cloud",
+            )
+            panel.onEvent(SessionControllerEvent.ConnectionChanged.ShowError(
+                "Connection failed",
+                "cs-cloud server URL was not found",
+                code = ConnectionErrorCode.CSC_NOT_INSTALLED,
+            ))
+        }
+
+        assertEquals(listOf("Kilo.Restart", "Kilo.StartCsCloud", "Kilo.InstallCsc"), panel.recoveryActionIds())
     }
 
     fun `test workspace error shows retry without details`() {

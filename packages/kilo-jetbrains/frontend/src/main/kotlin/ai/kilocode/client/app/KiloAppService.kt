@@ -176,7 +176,14 @@ class KiloAppService internal constructor(
     /** Fire-and-forget reinstall from non-suspend context (e.g. action handlers). */
     fun reinstallAsync() {
         LOG.info("reinstallAsync: launching reinstall")
-        cs.launch { reinstall() }
+        cs.launch {
+            try {
+                reinstall()
+            } catch (e: Exception) {
+                LOG.warn("reinstallAsync failed", e)
+                KiloNotifications.error(KiloBundle.message("action.Kilo.Reinstall.failed", e.message ?: ""))
+            }
+        }
     }
 
     private val csCloudStarting = AtomicBoolean(false)
