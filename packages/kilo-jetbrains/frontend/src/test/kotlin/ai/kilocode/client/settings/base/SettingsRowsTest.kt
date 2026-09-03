@@ -106,7 +106,7 @@ class SettingsRowsTest : BasePlatformTestCase() {
 
         top.showNotLoggedIn {}
 
-        assertTrue(text(top).contains("Sign in to Costrict"))
+        assertTrue(text(top).contains("Sign in to CoStrict"))
         assertTrue(top.isVisible)
     }
 
@@ -116,8 +116,8 @@ class SettingsRowsTest : BasePlatformTestCase() {
         panel.top.showNotLoggedIn {}
         panel.showProgress("Loading models...")
 
-        assertTrue(text(panel.content).contains("Sign in to Costrict"))
-        assertFalse(text(panel.overlay).contains("Sign in to Costrict"))
+        assertTrue(text(panel.content).contains("Sign in to CoStrict"))
+        assertFalse(text(panel.overlay).contains("Sign in to CoStrict"))
         assertTrue(panel.overlay.components.any { it === panel.progress })
         assertTrue(text(panel.progress).contains("Loading models..."))
         val scroll = components(panel.content).filterIsInstance<JScrollPane>().single()

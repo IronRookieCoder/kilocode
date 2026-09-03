@@ -307,21 +307,21 @@ class ModelsSettingsUiTest : BasePlatformTestCase() {
         workspaceRpc.models = ModelsWorkspaceDto(providers = providers())
         edt { ui = ModelsSettingsUi(uiScope, app, workspaces, directory = "/test") }
         val panel = requireUi()
-        flushUntil { text(panel).contains("Old") && text(panel).contains("Sign in to Costrict") }
+        flushUntil { text(panel).contains("Old") && text(panel).contains("Sign in to CoStrict") }
         val banner = edt { components(panel.top).filterIsInstance<InlineBanner>().single() }
         rpc.configUpdateGate = CompletableDeferred()
 
         edt {
             select(panel, "new")
             panel.applyDraft()
-            assertTrue(text(panel).contains("Sign in to Costrict"))
+            assertTrue(text(panel).contains("Sign in to CoStrict"))
             assertSame(banner, components(panel.top).filterIsInstance<InlineBanner>().single())
         }
 
         rpc.configUpdateGate?.complete(Unit)
         flushUntil { rpc.configPatches.isNotEmpty() }
         edt {
-            assertTrue(text(panel).contains("Sign in to Costrict"))
+            assertTrue(text(panel).contains("Sign in to CoStrict"))
             assertSame(banner, components(panel.top).filterIsInstance<InlineBanner>().single())
         }
     }

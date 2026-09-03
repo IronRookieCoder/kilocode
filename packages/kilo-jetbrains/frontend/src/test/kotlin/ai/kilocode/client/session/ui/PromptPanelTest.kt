@@ -551,9 +551,9 @@ class PromptPanelTest : BasePlatformTestCase() {
             editor.document.insertString(0, "hello")
         }
 
-        invokeComponentAction("Costrict Session Undo", editor)
+        invokeComponentAction("CoStrict Session Undo", editor)
         assertEquals("", editor.document.text)
-        invokeComponentAction("Costrict Session Redo", editor)
+        invokeComponentAction("CoStrict Session Redo", editor)
         assertEquals("hello", editor.document.text)
     }
 
@@ -1524,7 +1524,7 @@ class PromptPanelTest : BasePlatformTestCase() {
 
     private fun invokeCompletionAction(editor: Editor) {
         val action = ActionUtil.getActions(editor.contentComponent).first { item ->
-            item.templatePresentation.text == "Costrict Prompt Completion"
+            item.templatePresentation.text == "CoStrict Prompt Completion"
         }
         val event = event(action, editor)
         ActionUtil.updateAction(action, event)

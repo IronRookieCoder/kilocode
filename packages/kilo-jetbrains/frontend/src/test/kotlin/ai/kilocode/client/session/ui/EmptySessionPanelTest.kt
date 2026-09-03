@@ -154,7 +154,7 @@ class EmptySessionPanelTest : BasePlatformTestCase() {
         val panel = panel()
 
         assertEquals(
-            "Costrict is an AI coding assistant. Ask it to build features, fix bugs, or explain your codebase.",
+            "CoStrict is an AI coding assistant. Ask it to build features, fix bugs, or explain your codebase.",
             panel.explanationText(),
         )
     }

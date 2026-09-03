@@ -35,7 +35,7 @@ class SettingsTreeOrderTest {
     fun `root page is registered under Tools with the Costrict brand`() {
         val root = registrations.first { it.parentId == "tools" }
         assertEquals("ai.kilocode.jetbrains.settings", root.id)
-        assertEquals("Costrict", KiloBundle.message(root.key))
+        assertEquals("CoStrict", KiloBundle.message(root.key))
     }
 
     @Test
