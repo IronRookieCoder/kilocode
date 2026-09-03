@@ -117,7 +117,7 @@ class KiloAppRpcApiImpl : KiloAppRpcApi {
 
     override suspend fun updateConfig(patch: ConfigPatchDto): KiloAppStateDto {
         app.requireReady()
-        return appStateDto(app.updateConfig(patch))
+        return appStateDto(app.updateConfig(patch)).copy(providerId = app.providerId)
     }
 
     override suspend fun applyLogConfig(config: LogConfigDto) {
