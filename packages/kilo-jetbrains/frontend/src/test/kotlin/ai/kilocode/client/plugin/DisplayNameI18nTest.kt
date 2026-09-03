@@ -54,8 +54,8 @@ class DisplayNameI18nTest {
 
     @Test
     fun `root settings page and notification groups carry the Costrict brand`() {
-        assertEquals("Costrict", KiloBundle.message("settings.kilo.displayName"))
-        assertEquals("Costrict", KiloBundle.message("notification.group.kilo"))
+        assertEquals("CoStrict", KiloBundle.message("settings.kilo.displayName"))
+        assertEquals("CoStrict", KiloBundle.message("notification.group.kilo"))
         assertEquals("CoStrict Code Review", KiloBundle.message("notification.group.codereview"))
     }
 

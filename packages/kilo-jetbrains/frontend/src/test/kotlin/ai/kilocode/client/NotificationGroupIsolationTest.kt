@@ -45,7 +45,7 @@ class NotificationGroupIsolationTest {
         val generic = KiloBundle.message("notification.group.kilo")
         val review = KiloBundle.message("notification.group.codereview")
         assertTrue(generic != review, "group display names must differ, both were '$generic'")
-        assertEquals("Costrict", generic)
+        assertEquals("CoStrict", generic)
         assertEquals("CoStrict Code Review", review)
     }
 }
