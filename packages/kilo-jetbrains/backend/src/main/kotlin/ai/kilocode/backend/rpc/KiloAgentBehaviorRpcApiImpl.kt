@@ -407,7 +407,8 @@ class KiloAgentBehaviorRpcApiImpl(private val backend: KiloBackendAppService? = 
 
     private suspend fun patchConfig(path: String, body: String): Unit = withContext(Dispatchers.IO) {
         val http = app.http ?: throw IllegalStateException("Kilo HTTP client is unavailable")
-        val url = "http://127.0.0.1:${app.port}$path"
+        val base = app.base ?: "http://127.0.0.1:${app.port}" // kilocode_change: cs-cloud has no local port
+        val url = "$base$path"
         val request = Request.Builder().url(url).patch(body.toRequestBody(JSON)).build()
         http.newCall(request).execute().use { response ->
             if (!response.isSuccessful) {
@@ -419,7 +420,8 @@ class KiloAgentBehaviorRpcApiImpl(private val backend: KiloBackendAppService? = 
 
     private suspend fun request(directory: String, path: String, body: JsonObject?): String = withContext(Dispatchers.IO) {
         val http = app.http ?: throw IllegalStateException("Kilo HTTP client is unavailable")
-        val url = "http://127.0.0.1:${app.port}$path?directory=${encode(directory)}"
+        val base = app.base ?: "http://127.0.0.1:${app.port}" // kilocode_change: cs-cloud has no local port
+        val url = "$base$path?directory=${encode(directory)}"
         val request = Request.Builder().url(url).let { builder ->
             if (body == null) builder.get() else builder.post(body.toString().toRequestBody(JSON))
         }.build()

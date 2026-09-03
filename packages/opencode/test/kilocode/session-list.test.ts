@@ -73,4 +73,23 @@ describe("Kilo Session.list", () => {
         expect(list.map((item) => item.id)).toContain(session.id)
       }),
   )
+
+  it.instance(
+    "matches legacy forward-slash directory rows on windows-style queries",
+    () =>
+      Effect.gen(function* () {
+        yield* seedProject
+        const ctx = yield* InstanceRef
+        if (!ctx) return yield* Effect.die(new Error("missing test instance"))
+        const sessions = yield* Session.Service
+        const { db } = yield* Database.Service
+        const session = yield* sessions.create({ title: "slash-session" })
+        // Storage keeps directory columns in forward-slash form (DatabasePath.storagePath);
+        // older rows predate that normalization, so queries must match it either way.
+        const stored = ctx.directory.replaceAll("\\", "/")
+        yield* db.update(SessionTable).set({ directory: stored }).where(eq(SessionTable.id, session.id))
+        const list = yield* sessions.list({ directory: ctx.directory })
+        expect(list.map((item) => item.id)).toContain(session.id)
+      }),
+  )
 })

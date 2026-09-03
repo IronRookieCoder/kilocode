@@ -1,6 +1,7 @@
 package ai.kilocode.cscloud
 
 import ai.kilocode.backend.cli.KiloCliDataParser
+import ai.kilocode.jetbrains.api.client.DefaultApi
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.HttpUrl.Companion.toHttpUrl
@@ -43,6 +44,25 @@ class CsCloudRouteTest {
     }
 
     @Test
+    fun `stubs provider auth without hitting the cs cloud daemon`() {
+        val server = MockWebServer()
+        server.start()
+        val client = OkHttpClient.Builder().addInterceptor(CsCloudRoute.interceptor()).build()
+
+        try {
+            val response = client.newCall(
+                Request.Builder().url(server.url("/provider/auth?directory=%2Ftmp%2Fworkspace")).build()
+            ).execute()
+
+            assertEquals(200, response.code)
+            assertEquals(emptyMap(), KiloCliDataParser.parseProviderAuth(response.body!!.string()))
+            assertEquals(0, server.requestCount)
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
     fun `rewrites control plane routes and preserves request details`() {
         val cases = listOf(
             Triple("POST", "/session", "/api/v1/conversations"),
@@ -68,11 +88,61 @@ class CsCloudRouteTest {
             assertEquals(listOf("one", "two"), rewritten.url.queryParameterValues("keep"))
             assertEquals(null, rewritten.url.queryParameter("directory"))
             assertEquals(Path.of("/tmp/workspace").toAbsolutePath().normalize().toString(), rewritten.header("X-Workspace-Directory"))
+            if (path.startsWith("/session") || path.startsWith("/conversations")) {
+                assertEquals("kilo-jetbrains", rewritten.header("X-Session-Client"))
+            }
             if (body != null) {
                 val buffer = Buffer()
                 rewritten.body!!.writeTo(buffer)
                 assertEquals(body, buffer.readUtf8())
             }
+        }
+    }
+
+    @Test
+    fun `normalizes csc conversations for the generated client`() {
+        val server = MockWebServer()
+        server.enqueue(MockResponse().setBody("""[{
+            "id":"ses_1","session_id":"ses_1","directory":"/tmp/workspace",
+            "title":"Work","time":{"created":1,"updated":2},"model":"CoStrict-GLM-5-Local"
+        }]"""))
+        server.start()
+        val client = OkHttpClient.Builder()
+            .addInterceptor(CsCloudRoute.interceptor())
+            .addInterceptor(CsCloudRoute.responseInterceptor())
+            .build()
+
+        try {
+            val api = DefaultApi(server.url("/").toString().trimEnd('/'), client)
+            val item = api.sessionList(directory = "/tmp/workspace").single()
+
+            assertEquals("CoStrict-GLM-5-Local", item.model?.id)
+            assertEquals("", item.model?.providerID)
+            assertEquals("", item.projectID)
+            assertEquals("", item.version)
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun `normalizes csc conversation creation response`() {
+        val server = MockWebServer()
+        server.enqueue(MockResponse().setBody("""{
+            "session_id":"ses_new","cwd":"/tmp/workspace","status":"starting","created_at":123
+        }"""))
+        server.start()
+        val client = OkHttpClient.Builder().addInterceptor(CsCloudRoute.responseInterceptor()).build()
+
+        try {
+            val response = client.newCall(Request.Builder().url(server.url("/api/v1/conversations")).build()).execute()
+            val item = KiloCliDataParser.parseSession(response.body!!.string())
+
+            assertEquals("ses_new", item.id)
+            assertEquals("/tmp/workspace", item.directory)
+            assertEquals(123.0, item.time.created)
+        } finally {
+            server.shutdown()
         }
     }
 

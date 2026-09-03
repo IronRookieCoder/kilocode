@@ -2,6 +2,8 @@ package ai.kilocode.cscloud
 
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonArray
@@ -21,6 +23,8 @@ import java.nio.file.Files
 object CsCloudRoute {
     private const val workspace = "directory"
     private const val workspaceHeader = "X-Workspace-Directory"
+    private const val clientHeader = "X-Session-Client"
+    private const val client = "kilo-jetbrains"
 
     fun rewrite(request: Request, prefix: String = "", roots: List<Path> = emptyList()): Request {
         val full = request.url.encodedPath
@@ -37,6 +41,7 @@ object CsCloudRoute {
             val value = workspacePath?.trim()?.takeIf { it.isNotEmpty() }
                 ?: throw IllegalArgumentException("workspace directory is required for session requests")
             result.header(workspaceHeader, workspace(value, roots).toString())
+            result.header(clientHeader, client)
         } else if (workspacePath != null) {
             result.header(workspaceHeader, workspace(workspacePath, roots).toString())
         }
@@ -48,6 +53,7 @@ object CsCloudRoute {
         val body = when (path) {
             "/kilo/profile" -> return@Interceptor local(chain.request(), 401, "{}")
             "/kilo/notifications", "/config/warnings", "/skill" -> "[]"
+            "/provider/auth" -> "{}"
             else -> null
         }
         if (body != null) return@Interceptor local(chain.request(), 200, body)
@@ -69,6 +75,7 @@ object CsCloudRoute {
                 }.toString()
             }
             response.request.url.encodedPath.endsWith("/api/v1/agents/models") -> models(text)
+            response.request.url.encodedPath.endsWith("/api/v1/conversations") -> conversations(text)
             else -> text
         }
         response.newBuilder().body(data.toResponseBody(body.contentType())).build()
@@ -90,6 +97,41 @@ object CsCloudRoute {
             put("connected", connected)
             put("failed", JsonArray(emptyList()))
         }.toString()
+    }
+
+    private fun conversations(raw: String): String {
+        val root = Json.parseToJsonElement(raw)
+        return when (root) {
+            is JsonArray -> JsonArray(root.map(::conversation)).toString()
+            else -> conversation(root).toString()
+        }
+    }
+
+    private fun conversation(value: JsonElement): JsonElement {
+        val obj = value as? JsonObject ?: return value
+        val id = obj["id"] ?: obj["session_id"]
+        val model = (obj["model"] as? JsonPrimitive)?.takeIf { it.isString }?.contentOrNull
+        return JsonObject(buildMap {
+            putAll(obj)
+            if (id != null) put("id", id)
+            if (obj["directory"] == null && obj["cwd"] != null) put("directory", obj.getValue("cwd"))
+            if (obj["projectID"] == null) put("projectID", JsonPrimitive(""))
+            if (obj["title"] == null) put("title", JsonPrimitive(""))
+            if (obj["version"] == null) put("version", JsonPrimitive(""))
+            if (obj["time"] == null) {
+                val created = obj["created_at"] ?: JsonPrimitive(0)
+                put("time", buildJsonObject {
+                    put("created", created)
+                    put("updated", obj["last_active_at"] ?: created)
+                })
+            }
+            if (model != null) {
+                put("model", buildJsonObject {
+                    put("id", model)
+                    put("providerID", "")
+                })
+            }
+        })
     }
 
     private fun route(path: String): String = when {
