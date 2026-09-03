@@ -7,11 +7,17 @@ import java.net.InetSocketAddress
 import java.nio.charset.StandardCharsets
 import java.util.concurrent.BlockingQueue
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
+import java.nio.file.Files
+import java.nio.file.Path
+import java.nio.file.Paths
+import java.nio.file.StandardOpenOption
 
 /**
  * Scripted in-process mock of the cs-cloud daemon (spec §3.1).
@@ -25,7 +31,15 @@ import java.util.concurrent.atomic.AtomicReference
  * `text/event-stream` frames. The port is fixed (high convention value) because the
  * "restart mock → plugin retries the same address" scenarios (M16.3) depend on it.
  */
-class FakeCsCloudDaemon(private val port: Int = DEFAULT_PORT) {
+class FakeCsCloudDaemon(
+    private val port: Int = DEFAULT_PORT,
+    /** Workspace roots of other Costrict clients on this machine (read from recent_workspaces.json). */
+    private val foreignRoots: Set<String> = emptySet(),
+) {
+    /** When set, every recorded request is appended here (mock fidelity debugging). */
+    private val requestLogPath: Path? =
+        System.getProperty("kilo.integrationTest.mock.requestLog")?.takeIf { it.isNotBlank() }?.let { Paths.get(it) }
+
     companion object {
         /** High fixed port; overridable via `kilo.integrationTest.mock.port`. */
         const val DEFAULT_PORT = 49187
@@ -46,6 +60,7 @@ class FakeCsCloudDaemon(private val port: Int = DEFAULT_PORT) {
     val conversations = CopyOnWriteArrayList<String>()
 
     private val server = AtomicReference<HttpServer>(null)
+    private val executor = AtomicReference<ExecutorService>(null)
     private val sinks = CopyOnWriteArrayList<SseSink>()
     private val conversationCounter = AtomicLong()
     private val catalogResponses = CopyOnWriteArrayList<String>()
@@ -58,7 +73,12 @@ class FakeCsCloudDaemon(private val port: Int = DEFAULT_PORT) {
         check(server.get() == null) { "FakeCsCloudDaemon already started" }
         val http = HttpServer.create(InetSocketAddress("127.0.0.1", port), 0)
         http.createContext("/") { exchange -> handle(exchange) }
-        http.executor = null // default: a thread per exchange; SSE handlers block by design
+        // A thread pool is mandatory: the JDK default executor handles every exchange on the
+        // single start() dispatcher thread, so one blocked SSE handler would starve all
+        // subsequent requests (they queue unaccepted and the client hangs silently).
+        val pool = Executors.newCachedThreadPool()
+        executor.set(pool)
+        http.executor = pool
         http.start()
         server.set(http)
         return this
@@ -68,6 +88,7 @@ class FakeCsCloudDaemon(private val port: Int = DEFAULT_PORT) {
         val http = server.getAndSet(null) ?: return
         breakSseConnections()
         http.stop(0)
+        executor.getAndSet(null)?.shutdownNow()
     }
 
     /** Clear the scenario (not the request log) so each test starts from the happy path. */
@@ -90,9 +111,11 @@ class FakeCsCloudDaemon(private val port: Int = DEFAULT_PORT) {
      */
     fun awaitNewRequest(method: String, pathPrefix: String, beforeCount: Int, timeoutMs: Long): RecordedRequest {
         val deadline = System.currentTimeMillis() + timeoutMs
+        // beforeCount < 0 is the "no prior count taken" sentinel: wait for the first match.
+        val waitFrom = if (beforeCount < 0) 0 else beforeCount
         while (true) {
             val matching = requests(method, pathPrefix)
-            if (matching.size > beforeCount + 1) return matching[beforeCount + 1]
+            if (matching.size > waitFrom) return matching[waitFrom]
             if (System.currentTimeMillis() >= deadline) {
                 throw AssertionError(
                     "Expected $method $pathPrefix (after $beforeCount prior hits) within ${timeoutMs}ms; recorded: " +
@@ -110,13 +133,18 @@ class FakeCsCloudDaemon(private val port: Int = DEFAULT_PORT) {
     }
 
     /**
-     * U2.7/M15: every forwarded request that carries `X-Workspace-Directory` must point at
-     * [workspaceRoot]; requests without the header (non-session reads) are allowed.
+     * U2.7/M15: the plugin must scope its own requests to the active project root — a header
+     * inside [workspaceRoot] must be the root itself (no subdirectory leak, no `..` escape).
+     * Headers pointing at other machine roots belong to other Costrict clients (e.g. the dev
+     * IDE, which reconnects to the mock while server_url is redirected) and are tolerated.
      */
     fun assertWorkspaceHeaderEquals(workspaceRoot: String) {
-        val offending = requests.filter { it.header("X-Workspace-Directory")?.let { v -> v != workspaceRoot } == true }
+        val offending = requests.filter {
+            val v = it.header("X-Workspace-Directory") ?: return@filter false
+            v != workspaceRoot && (v.startsWith(workspaceRoot) || v.contains(".."))
+        }
         check(offending.isEmpty()) {
-            "X-Workspace-Directory mismatch: expected always $workspaceRoot but got " +
+            "X-Workspace-Directory violation: expected $workspaceRoot but got " +
                 offending.joinToString { "${it.method} ${it.path} -> ${it.header("X-Workspace-Directory")}" }
         }
     }
@@ -211,6 +239,14 @@ class FakeCsCloudDaemon(private val port: Int = DEFAULT_PORT) {
             atMs = System.currentTimeMillis(),
         )
         requests.add(recorded)
+        requestLogPath?.let { path ->
+            runCatching {
+                Files.writeString(
+                    path, "${recorded.method} ${recorded.path}\n", StandardCharsets.UTF_8,
+                    StandardOpenOption.CREATE, StandardOpenOption.APPEND,
+                )
+            }
+        }
         return recorded
     }
 

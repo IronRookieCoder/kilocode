@@ -41,7 +41,6 @@ class CloudHubPanelTest : IntegrationTestBase() {
 
         runPluginIde("costrictCloudHub") {
             awaitColdStartReady()
-            openCostrictToolWindow()
 
             // —— Gate (U6.1): open Settings → Tools → Costrict → Agent Behavior → Cloud Hub ——
             ideFrameUi { it.openSettingsDialog() }
@@ -88,7 +87,6 @@ class CloudHubPanelTest : IntegrationTestBase() {
     fun `favorites facade failures degrade visibly`() {
         runPluginIde("costrictCloudHubFailures") {
             awaitColdStartReady()
-            openCostrictToolWindow()
 
             // —— Segment U6.8/B12: load answers 404 — the page must surface an error, not die.
             daemon.scenario.favorites.addAll(

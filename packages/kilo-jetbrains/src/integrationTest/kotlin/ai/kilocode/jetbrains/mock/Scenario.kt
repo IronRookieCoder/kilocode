@@ -139,21 +139,25 @@ class Scenario {
         fun healthyBody(version: String = "1.0.0-test", capabilities: List<String> = listOf("agents", "favorites")): String =
             """{"ok":true,"data":{"status":"ok","version":"$version","capabilities":${capabilities.joinToString(",", "[", "]") { "\"$it\"" }}}}"""
 
-        /** The raw models catalog; `CsCloudRoute.responseInterceptor` normalizes it plugin-side. */
+        /** The raw models catalog; `CsCloudRoute.responseInterceptor` normalizes it plugin-side.
+         *  Billing rates ride on the daemon response the way the real daemon injects them. */
         fun modelsBody(): String =
             """
             {"connected":[
               {"id":"costrict","name":"Costrict Cloud","default_model":"coder-pro",
-               "models":{"coder-pro":{"id":"coder-pro","name":"Coder Pro"},"coder-lite":{"id":"coder-lite","name":"Coder Lite"}}}
+               "models":{"coder-pro":{"id":"coder-pro","name":"Coder Pro","creditConsumption":3.0,"creditDiscount":1.0},"coder-lite":{"id":"coder-lite","name":"Coder Lite","creditConsumption":0.5,"creditDiscount":1.0}}}
             ]}
             """.trimIndent()
 
-        /** Session modes catalog (permissive shape; refined against a real daemon capture). */
+        /**
+         * Session modes catalog. `mode` and `options` are required by the generated
+         * `Agent` DTO — omitting them fails the whole workspace load (agents resource).
+         */
         fun sessionModesBody(extraModes: List<String> = emptyList()): String {
             val base = listOf("build" to "Build", "plan" to "Plan")
             val modes = base + extraModes.map { it to it.replaceFirstChar(Char::uppercase) }
             return modes.joinToString(",", "[", "]") { (id, name) ->
-                """{"id":"$id","name":"$name","description":"$name mode"}"""
+                """{"id":"$id","name":"$name","mode":"primary","options":{},"description":"$name mode"}"""
             }
         }
 

@@ -32,7 +32,6 @@ class BrandSmokeTest : IntegrationTestBase() {
             awaitColdStartReady()
 
             // —— Segment 2: U1.2 / U8.2 / U8.5 tool window + empty state ——
-            openCostrictToolWindow()
             val welcome = awaitFrameText({ it.contains("Costrict is an AI coding assistant") }, timeoutMs = 30_000)
             assertTrue(
                 !welcome.contains("Kilo"),

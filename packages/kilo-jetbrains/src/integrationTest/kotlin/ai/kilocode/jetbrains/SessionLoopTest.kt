@@ -30,13 +30,16 @@ class SessionLoopTest : IntegrationTestBase() {
         var abortsAtClose = 0
         val result = runPluginIde("costrictSessionLoop") {
             awaitColdStartReady()
+            awaitSessionUiReady()
             daemon.assertWorkspaceHeaderEquals(fixtureProjectDir.toString())
-            openCostrictToolWindow()
 
             // —— Segment U3.1: New Session → conversation creation POST ——
             // The UI may defer the REST create to the first prompt; either way the daemon must
-            // see the conversations-create surface before the loop starts.
-            invokeAction("Kilo.NewSession")
+            // see the conversations-create surface before the loop starts. invokeAction is
+            // best-effort: the global action context has no SessionManager data (the enable
+            // check needs the tool window's own data context), the typed prompt below is the
+            // guaranteed creation path.
+            runCatching { invokeAction("Kilo.NewSession") }
             runCatching { daemon.awaitRequest("POST", "/api/v1/conversations", 20_000) }
 
             // —— Segment U3.2: prompt → scripted SSE delta stream renders incrementally ——
@@ -130,11 +133,10 @@ class SessionLoopTest : IntegrationTestBase() {
     fun `code review flow`() {
         runPluginIde("costrictCodeReview") {
             awaitColdStartReady()
-            openCostrictToolWindow()
 
             // U7.1 (disabled state without a session) is a T1 duty: ReviewActionUpdateTest.
             // Create a live session first — review entry points send into the active session.
-            invokeAction("Kilo.NewSession")
+            awaitSessionUiReady()
             sendPrompt("warm up session for review")
             val promptPosts = promptAsyncPosts()
             assertTrue(promptPosts.isNotEmpty(), "session must be live before review triggers")
@@ -180,18 +182,6 @@ class SessionLoopTest : IntegrationTestBase() {
     // ------------------------------------------------------------------
     // Helpers
     // ------------------------------------------------------------------
-
-    /** Type into the session prompt editor and send with Enter (Kilo.SendPrompt shortcut). */
-    private fun Driver.sendPrompt(text: String) {
-        openCostrictToolWindow()
-        val promptEditor = ui.x {
-            byJavaClass("ai.kilocode.client.session.ui.prompt.PromptEditorTextField")
-        }
-        promptEditor.keyboard {
-            typeText(text)
-            enter()
-        }
-    }
 
     /** Push one SSE event once a stream is connected; SSE reconnects make this eventually true. */
     private fun broadcastSafely(eventJson: String) {

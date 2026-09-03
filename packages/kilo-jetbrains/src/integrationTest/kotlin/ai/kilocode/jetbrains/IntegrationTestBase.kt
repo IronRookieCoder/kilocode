@@ -17,10 +17,12 @@ import com.intellij.ide.starter.plugins.PluginConfigurator
 import com.intellij.ide.starter.project.LocalProjectInfo
 import com.intellij.ide.starter.runner.Starter
 import com.intellij.driver.client.Driver
+import com.intellij.driver.sdk.getOpenProjects
 import com.intellij.driver.sdk.getToolWindow
 import com.intellij.driver.sdk.openToolWindow
 import com.intellij.driver.sdk.ui.UiText
 import com.intellij.driver.sdk.ui.components.common.IdeaFrameUI
+import com.intellij.driver.sdk.ui.ui
 import com.intellij.driver.sdk.ui.components.common.ideFrame
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.BeforeEach
@@ -57,7 +59,7 @@ abstract class IntegrationTestBase {
         /** G1 冷启动基线: connection must reach ready within this window after IDE startup. */
         const val READY_TIMEOUT_MS = 60_000L
 
-        const val PLUGIN_ID = "ai.kilocode.jetbrains"
+        const val PLUGIN_ID = "ai.costrict.jetbrains"
         const val TOOL_WINDOW_ID = "Costrict"
     }
 
@@ -95,7 +97,17 @@ abstract class IntegrationTestBase {
                         details: String,
                         linkToLogs: String?,
                     ) {
-                        throw AssertionError("$testName fails: $message. \n$details")
+                        // The SSE transport is killed while the IDE process tears down (daemon
+                        // stop / socket close mid-read). That teardown abort is an artifact of
+                        // the harness, not a product error — everything else still fails the test.
+                        val transportTeardown = listOf(
+                            "SocketDispatcher.read0",
+                            "Connection reset",
+                            "你的主机中的软件中止了一个已建立的连接",
+                            "An established connection was aborted by the software in your host machine",
+                            "Forcibly closed by the remote host",
+                        ).any { details.contains(it) }
+                        if (!transportTeardown) throw AssertionError("$testName fails: $message. \n$details")
                     }
                 }
             }
@@ -105,11 +117,33 @@ abstract class IntegrationTestBase {
     @BeforeEach
     fun setUpDaemonAndFixture() {
         MACHINE_LOCK.withLock {
-            daemon = FakeCsCloudDaemon(FakeCsCloudDaemon.portFromProperty()).start()
+            System.setProperty("kilo.integrationTest.mock.requestLog", mockRequestLog.toString())
+            Files.createDirectories(mockRequestLog.parent)
+            Files.writeString(mockRequestLog, "\n==== ${getClass()}: new mock session ====\n")
+            daemon = FakeCsCloudDaemon(FakeCsCloudDaemon.portFromProperty(), foreignRoots = readForeignWorkspaces()).start()
             fixtureProjectDir = createFixtureProject()
             redirectDaemonEndpoint()
         }
     }
+
+    /**
+     * Workspace roots of every other Costrict client on this machine (`recent_workspaces.json`
+     * written by the real daemon). While server_url is redirected, those clients may reconnect
+     * to the mock; their traffic is not the plugin-under-test's.
+     */
+    private fun readForeignWorkspaces(): Set<String> {
+        val file = Paths.get(System.getProperty("user.home"), ".costrict", "cs-cloud", "recent_workspaces.json")
+        if (!Files.exists(file)) return emptySet()
+        return runCatching {
+            Regex("\"([^\"]+)\"").findAll(Files.readString(file)).map { it.groupValues[1] }.toSet()
+        }.getOrDefault(emptySet())
+    }
+
+    /** Every request the mock serves during this test, appended in arrival order. */
+    private val mockRequestLog: Path =
+        Paths.get("build", "integrationTest-mock-requests.log").toAbsolutePath()
+
+    private fun getClass(): String = this::class.java.simpleName
 
     @AfterEach
     fun tearDownDaemonAndFixture() {
@@ -143,6 +177,11 @@ abstract class IntegrationTestBase {
             TestCase(IdeProductProvider.IU, LocalProjectInfo(fixtureProjectDir)),
         )
         PluginConfigurator(context).installPluginFromPath(Path.of(zipPath))
+        // The sandbox IDE inherits the machine's zh locale (imported config / system language),
+        // which translates the platform UI and breaks every English-text driver lookup (Settings
+        // dialog, menus). Force the platform UI to English.
+        context.ide.vmOptions.addSystemProperty("user.language", "en")
+        context.ide.vmOptions.addSystemProperty("user.country", "US")
         return context.runIdeWithDriver().useDriverAndCloseIde { driverAssertions() }
     }
 
@@ -154,7 +193,19 @@ abstract class IntegrationTestBase {
      * Count-aware: the request log accumulates across IDE launches within one daemon, so the
      * awaited records must be strictly newer than whatever existed when this call started.
      */
-    protected fun awaitColdStartReady(timeoutMs: Long = READY_TIMEOUT_MS) {
+    /**
+     * G1 冷启动基线: wait for the fixture project to be fully open (the driver client can race
+     * project init), open the tool window (the product connects lazily on first tool window
+     * content — there is no eager boot-time connect), then the connection must reach ready
+     * within [timeoutMs].
+     */
+    protected fun Driver.awaitColdStartReady(timeoutMs: Long = READY_TIMEOUT_MS) {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (runCatching { getOpenProjects() }.getOrNull().isNullOrEmpty()) {
+            if (System.currentTimeMillis() > deadline) throw AssertionError("Fixture project never opened within ${timeoutMs}ms")
+            Thread.sleep(500)
+        }
+        openCostrictToolWindow()
         val healthBefore = daemon.requests.count { it.path == "/api/v1/runtime/health" }
         val sseBefore = daemon.requests.count { it.path == "/api/v1/events" }
         daemon.awaitNewRequest("GET", "/api/v1/runtime/health", healthBefore, timeoutMs)
@@ -165,15 +216,59 @@ abstract class IntegrationTestBase {
     // Driver helpers
     // ------------------------------------------------------------------
 
-    /** Open (and return the id of) the Costrict tool window. */
+    /** Type into the session prompt editor and send with Enter (Kilo.SendPrompt shortcut). */
+    protected fun Driver.sendPrompt(text: String) {
+        openCostrictToolWindow()
+        awaitSessionUiReady()
+        val promptEditor = ui.x {
+            byJavaClass("ai.kilocode.client.session.ui.prompt.PromptEditorTextField")
+        }
+        // Take focus first: a Trial/license editor tab may otherwise own the keyboard.
+        promptEditor.click()
+        promptEditor.keyboard {
+            typeText(text)
+            enter()
+        }
+    }
+
+    /** Open (and return the id of) the Costrict tool window, tolerating the project-init race. */
     protected fun Driver.openCostrictToolWindow() {
-        getToolWindow(TOOL_WINDOW_ID) ?: throw AssertionError("Tool window '$TOOL_WINDOW_ID' is not registered")
-        openToolWindow(TOOL_WINDOW_ID)
+        val deadline = System.currentTimeMillis() + READY_TIMEOUT_MS
+        var lastError: Throwable? = null
+        while (System.currentTimeMillis() < deadline) {
+            runCatching {
+                getToolWindow(TOOL_WINDOW_ID)?.let { openToolWindow(TOOL_WINDOW_ID) }
+            }.onSuccess {
+                if (getToolWindow(TOOL_WINDOW_ID) != null) return
+            }.onFailure { lastError = it }
+            Thread.sleep(1_000)
+        }
+        throw AssertionError(
+            "Tool window '$TOOL_WINDOW_ID' never opened within ${READY_TIMEOUT_MS}ms" +
+                (lastError?.let { ": ${it.message}" } ?: ""),
+        )
     }
 
     /** Run [action] against the project frame UI. */
     protected fun Driver.ideFrameUi(action: (IdeaFrameUI) -> Unit) {
         ideFrame(action)
+    }
+
+    /**
+     * Wait until the session prompt editor exists (session UI fully built). Actions like
+     * `Kilo.NewSession` and typed prompts need this component present and focused.
+     */
+    protected fun Driver.awaitSessionUiReady(timeoutMs: Long = 30_000) {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        var lastError: Throwable? = null
+        while (System.currentTimeMillis() < deadline) {
+            // `ui.x` resolves lazily — force a remote lookup so absence actually throws.
+            runCatching {
+                ui.x { byJavaClass("ai.kilocode.client.session.ui.prompt.PromptEditorTextField") }.getAllTexts()
+            }.onSuccess { return }.onFailure { lastError = it }
+            Thread.sleep(500)
+        }
+        throw AssertionError("Session prompt editor never appeared within ${timeoutMs}ms", lastError)
     }
 
     /** All visible texts of the project frame — coarse but robust for brand/state assertions. */

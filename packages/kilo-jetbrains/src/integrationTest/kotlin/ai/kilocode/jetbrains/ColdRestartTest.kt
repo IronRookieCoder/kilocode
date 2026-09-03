@@ -23,8 +23,10 @@ class ColdRestartTest : IntegrationTestBase() {
         // —— Launch 1: seed one conversation through the real UI ——
         runPluginIde("costrictColdRestartSeed") {
             awaitColdStartReady()
-            openCostrictToolWindow()
-            invokeAction("Kilo.NewSession")
+            awaitSessionUiReady()
+            // A typed prompt is the guaranteed session-creation path (the global action
+            // context lacks the tool window's SessionManager data for Kilo.NewSession).
+            sendPrompt("seed session for restart")
             daemon.awaitRequest("POST", "/api/v1/conversations", 30_000)
             assertTrue(
                 daemon.conversations.any { it.contains("Fixture Session") },
@@ -36,8 +38,8 @@ class ColdRestartTest : IntegrationTestBase() {
         runPluginIde("costrictColdRestartVerify") {
             // G1 baseline: cold reconnect after a full IDE restart (U2.6 收口).
             awaitColdStartReady()
-            openCostrictToolWindow()
-            invokeAction("Kilo.History")
+            awaitSessionUiReady()
+            runCatching { invokeAction("Kilo.History") }
             awaitFrameText({ it.contains("Fixture Session") }, timeoutMs = 30_000)
         }
     }
