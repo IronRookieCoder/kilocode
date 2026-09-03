@@ -21,7 +21,6 @@ object MigrationSelectionBuilder {
      * - Default model: if present
      * - Auto-approval: subfields if corresponding data exists
      * - Language: if present
-     * - Autocomplete: if present
      */
     fun defaults(detection: LegacyMigrationDetectionDto): MigrationUiSelections {
         val providers = detection.providers
@@ -46,7 +45,8 @@ object MigrationSelectionBuilder {
         val settingsSel = MigrationSettingsUiSelections(
             autoApproval = ap,
             language = !settings?.language.isNullOrEmpty(),
-            autocomplete = settings?.autocomplete != null,
+            // Costrict (C2): the autocomplete promise is hidden — never preselected, never applied.
+            autocomplete = false,
         )
 
         return MigrationUiSelections(
