@@ -2,6 +2,7 @@ package ai.kilocode.client.app
 
 import ai.kilocode.client.plugin.KiloBundle
 import ai.kilocode.client.testing.FakeAppRpcApi
+import ai.kilocode.client.testing.TEST_WAIT_MS
 import ai.kilocode.rpc.ConnectionErrorCode
 import ai.kilocode.rpc.dto.CsCloudStartDto
 import ai.kilocode.rpc.dto.KiloAppStateDto
@@ -72,8 +73,15 @@ class KiloAppServiceTest : BasePlatformTestCase() {
         currentOrgId: String? = null,
     ) = ProfileDto(email = email, name = name, organizations = orgs, balance = balance, currentOrgId = currentOrgId)
 
+    /**
+     * Waits for [done] on the test's own coroutine scheduler.
+     *
+     * Deliberately no EDT pumping here: the platform test framework runs this class's test bodies
+     * on the EDT inside `runBlocking`, so the EDT is parked and any `invokeAndWait`-based pump
+     * would deadlock against it.
+     */
     private suspend fun waitUntil(done: () -> Boolean) {
-        withTimeout(5_000) {
+        withTimeout(TEST_WAIT_MS) {
             while (!done()) yield()
         }
     }
@@ -162,21 +170,25 @@ class KiloAppServiceTest : BasePlatformTestCase() {
     }
 
     fun `test installCscAsync reports a busy install instead of ignoring a second click`() = runBlocking(Dispatchers.Default) {
+        var job: Job? = null
+        val runner = CsCloudTaskRunner { _, queued -> job = queued }
+        val cancellable = KiloAppService(scope, rpc, runner)
         rpc.csCloudInstallGate = CompletableDeferred()
         recordNotifications()
-        app.installCscAsync()
+        cancellable.installCscAsync()
         waitUntil { rpc.csCloudInstalls == 1 }
 
-        app.installCscAsync()
+        cancellable.installCscAsync()
 
         assertEquals(1, rpc.csCloudInstalls) // a second click must not start a second install
         val busy = waitUntilValue { notifications.firstOrNull { it.title == KiloBundle.message("csCloud.install.busy") } }
         assertEquals(NotificationType.INFORMATION, busy.type)
 
-        // Once the first install finishes the lock is gone, so the next click goes through again.
+        // The first install must settle (job done = lock released) before the next click: the
+        // outcome notification is posted inside the job, so it is not a lock-released signal.
         rpc.csCloudInstallGate!!.complete(Unit)
-        waitUntilValue { notifications.firstOrNull { it.title == KiloBundle.message("csCloud.install.ok") } }
-        app.installCscAsync()
+        job!!.join()
+        cancellable.installCscAsync()
         waitUntil { rpc.csCloudInstalls == 2 }
     }
 
@@ -219,20 +231,25 @@ class KiloAppServiceTest : BasePlatformTestCase() {
     }
 
     fun `test startCsCloudAsync reports a busy start instead of ignoring a second click`() = runBlocking(Dispatchers.Default) {
+        var job: Job? = null
+        val runner = CsCloudTaskRunner { _, queued -> job = queued }
+        val cancellable = KiloAppService(scope, rpc, runner)
         rpc.csCloudStartGate = CompletableDeferred()
         recordNotifications()
-        app.startCsCloudAsync()
+        cancellable.startCsCloudAsync()
         waitUntil { rpc.csCloudStarts == 1 }
 
-        app.startCsCloudAsync()
+        cancellable.startCsCloudAsync()
 
         assertEquals(1, rpc.csCloudStarts) // a second click must not start a second start
         val busy = waitUntilValue { notifications.firstOrNull { it.title == KiloBundle.message("csCloud.start.busy") } }
         assertEquals(NotificationType.INFORMATION, busy.type)
 
+        // The first start must settle (job done = lock released) before the next click: the
+        // outcome notification is posted inside the job, so it is not a lock-released signal.
         rpc.csCloudStartGate!!.complete(Unit)
-        waitUntilValue { notifications.firstOrNull { it.title == KiloBundle.message("csCloud.start.ok") } }
-        app.startCsCloudAsync()
+        job!!.join()
+        cancellable.startCsCloudAsync()
         waitUntil { rpc.csCloudStarts == 2 }
     }
 

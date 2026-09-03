@@ -78,6 +78,7 @@ import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.launch
 import java.awt.Component
 import java.nio.file.Path
+import java.util.concurrent.CopyOnWriteArrayList
 
 /**
  * Session lifecycle orchestrator for a single session.
@@ -143,7 +144,10 @@ class SessionController(
 
     val model = SessionModel()
 
-    private val listeners = mutableListOf<SessionControllerListener>()
+    // Copy-on-write: listeners register while UI panels are built from inside fire() itself
+    // (e.g. the empty-session panel hooks up on first view change), so delivery must iterate a
+    // stable snapshot instead of a list that grows mid-loop.
+    private val listeners = CopyOnWriteArrayList<SessionControllerListener>()
     private var ref: SessionRef? = ref
     private val sid: String? get() = (ref as? SessionRef.Local)?.id
     private val directory: String get() = workspace.directory
