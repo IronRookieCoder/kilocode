@@ -11,6 +11,7 @@ import ai.kilocode.client.settings.base.SettingsStackedRow
 import ai.kilocode.client.settings.base.SettingsToggle
 import ai.kilocode.client.settings.base.SettingsRows
 import ai.kilocode.client.settings.models.ModelSettingPicker
+import ai.kilocode.client.ui.CostrictBrand
 import ai.kilocode.client.ui.FilledBadgeIcon
 import ai.kilocode.client.ui.HoverIcon
 import ai.kilocode.client.ui.UiStyle
@@ -343,9 +344,9 @@ internal class AgentEditDialog(
     private fun notify(type: NotificationType, title: String, content: String? = null) {
         ApplicationManager.getApplication().invokeLater {
             val notification = NotificationGroupManager.getInstance()
-                .getNotificationGroup("Kilo Code")
+                .getNotificationGroup(CostrictBrand.NOTIFICATION_GROUP)
                 ?.createNotification(title, content.orEmpty(), type)
-                ?: Notification("Kilo Code", title, content.orEmpty(), type)
+                ?: Notification(CostrictBrand.NOTIFICATION_GROUP, title, content.orEmpty(), type)
             notification.notify(ProjectManager.getInstance().openProjects.firstOrNull { !it.isDefault })
         }
     }

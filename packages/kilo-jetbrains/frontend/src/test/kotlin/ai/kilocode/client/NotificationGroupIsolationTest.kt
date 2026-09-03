@@ -24,15 +24,15 @@ class NotificationGroupIsolationTest {
 
     @Test
     fun `generic and code review groups are registered as separate ids`() {
-        registration("Kilo Code")
-        registration("Kilo.CodeReview")
-        assertTrue("Kilo Code" != "Kilo.CodeReview")
+        registration("Costrict")
+        registration("Costrict.CodeReview")
+        assertTrue("Costrict" != "Costrict.CodeReview")
     }
 
     @Test
     fun `groups bind to different bundle keys`() {
-        val generic = registration("Kilo Code")
-        val review = registration("Kilo.CodeReview")
+        val generic = registration("Costrict")
+        val review = registration("Costrict.CodeReview")
         val genericKey = Regex("key=\"([^\"]+)\"").find(generic)?.groupValues?.get(1)
         val reviewKey = Regex("key=\"([^\"]+)\"").find(review)?.groupValues?.get(1)
         assertEquals("notification.group.kilo", genericKey, "generic group must bind notification.group.kilo")

@@ -6,6 +6,7 @@ import ai.kilocode.client.app.KiloWorkspaceService
 import ai.kilocode.client.session.ui.model.ModelPicker
 import ai.kilocode.client.testing.FakeAppRpcApi
 import ai.kilocode.client.testing.FakeWorkspaceRpcApi
+import ai.kilocode.client.ui.CostrictBrand
 import ai.kilocode.rpc.dto.ConfigDto
 import ai.kilocode.rpc.dto.KiloAppStateDto
 import ai.kilocode.rpc.dto.KiloAppStatusDto
@@ -283,7 +284,7 @@ class ModelsSettingsUiTest : BasePlatformTestCase() {
         rpc.configUpdateGate?.complete(Unit)
 
         flushUntil {
-            notes.any { it.groupId == "Kilo Code" && it.type == NotificationType.ERROR }
+            notes.any { it.groupId == CostrictBrand.NOTIFICATION_GROUP && it.type == NotificationType.ERROR }
         }
         assertEquals(1, rpc.configUpdateAttempts)
         assertTrue(notes.any { it.title == "Failed to save model settings" })

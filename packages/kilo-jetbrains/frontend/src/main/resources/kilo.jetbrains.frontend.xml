@@ -13,12 +13,12 @@
         <applicationService serviceImplementation="ai.kilocode.client.autocomplete.KiloAutocompleteSettingsService"/>
         <customPasteProvider implementation="ai.kilocode.client.session.ui.prompt.PromptAttachmentPasteProvider"/>
 
-        <notificationGroup id="Kilo Code"
+        <notificationGroup id="Costrict"
                            displayType="BALLOON"
                            bundle="messages.KiloBundle"
                            key="notification.group.kilo"/>
 
-        <notificationGroup id="Kilo.CodeReview"
+        <notificationGroup id="Costrict.CodeReview"
                            displayType="BALLOON"
                            bundle="messages.KiloBundle"
                            key="notification.group.codereview"/>

@@ -1,6 +1,7 @@
 package ai.kilocode.client
 
 import ai.kilocode.client.plugin.KiloBundle
+import ai.kilocode.client.ui.CostrictBrand
 import com.intellij.notification.Notification
 import com.intellij.notification.NotificationAction
 import com.intellij.notification.NotificationGroupManager
@@ -9,8 +10,6 @@ import com.intellij.openapi.project.Project
 import com.intellij.openapi.project.ProjectManager
 
 object KiloNotifications {
-    private const val GROUP = "Kilo Code"
-
     fun error(title: String, content: String? = null) {
         val project = ProjectManager.getInstance().openProjects.firstOrNull { !it.isDefault }
         error(project, title, content)
@@ -18,18 +17,18 @@ object KiloNotifications {
 
     fun error(project: Project?, title: String, content: String? = null) {
         val notification = NotificationGroupManager.getInstance()
-            .getNotificationGroup(GROUP)
+            .getNotificationGroup(CostrictBrand.NOTIFICATION_GROUP)
             ?.createNotification(title, content ?: "", NotificationType.ERROR)
-            ?: Notification(GROUP, title, content ?: "", NotificationType.ERROR)
+            ?: Notification(CostrictBrand.NOTIFICATION_GROUP, title, content ?: "", NotificationType.ERROR)
         notification.notify(project)
     }
 
     /** Error notification with a single expiring action (e.g. a retry). */
     fun error(project: Project?, title: String, content: String?, actionLabel: String, action: () -> Unit) {
         val notification = NotificationGroupManager.getInstance()
-            .getNotificationGroup(GROUP)
+            .getNotificationGroup(CostrictBrand.NOTIFICATION_GROUP)
             ?.createNotification(title, content ?: "", NotificationType.ERROR)
-            ?: Notification(GROUP, title, content ?: "", NotificationType.ERROR)
+            ?: Notification(CostrictBrand.NOTIFICATION_GROUP, title, content ?: "", NotificationType.ERROR)
         notification.addAction(NotificationAction.createSimpleExpiring(actionLabel) { action() })
         notification.notify(project)
     }
@@ -37,17 +36,17 @@ object KiloNotifications {
     fun info(title: String, content: String? = null) {
         val project = ProjectManager.getInstance().openProjects.firstOrNull { !it.isDefault }
         val notification = NotificationGroupManager.getInstance()
-            .getNotificationGroup(GROUP)
+            .getNotificationGroup(CostrictBrand.NOTIFICATION_GROUP)
             ?.createNotification(title, content ?: "", NotificationType.INFORMATION)
-            ?: Notification(GROUP, title, content ?: "", NotificationType.INFORMATION)
+            ?: Notification(CostrictBrand.NOTIFICATION_GROUP, title, content ?: "", NotificationType.INFORMATION)
         notification.notify(project)
     }
 
     fun suggestion(project: Project?, title: String, content: String?, actionLabel: String, action: () -> Unit) {
         val notification = NotificationGroupManager.getInstance()
-            .getNotificationGroup(GROUP)
+            .getNotificationGroup(CostrictBrand.NOTIFICATION_GROUP)
             ?.createNotification(title, content ?: "", NotificationType.INFORMATION)
-            ?: Notification(GROUP, title, content ?: "", NotificationType.INFORMATION)
+            ?: Notification(CostrictBrand.NOTIFICATION_GROUP, title, content ?: "", NotificationType.INFORMATION)
         notification.setSuggestionType(true)
         notification.addAction(NotificationAction.createSimpleExpiring(actionLabel) { action() })
         notification.addAction(NotificationAction.createSimpleExpiring(KiloBundle.message("common.dont.show.again")) {})

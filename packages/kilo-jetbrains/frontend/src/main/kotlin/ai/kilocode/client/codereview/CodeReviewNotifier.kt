@@ -3,6 +3,7 @@ package ai.kilocode.client.codereview
 
 import ai.kilocode.client.app.KiloChatAccess
 import ai.kilocode.client.plugin.KiloBundle
+import ai.kilocode.client.ui.CostrictBrand
 import ai.kilocode.log.KiloLog
 import ai.kilocode.rpc.KiloAppRpcApi
 import ai.kilocode.rpc.dto.CodeReviewReportDto
@@ -44,7 +45,7 @@ class CodeReviewNotifier internal constructor(
 
     companion object {
         private val LOG = KiloLog.create(CodeReviewNotifier::class.java)
-        private const val GROUP = "Kilo.CodeReview"
+        private const val GROUP = CostrictBrand.CODE_REVIEW_NOTIFICATION_GROUP
 
         /** True when [report] belongs to this project's [directory] (normalized comparison). */
         internal fun matches(report: CodeReviewReportDto, directory: String?): Boolean {

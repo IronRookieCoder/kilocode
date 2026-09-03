@@ -14,6 +14,7 @@ import ai.kilocode.client.session.ui.style.SessionUiStyle
 import ai.kilocode.client.session.ui.mode.ModePicker
 import ai.kilocode.client.session.ui.model.ModelPicker
 import ai.kilocode.client.session.ui.selection.SessionSelection
+import ai.kilocode.client.ui.CostrictBrand
 import ai.kilocode.client.ui.HoverIcon
 import ai.kilocode.client.ui.UiStyle
 import ai.kilocode.client.ui.iconButton
@@ -924,7 +925,7 @@ class PromptPanel(
     private fun elapsedMs(start: Long) = (System.nanoTime() - start) / 1_000_000
 
     private fun notify(text: String) {
-        com.intellij.notification.Notification("Kilo Code", text, com.intellij.notification.NotificationType.WARNING).notify(project)
+        com.intellij.notification.Notification(CostrictBrand.NOTIFICATION_GROUP, text, com.intellij.notification.NotificationType.WARNING).notify(project)
     }
 
     @RequiresEdt
