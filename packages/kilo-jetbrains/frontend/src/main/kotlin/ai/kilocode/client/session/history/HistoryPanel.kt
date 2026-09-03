@@ -90,6 +90,11 @@ class HistoryPanel(
         .setText(KiloBundle.message("history.tab.cloud"))
         .setForeSideComponent(back())
     private var stale = false
+    // Costrict (A4): the cloud tab is hidden and JBTabs on 2026.1 refuses to select hidden
+    // tabs, so cloud mode is driven by this flag instead of tab selection. The test hook
+    // sets it; production code never does.
+    private var cloudForced = false
+    private val onCloud: Boolean get() = cloudForced || tabs.selectedInfo === cloudInfo
     private val timer = timers.timer(ACTIVITY_MS) { syncActivity() }
     private val tabs: JBTabs = JBTabsFactory.createTabs(null, this).apply {
         presentation.setSingleRow(true)
@@ -97,6 +102,9 @@ class HistoryPanel(
         presentation.showBorder = false
         addTab(localInfo).setPreferredFocusableComponent(localSearch.textEditor)
         addTab(cloudInfo).setPreferredFocusableComponent(cloudSearch.textEditor)
+        // Costrict (A4): Kilo cloud history entry hidden — pipeline kept for tests and restore.
+        // JBTabs still allows programmatic selection of hidden tabs, so test hooks keep working.
+        cloudInfo.isHidden = true
         addListener(object : TabsListener {
             override fun selectionChanged(oldSelection: TabInfo?, newSelection: TabInfo?) {
                 sync()
@@ -395,7 +403,7 @@ class HistoryPanel(
 
     internal fun itemCount() = activeRows().size
 
-    internal fun selectedSource() = if (tabs.selectedInfo === cloudInfo) HistorySource.CLOUD else HistorySource.LOCAL
+    internal fun selectedSource() = if (onCloud) HistorySource.CLOUD else HistorySource.LOCAL
 
     internal fun select(index: Int) {
         activeList().selectIndex(index)
@@ -436,11 +444,12 @@ class HistoryPanel(
     }
 
     internal fun clickCloud() {
-        tabs.select(cloudInfo, false)
+        cloudForced = true
         sync()
     }
 
     internal fun clickLocal() {
+        cloudForced = false
         tabs.select(localInfo, false)
         sync()
     }
@@ -450,7 +459,7 @@ class HistoryPanel(
     }
 
     internal fun setSearch(value: String) {
-        if (tabs.selectedInfo === cloudInfo) cloudSearch.text = value else localSearch.text = value
+        if (onCloud) cloudSearch.text = value else localSearch.text = value
     }
 
     internal fun groupTitles(): List<String> = activeRows().mapNotNull { it.section }
@@ -469,13 +478,13 @@ class HistoryPanel(
         repoOnly.doClick()
     }
 
-    private fun activeList(): ActiveList = if (tabs.selectedInfo === cloudInfo) cloudList else localList
+    private fun activeList(): ActiveList = if (onCloud) cloudList else localList
 
-    private fun activeRows(): List<ActiveListItem> = if (tabs.selectedInfo === cloudInfo) cloudRows else localRows
+    private fun activeRows(): List<ActiveListItem> = if (onCloud) cloudRows else localRows
 
-    private fun activeSearch(): SearchTextField = if (tabs.selectedInfo === cloudInfo) cloudSearch else localSearch
+    private fun activeSearch(): SearchTextField = if (onCloud) cloudSearch else localSearch
 
-    private fun activeInfo(): TabInfo = if (tabs.selectedInfo === cloudInfo) cloudInfo else localInfo
+    private fun activeInfo(): TabInfo = if (onCloud) cloudInfo else localInfo
 
     private fun move(step: Int) {
         val size = itemCount()
