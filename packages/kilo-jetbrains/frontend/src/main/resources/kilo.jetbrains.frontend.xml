@@ -44,14 +44,6 @@
 
         <applicationConfigurable
                 parentId="ai.kilocode.jetbrains.settings"
-                id="ai.kilocode.jetbrains.settings.profile"
-                groupWeight="5"
-                instance="ai.kilocode.client.settings.profile.UserProfileConfigurable"
-                bundle="messages.KiloBundle"
-                key="settings.profile.displayName"/>
-
-        <applicationConfigurable
-                parentId="ai.kilocode.jetbrains.settings"
                 id="ai.kilocode.jetbrains.settings.models"
                 groupWeight="4"
                 instance="ai.kilocode.client.settings.models.ModelsConfigurable"

@@ -80,15 +80,15 @@ class KiloSettingsConfigurableTest : BasePlatformTestCase() {
         }
     }
 
-    fun `test createComponent contains User Profile link`() {
+    fun `test createComponent does not mount User Profile link`() {
         val cfg = KiloSettingsConfigurable()
         edt {
             val panel = cfg.createComponent()
             val links = links(panel as Container)
             assertTrue("root panel should contain at least one ActionLink", links.isNotEmpty())
             assertTrue(
-                "expected a link labeled 'User Profile'",
-                links.any { it.text == "User Profile" }
+                "User Profile entry must be hidden (A1)",
+                links.none { it.text == "User Profile" }
             )
         }
     }
@@ -116,8 +116,9 @@ class KiloSettingsConfigurableTest : BasePlatformTestCase() {
         edt {
             val panel = cfg.createComponent()
             val labels = links(panel as Container).map { it.text }
-            assertTrue(labels.containsAll(listOf("User Profile", "Models", "Providers", "Agent Behavior", "Auto-Approve", "Context", "Advanced")))
-            assertTrue(labels.indexOf("User Profile") < labels.indexOf("Advanced"))
+            assertTrue(labels.containsAll(listOf("Models", "Providers", "Agent Behavior", "Auto-Approve", "Context", "Advanced")))
+            assertFalse("User Profile entry must be hidden (A1)", labels.contains("User Profile"))
+            assertTrue(labels.indexOf("Models") < labels.indexOf("Advanced"))
         }
     }
 

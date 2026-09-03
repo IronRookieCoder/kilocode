@@ -67,7 +67,7 @@ class KiloSettingsConfigurable : SearchableConfigurable {
             open(settings, UserProfileConfigurable.ID)
         }
         link.border = JBUI.Borders.emptyBottom(UiStyle.Gap.sm())
-        panel.next(link)
+        // A1: User Profile entry is hidden — keep the link construction and its key, drop the mount only.
 
         val models = ActionLink(KiloBundle.message("settings.models.displayName")) { e ->
             val src = e.source as? JComponent ?: return@ActionLink

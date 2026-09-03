@@ -6,7 +6,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
 /**
- * X4 / U5.1 / U8.4: the settings tree stays complete and ordered — root "Costrict", the seven
+ * X4 / U5.1 / U8.4: the settings tree stays complete and ordered — root "Costrict", the six
  * top-level pages in registration order, and the Agent Behavior sub-pages ending in
  * … → Skills → Cloud Hub. Every registration must resolve a branded bundle displayName and a
  * real Configurable class.
@@ -41,7 +41,6 @@ class SettingsTreeOrderTest {
     @Test
     fun `top level pages keep the documented order`() {
         val expected = listOf(
-            "ai.kilocode.jetbrains.settings.profile",
             "ai.kilocode.jetbrains.settings.models",
             "ai.kilocode.jetbrains.settings.providers",
             "ai.kilocode.jetbrains.settings.agentBehavior",
@@ -51,6 +50,11 @@ class SettingsTreeOrderTest {
         )
         val actual = registrations.filter { it.parentId == "ai.kilocode.jetbrains.settings" }.map { it.id }
         assertEquals(expected, actual)
+        // A1: the User Profile page entry is hidden — its registration must stay absent.
+        assertTrue(
+            actual.none { it == "ai.kilocode.jetbrains.settings.profile" },
+            "User Profile entry must be hidden (A1)",
+        )
     }
 
     @Test
