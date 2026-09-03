@@ -47,6 +47,7 @@ import com.intellij.testFramework.replaceService
 import com.intellij.ui.components.JBList
 import com.intellij.ui.components.JBScrollPane
 import com.intellij.util.ui.UIUtil
+import java.awt.Container
 import java.awt.event.MouseEvent
 import java.awt.Point
 import javax.swing.JComponent
@@ -139,6 +140,22 @@ class AgentManagerPanelTest : BasePlatformTestCase() {
         assertEquals(activeListToolWindowBackground(), edt { scroll.viewport.background })
         assertEquals(activeListToolWindowBackground(), edt { (scroll.viewport.view as JComponent).background })
         assertEquals(0, edt { scroll.viewportBorder.getBorderInsets(scroll).top })
+    }
+
+    fun `test empty worktree list fills the tool window viewport`() {
+        val controller = WorktreeController(service, "/test", coroutines.scope)
+        val panel = edt { AgentManagerPanel(testRootDisposable, controller) }
+        val list = edt { UIUtil.findComponentOfType(panel, JBList::class.java)!! }
+        val scroll = edt { SwingUtilities.getAncestorOfClass(JBScrollPane::class.java, list) as JBScrollPane }
+
+        edt {
+            panel.setSize(320, 480)
+            layout(panel)
+        }
+
+        assertEquals("No worktrees", edt { list.emptyText.text })
+        assertTrue(edt { scroll.viewport.height > 0 })
+        assertTrue(edt { list.height > 0 })
     }
 
     fun `test clicking a worktree opens the worktree session editor`() {
@@ -547,6 +564,11 @@ class AgentManagerPanelTest : BasePlatformTestCase() {
     }
 
     private fun center(rect: java.awt.Rectangle) = Point(rect.x + rect.width / 2, rect.y + rect.height / 2)
+
+    private fun layout(parent: Container) {
+        parent.doLayout()
+        parent.components.filterIsInstance<Container>().forEach(::layout)
+    }
 
     private fun pump() = pumpEdt()
 }

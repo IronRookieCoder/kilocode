@@ -608,6 +608,15 @@ internal class ActiveListView(
         return super.getBackground() ?: UIUtil.getPanelBackground()
     }
 
+    override fun doLayout() {
+        super.doLayout()
+        if (surface != ActiveListSurface.ToolWindow) return
+        val ins = insets
+        val height = (height - ins.top - ins.bottom).coerceAtLeast(0)
+        if (list.height >= height) return
+        list.setBounds(ins.left, ins.top, (width - ins.left - ins.right).coerceAtLeast(0), height)
+    }
+
     override fun getScrollableTracksViewportWidth() = true
 
     override fun getScrollableTracksViewportHeight(): Boolean {
