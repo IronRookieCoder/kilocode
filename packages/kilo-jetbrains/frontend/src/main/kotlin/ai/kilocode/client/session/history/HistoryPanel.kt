@@ -103,7 +103,8 @@ class HistoryPanel(
         addTab(localInfo).setPreferredFocusableComponent(localSearch.textEditor)
         addTab(cloudInfo).setPreferredFocusableComponent(cloudSearch.textEditor)
         // Costrict (A4): Kilo cloud history entry hidden — pipeline kept for tests and restore.
-        // JBTabs still allows programmatic selection of hidden tabs, so test hooks keep working.
+        // JBTabs on 2026.1 refuses to select hidden tabs, so the clickCloud() test hook
+        // drives cloud mode via the cloudForced flag instead of tab selection.
         cloudInfo.isHidden = true
         addListener(object : TabsListener {
             override fun selectionChanged(oldSelection: TabInfo?, newSelection: TabInfo?) {
