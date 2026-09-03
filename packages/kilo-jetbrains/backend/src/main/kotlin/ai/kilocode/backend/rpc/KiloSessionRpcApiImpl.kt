@@ -7,7 +7,7 @@ import ai.kilocode.backend.app.KiloBackendActivityManager
 import ai.kilocode.backend.app.KiloBackendChatManager
 import ai.kilocode.backend.app.KiloBackendSessionManager
 import ai.kilocode.backend.app.CapabilityReleaseReason
-import ai.kilocode.backend.app.CapabilityResult
+import ai.kilocode.backend.app.KiloSessionCapabilities
 import ai.kilocode.backend.workspace.KiloBackendWorkspaceManager
 import ai.kilocode.log.ChatLogSummary
 import ai.kilocode.rpc.KiloSessionRpcApi
@@ -143,10 +143,7 @@ class KiloSessionRpcApiImpl internal constructor(
 
     override suspend fun prompt(id: String, directory: String, prompt: PromptDto) {
         app.requireReady()
-        when (val capability = app.sessionCapabilities?.ensure(id, directory)) {
-            is CapabilityResult.Unavailable -> if (capabilityRequired(capability.reason)) throw IllegalStateException(capability.reason) // kilocode_change
-            else -> Unit
-        }
+        ensureCapability(app.sessionCapabilities, id, directory, log) // kilocode_change
         log.info("prompt RPC: session=$id, dir=$directory, parts=${prompt.parts.size}")
         chat.prompt(id, directory, prompt)
     }
@@ -333,9 +330,13 @@ class KiloSessionRpcApiImpl internal constructor(
 }
 
 // kilocode_change start
-/** IDE MCP is optional; only hard capability failures should reject a prompt. */
-internal fun capabilityRequired(reason: String): Boolean = reason !in setOf(
-    "tools_disabled",
-    "ide_capability_unsupported",
-)
+internal suspend fun ensureCapability(capabilities: KiloSessionCapabilities?, id: String, directory: String, log: KiloLog) {
+    try {
+        capabilities?.ensure(id, directory)
+    } catch (error: CancellationException) {
+        throw error
+    } catch (error: Throwable) {
+        log.warn("optional IDE capability failed for session=$id", error)
+    }
+}
 // kilocode_change end

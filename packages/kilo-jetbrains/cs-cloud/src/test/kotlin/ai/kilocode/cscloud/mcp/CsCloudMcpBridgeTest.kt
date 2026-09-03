@@ -1,5 +1,6 @@
 package ai.kilocode.cscloud.mcp
 
+import ai.kilocode.cscloud.CsCloudRequestException
 import ai.kilocode.log.KiloLog
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
@@ -37,6 +38,23 @@ class CsCloudMcpBridgeTest {
         assertEquals("failed", failure.message)
         assertEquals(1, log.warnings)
         assertSame(error, log.error)
+    }
+
+    @Test
+    fun `missing downstream CSC capability is optional`() {
+        val error = CsCloudRequestException("capability_bind_failed", "csc IDE capability request failed: HTTP 404", 502)
+
+        assertEquals("ide_capability_unsupported", capabilityBindReason(error))
+    }
+
+    @Test
+    fun `other capability bind failures remain blocking`() {
+        val rejected = CsCloudRequestException("capability_bind_failed", "csc IDE capability request failed: HTTP 500", 502)
+        val unavailable = CsCloudRequestException("unavailable", "service unavailable", 503)
+
+        assertEquals("ide_capability_bind_failed", capabilityBindReason(rejected))
+        assertEquals("ide_capability_bind_failed", capabilityBindReason(unavailable))
+        assertEquals("ide_capability_bind_failed", capabilityBindReason(IllegalStateException("failed")))
     }
 
     private class TestLog : KiloLog {

@@ -48,6 +48,8 @@ class CsCloudRouteTest {
             Triple("POST", "/session", "/api/v1/conversations"),
             Triple("POST", "/session/s_1/prompt_async", "/api/v1/conversations/s_1/prompt/async"),
             Triple("GET", "/session/s_1/message", "/api/v1/conversations/s_1/messages"),
+            Triple("POST", "/conversations", "/api/v1/conversations"),
+            Triple("POST", "/conversations/s_1/revert", "/api/v1/conversations/s_1/revert"),
             Triple("GET", "/global/event", "/api/v1/events"),
             Triple("POST", "/permission/1", "/api/v1/permissions/1"),
             Triple("POST", "/question/1", "/api/v1/questions/1"),

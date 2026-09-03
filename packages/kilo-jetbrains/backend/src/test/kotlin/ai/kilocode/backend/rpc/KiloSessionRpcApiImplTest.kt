@@ -2,6 +2,9 @@ package ai.kilocode.backend.rpc
 
 import ai.kilocode.backend.app.KiloAppState
 import ai.kilocode.backend.app.KiloBackendAppService
+import ai.kilocode.backend.app.CapabilityReleaseReason
+import ai.kilocode.backend.app.CapabilityResult
+import ai.kilocode.backend.app.KiloSessionCapabilities
 import ai.kilocode.backend.testing.FakeCliServer
 import ai.kilocode.backend.testing.MockCliServer
 import ai.kilocode.backend.testing.TestLog
@@ -25,7 +28,6 @@ import kotlin.io.path.createTempDirectory
 import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
-import kotlin.test.assertFalse
 import kotlin.test.assertFailsWith
 import kotlin.test.assertIs
 import kotlin.test.assertNotNull
@@ -45,14 +47,6 @@ class KiloSessionRpcApiImplTest {
         mock.close()
     }
 
-    @Test
-    fun `unsupported IDE capability does not block prompts`() {
-        assertFalse(capabilityRequired("ide_capability_unsupported"))
-        assertFalse(capabilityRequired("tools_disabled"))
-        assertTrue(capabilityRequired("project_not_open"))
-        assertTrue(capabilityRequired("ide_capability_bind_failed"))
-    }
-
     private fun app(log: TestLog): KiloBackendAppService {
         return KiloBackendAppService.create(scope, FakeCliServer(mock), log).also { apps.add(it) }
     }
@@ -62,6 +56,33 @@ class KiloSessionRpcApiImplTest {
         withTimeout(10_000) {
             app.appState.first { it is KiloAppState.Ready }
         }
+    }
+
+    @Test
+    fun `IDE capability failures do not block prompts`() = runBlocking {
+        val log = TestLog()
+        val unavailable = capability { CapabilityResult.Unavailable("ide_capability_bind_failed") }
+        val failed = capability { throw IllegalStateException("bind failed") }
+
+        ensureCapability(unavailable, "ses_test", "/test", log)
+        ensureCapability(failed, "ses_test", "/test", log)
+
+        assertTrue(log.messages.any { it.contains("optional IDE capability failed") })
+    }
+
+    @Test
+    fun `IDE capability cancellation still cancels prompts`() = runBlocking {
+        val capabilities = capability { throw kotlinx.coroutines.CancellationException("cancelled") }
+
+        assertFailsWith<kotlinx.coroutines.CancellationException> {
+            ensureCapability(capabilities, "ses_test", "/test", TestLog())
+        }
+    }
+
+    private fun capability(block: suspend () -> CapabilityResult) = object : KiloSessionCapabilities {
+        override suspend fun ensure(id: String, directory: String) = block()
+        override suspend fun release(id: String, reason: CapabilityReleaseReason) = Unit
+        override suspend fun releaseAll(reason: CapabilityReleaseReason) = Unit
     }
 
     @Test

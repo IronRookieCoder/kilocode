@@ -30,7 +30,10 @@ object CsCloudRoute {
         val builder = request.url.newBuilder().encodedPath("${prefix.trimEnd('/')}$route")
         if (request.url.queryParameter(workspace) != null) builder.removeAllQueryParameters(workspace)
         val result = request.newBuilder().url(builder.build())
-        if (path == "/session" || path.startsWith("/session/")) {
+        if (
+            path == "/session" || path.startsWith("/session/") ||
+            path == "/conversations" || path.startsWith("/conversations/")
+        ) {
             val value = workspacePath?.trim()?.takeIf { it.isNotEmpty() }
                 ?: throw IllegalArgumentException("workspace directory is required for session requests")
             result.header(workspaceHeader, workspace(value, roots).toString())
@@ -94,6 +97,8 @@ object CsCloudRoute {
         path.matches(Regex("/session/[^/]+/prompt_async")) -> "/api/v1/conversations/${path.split('/')[2]}/prompt/async"
         path.matches(Regex("/session/[^/]+/message")) -> "/api/v1/conversations/${path.split('/')[2]}/messages"
         path.startsWith("/session/") -> "/api/v1/conversations/${path.removePrefix("/session/")}"
+        path == "/conversations" -> "/api/v1/conversations"
+        path.startsWith("/conversations/") -> "/api/v1${path}"
         path == "/global/event" -> "/api/v1/events"
         path.startsWith("/permission") -> "/api/v1/permissions${path.removePrefix("/permission")}"
         path.startsWith("/question") -> "/api/v1/questions${path.removePrefix("/question")}"

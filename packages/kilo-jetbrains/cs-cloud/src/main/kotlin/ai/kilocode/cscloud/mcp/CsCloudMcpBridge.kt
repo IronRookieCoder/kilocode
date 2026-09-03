@@ -4,6 +4,7 @@ import ai.kilocode.backend.app.CapabilityReleaseReason
 import ai.kilocode.backend.app.CapabilityResult
 import ai.kilocode.backend.app.KiloSessionCapabilities
 import ai.kilocode.cscloud.CsCloudEndpoint
+import ai.kilocode.cscloud.CsCloudRequestException
 import ai.kilocode.log.KiloLog
 import com.intellij.openapi.project.ProjectManager
 import kotlinx.coroutines.CompletableDeferred
@@ -88,9 +89,10 @@ class CsCloudMcpBridge(
             job.cancel()
             return@withLock CapabilityResult.Unavailable(code(it))
         }
-        if (!bind(id, workspace, generation, transport, tools)) {
+        val failure = bind(id, workspace, generation, transport, tools)
+        if (failure != null) {
             job.cancel()
-            return@withLock CapabilityResult.Unavailable("ide_capability_bind_failed")
+            return@withLock CapabilityResult.Unavailable(failure)
         }
         val old = leases.put(id, Lease(workspace, generation, tools, job, epoch))
         old?.job?.cancel()
@@ -103,9 +105,9 @@ class CsCloudMcpBridge(
 
     private suspend fun releaseLocked(id: String) { leases.remove(id)?.let { lease -> lease.job.cancel(); clear(id, lease.generation, lease.workspace) } }
 
-    private suspend fun bind(id: String, workspace: String, generation: String, transport: IdeMcpTransport, tools: Set<String>): Boolean = withContext(Dispatchers.IO) {
-        val base = endpoint()?.base ?: return@withContext false
-        val http = client() ?: return@withContext false
+    private suspend fun bind(id: String, workspace: String, generation: String, transport: IdeMcpTransport, tools: Set<String>): String? = withContext(Dispatchers.IO) {
+        val base = endpoint()?.base ?: return@withContext "ide_capability_bind_failed"
+        val http = client() ?: return@withContext "ide_capability_bind_failed"
         val spec = IdeMcpCapabilitySpec(
             generation = generation,
             workspace = workspace,
@@ -115,7 +117,13 @@ class CsCloudMcpBridge(
         val url = base.toHttpUrl().newBuilder().addPathSegments("api/v1/conversations").addPathSegment(id).addPathSegments("capabilities/ide").build()
         val request = Request.Builder().url(url).header("X-Workspace-Directory", workspace)
             .put(json.encodeToString(spec).toRequestBody("application/json".toMediaType())).build()
-        runCatching { http.newCall(request).execute().use { it.isSuccessful } }.getOrDefault(false)
+        runCatching { http.newCall(request).execute().close() }.fold(
+            onSuccess = { null },
+            onFailure = {
+                log.warn("IDE MCP bind failed conversation=${hash(id)} generation=${hash(generation)}", it)
+                capabilityBindReason(it)
+            },
+        )
     }
 
     private suspend fun supported(): Boolean = withContext(Dispatchers.IO) {
@@ -149,4 +157,11 @@ class CsCloudMcpBridge(
     private fun canonical(value: String): String? = runCatching { Path.of(value).toRealPath().toString() }.getOrElse { runCatching { Path.of(value).toAbsolutePath().normalize().toString() }.getOrNull() }
     private fun code(error: Throwable) = error.message?.takeIf { it.matches(Regex("[a-z_]+")) } ?: "mcp_listener_failed"
     private fun hash(value: String) = MessageDigest.getInstance("SHA-256").digest(value.toByteArray()).take(6).joinToString("") { "%02x".format(it) }
+}
+
+internal fun capabilityBindReason(error: Throwable): String {
+    if (error !is CsCloudRequestException) return "ide_capability_bind_failed"
+    if (error.code != "capability_bind_failed") return "ide_capability_bind_failed"
+    if (!Regex("""\bHTTP 404\b""").containsMatchIn(error.message)) return "ide_capability_bind_failed"
+    return "ide_capability_unsupported"
 }
