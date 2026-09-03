@@ -1,6 +1,5 @@
 package ai.kilocode.client.session.ui
 
-import ai.kilocode.client.plugin.KiloBundle
 import ai.kilocode.client.session.controller.SessionController
 import ai.kilocode.client.session.controller.SessionControllerEvent
 import ai.kilocode.client.session.controller.SessionControllerTestBase
@@ -39,16 +38,12 @@ class ConnectionPanelTest : SessionControllerTestBase() {
         assertFalse(panel.retryVisible())
     }
 
-    fun `test downloading hides retry and details`() {
+    fun `test downloading entry is hidden and panel stays invisible`() {
         edt {
             panel.onEvent(SessionControllerEvent.ConnectionChanged.ShowDownloading(42, "1.2.3", "darwin-arm64"))
         }
 
-        assertTrue(panel.isVisible)
-        assertEquals(KiloBundle.message("session.connection.downloading.version", "1.2.3", "darwin-arm64", 42), panel.summaryText())
-        assertEquals("", panel.detailsText())
-        assertFalse(panel.toggleVisible())
-        assertFalse(panel.detailsVisible())
+        assertFalse(panel.isVisible)
         assertFalse(panel.retryVisible())
     }
 

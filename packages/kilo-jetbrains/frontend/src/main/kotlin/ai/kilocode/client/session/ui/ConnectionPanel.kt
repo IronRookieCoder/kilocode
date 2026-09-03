@@ -129,7 +129,9 @@ class ConnectionPanel(
 
             is SessionControllerEvent.ConnectionChanged.ShowConnecting -> showConnecting()
 
-            is SessionControllerEvent.ConnectionChanged.ShowDownloading -> showDownloading(event.percent, event.version, event.platform)
+            // Costrict (B2): download progress entry hidden — event class, banner method and
+            // bundle keys stay for restore.
+            is SessionControllerEvent.ConnectionChanged.ShowDownloading -> Unit
 
             is SessionControllerEvent.ConnectionChanged.ShowError -> {
                 showError(event.summary, event.detail, event.code)
