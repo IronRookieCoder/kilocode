@@ -23,14 +23,15 @@ import javax.swing.JComponent
 /**
  * Root settings entry under Settings -> Tools -> Costrict.
  *
- * Displays a brief description and a link to the User Profile child page.
+ * Constructs (but does not mount) a link to the User Profile child page — the entry is
+ * hidden; the link and its [UserProfileConfigurable.ID] navigation are kept for restore.
  * Child configurables are registered in XML (`kilo.jetbrains.frontend.xml`) as
  * `applicationConfigurable` entries with the appropriate `parentId` — that is the
  * single source of truth for the settings hierarchy. This class does NOT implement
  * [com.intellij.openapi.options.SearchableConfigurable.Parent] to avoid creating a
  * second `UserProfileConfigurable` instance alongside the one registered in XML.
  *
- * The link uses [UserProfileConfigurable.ID] to navigate via [Settings.find]/[Settings.select].
+ * All child links still navigate via [Settings.find]/[Settings.select] through the `open` helper.
  */
 class KiloSettingsConfigurable : SearchableConfigurable {
 

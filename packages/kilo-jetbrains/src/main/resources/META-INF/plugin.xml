@@ -6,7 +6,7 @@
     <vendor url="https://costrict.ai">Costrict</vendor>
 
     <description><![CDATA[
-        Costrict is an open-source AI coding agent that generates code from natural language,
+        CoStrict is an open-source AI coding agent that generates code from natural language,
         automates tasks, and runs terminal commands. An Agent Manager for parallel worktrees,
         MCP integrations, browser automation, and custom modes for planning, coding, and
         debugging. Supports multiple AI models including GLM.
