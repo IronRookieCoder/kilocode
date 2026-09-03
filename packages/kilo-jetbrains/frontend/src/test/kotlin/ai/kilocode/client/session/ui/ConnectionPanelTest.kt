@@ -278,7 +278,8 @@ class ConnectionPanelTest : SessionControllerTestBase() {
 
         assertTrue(guide.isVisible)
         assertTrue(guide.guideVisible())
-        assertEquals(KiloBundle.message("csCloud.error.csc_not_installed.title"), guide.guideTitleText())
+        // The banner summary already shows csCloud.error.<code>.title, so the card must not repeat it.
+        assertEquals("", guide.guideTitleText())
         assertEquals(KiloBundle.message("csCloud.guide.installCsc"), guide.guideActionText())
         assertEquals(KiloBundle.message("csCloud.guide.docs"), guide.guideDocsText())
         assertTrue(guide.guideDocsVisible())
@@ -405,6 +406,24 @@ class ConnectionPanelTest : SessionControllerTestBase() {
         assertFalse(banner.detailsVisible())
         assertTrue(banner.guideVisible())
         assertTrue(banner.preferredSize.height > plain)
+    }
+
+    fun `test guide card is laid out after the banner relayouts`() {
+        val banner = ConnectionPanel(parent, controller)
+        edt {
+            banner.onEvent(SessionControllerEvent.ConnectionChanged.ShowError(
+                KiloBundle.message("csCloud.error.daemon_down.title"),
+                null,
+                code = ConnectionErrorCode.DAEMON_DOWN,
+            ))
+            banner.size = Dimension(480, 600)
+            banner.doLayout()
+        }
+
+        // The card reached the bottom (SOUTH) region of the banner with real bounds.
+        assertTrue(banner.guideVisible())
+        assertTrue(banner.guideBounds().height > 0)
+        assertEquals(480, banner.guideBounds().width)
     }
 
     private fun lines(count: Int) = (1..count).joinToString("\n") { "line $it" }

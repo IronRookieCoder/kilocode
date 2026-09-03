@@ -109,7 +109,8 @@ class ConnectionPanel(
         isVisible = false
     }
 
-    private val guide = CsCloudGuideCard(browse = browse, runAction = runGuideAction).apply {
+    // The banner summary already shows csCloud.error.<code>.title, so the card adds only the fix.
+    private val guide = CsCloudGuideCard(browse = browse, runAction = runGuideAction, showTitle = false).apply {
         isOpaque = false
         border = JBUI.Borders.empty(UiStyle.Gap.sm(), UiStyle.Gap.lg(), UiStyle.Gap.sm(), 0)
     }
@@ -195,6 +196,9 @@ class ConnectionPanel(
         toggle.isVisible = this.detail != null
         guide.sync(code)
         renderDetails()
+        // A visibility flip (e.g. Connecting -> Error while details stay collapsed) needs its
+        // own layout pass — nothing else here necessarily adds or removes a component.
+        refresh()
     }
 
     private fun showWarning(text: String, detail: String?) {
@@ -207,6 +211,7 @@ class ConnectionPanel(
         toggle.isVisible = this.detail != null
         guide.sync(null)
         renderDetails()
+        refresh()
     }
 
     private fun renderDetails() {
@@ -378,6 +383,8 @@ class ConnectionPanel(
     internal fun hasSeparator() = border != null
 
     internal fun guideVisible() = guide.isVisible
+
+    internal fun guideBounds() = guide.bounds
 
     internal fun guideTitleText() = guide.guideTitle()
 

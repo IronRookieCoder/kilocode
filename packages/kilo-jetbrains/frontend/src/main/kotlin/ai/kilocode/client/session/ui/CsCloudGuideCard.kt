@@ -45,11 +45,13 @@ internal fun runRegisteredAction(id: String, source: Component? = null) {
  * as a button, and — only when `csc` is missing — a link to the installation docs.
  *
  * Shared by [ConnectionPanel] and [EmptySessionPanel] so both failure surfaces answer the
- * same failure code with the same fix.
+ * same failure code with the same fix. Hosts that already show the code's title themselves
+ * (the connection banner) pass `showTitle = false` so the sentence is not rendered twice.
  */
 internal class CsCloudGuideCard(
     private val browse: (String) -> Unit = BrowserUtil::browse,
     private val centered: Boolean = false,
+    private val showTitle: Boolean = true,
     /** Overrides the default "run the registered IDE action" dispatch (tests). */
     private val runAction: ((String) -> Unit)? = null,
 ) : BorderLayoutPanel() {
@@ -76,7 +78,7 @@ internal class CsCloudGuideCard(
         layout = BorderLayout(0, UiStyle.Gap.sm())
         button.addActionListener { actionId?.let(dispatch) }
         val row: JComponent = Stack.horizontal(gap = UiStyle.Gap.md()).next(button).next(docs)
-        add(title, BorderLayout.NORTH)
+        if (showTitle) add(title, BorderLayout.NORTH)
         add(if (centered) Centerizer(row, Centerizer.TYPE.HORIZONTAL) else row, BorderLayout.CENTER)
         isVisible = false
     }
@@ -90,14 +92,14 @@ internal class CsCloudGuideCard(
         val key = titleKey(code)
         if (key == null) {
             actionId = null
-            title.text = ""
+            if (showTitle) title.text = ""
             button.text = ""
             docs.isVisible = false
             isVisible = false
             return
         }
         val failure = requireNotNull(code)
-        title.text = KiloBundle.message(key)
+        if (showTitle) title.text = KiloBundle.message(key)
         button.text = buttonLabel(failure)
         docs.isVisible = failure == ConnectionErrorCode.CSC_NOT_INSTALLED
         actionId = fixActionId(failure)

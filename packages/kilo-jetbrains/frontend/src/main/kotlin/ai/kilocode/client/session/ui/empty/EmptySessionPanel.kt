@@ -163,8 +163,15 @@ class EmptySessionPanel(
             is SessionControllerEvent.ConnectionChanged.ShowDownloading,
             is SessionControllerEvent.ConnectionChanged.ShowWarning -> guide.sync(null)
 
-            else -> Unit
+            else -> return
         }
+        // A child visibility change alone does not schedule a layout pass.
+        refresh()
+    }
+
+    private fun refresh() {
+        revalidate()
+        repaint()
     }
 
     internal fun recentCount() = recent.count()
