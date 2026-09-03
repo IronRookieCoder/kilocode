@@ -1,6 +1,7 @@
 package ai.kilocode.client.session.ui.empty
 
 import ai.kilocode.client.plugin.KiloBundle
+import ai.kilocode.client.ui.CostrictLinks
 import ai.kilocode.client.ui.UiStyle
 import ai.kilocode.client.ui.layout.HAlign
 import ai.kilocode.client.ui.layout.Stack
@@ -11,7 +12,6 @@ import com.intellij.openapi.Disposable
 import com.intellij.openapi.ui.popup.Balloon
 import com.intellij.openapi.ui.popup.JBPopupFactory
 import com.intellij.openapi.util.Disposer
-import com.intellij.openapi.util.IconLoader
 import com.intellij.ui.awt.RelativePoint
 import com.intellij.ui.components.JBLabel
 import com.intellij.util.concurrency.annotations.RequiresEdt
@@ -20,8 +20,6 @@ import com.intellij.util.ui.UIUtil
 import com.intellij.xml.util.XmlStringUtil
 import java.awt.Cursor
 import java.awt.Point
-import java.awt.event.MouseAdapter
-import java.awt.event.MouseEvent
 import javax.swing.JButton
 import javax.swing.JComponent
 
@@ -83,26 +81,23 @@ internal class EmptySessionFeedback(
         fun content(open: (String) -> Unit): JComponent {
             val logo = JBLabel(BrandLogoIcon.at(BrandLogoIcon.PANEL_SIZE)).apply {
                 horizontalAlignment = JBLabel.CENTER
-                cursor = Cursor.getPredefinedCursor(Cursor.HAND_CURSOR)
-                addMouseListener(object : MouseAdapter() {
-                    override fun mouseClicked(e: MouseEvent) {
-                        open(KILO_URL)
-                    }
-                })
             }
             val msg = JBLabel(messageHtml()).apply {
                 foreground = UIUtil.getLabelForeground()
                 horizontalAlignment = JBLabel.CENTER
             }
             val actions = Stack.vertical(gap = UiStyle.Gap.sm())
+                .next(ActionButton(KiloBundle.message("feedback.dialog.issue"), AllIcons.Ide.Feedback) {
+                    open(CostrictLinks.FEEDBACK)
+                }.align(HAlign.CENTER, VAlign.CENTER))
                 .next(ActionButton(KiloBundle.message("feedback.dialog.github"), AllIcons.Vcs.Vendors.Github) {
-                    open(GITHUB_ISSUES_URL)
+                    open(CostrictLinks.ISSUES)
                 }.align(HAlign.CENTER, VAlign.CENTER))
-                .next(ActionButton(KiloBundle.message("feedback.dialog.discord"), DISCORD_ICON) {
-                    open(DISCORD_URL)
+                .next(ActionButton(KiloBundle.message("feedback.dialog.docs"), AllIcons.Actions.Help) {
+                    open(CostrictLinks.DOCS)
                 }.align(HAlign.CENTER, VAlign.CENTER))
-                .next(ActionButton(KiloBundle.message("feedback.dialog.support"), AllIcons.Actions.Help) {
-                    open(SUPPORT_URL)
+                .next(ActionButton(KiloBundle.message("feedback.dialog.community"), AllIcons.Actions.Download) {
+                    open(CostrictLinks.DOWNLOAD)
                 }.align(HAlign.CENTER, VAlign.CENTER))
 
             return Stack.vertical(gap = UiStyle.Gap.lg())
@@ -114,7 +109,7 @@ internal class EmptySessionFeedback(
                 .fill(UiStyle.Gap.xs())
         }
 
-        fun urls() = listOf(GITHUB_ISSUES_URL, DISCORD_URL, SUPPORT_URL)
+        fun urls() = listOf(CostrictLinks.FEEDBACK, CostrictLinks.ISSUES, CostrictLinks.DOCS, CostrictLinks.DOWNLOAD)
 
         private fun messageHtml() = XmlStringUtil.wrapInHtml(
             "<div style='text-align:center'>${XmlStringUtil.escapeString(KiloBundle.message("feedback.dialog.message"))}</div>"
@@ -123,11 +118,5 @@ internal class EmptySessionFeedback(
         private fun buttonHtml() = XmlStringUtil.wrapInHtml(
             XmlStringUtil.escapeString(KiloBundle.message("feedback.button"))
         )
-
-        private const val KILO_URL = "https://kilocode.ai"
-        private const val GITHUB_ISSUES_URL = "https://github.com/Kilo-Org/kilocode/issues/new/choose"
-        private const val DISCORD_URL = "https://kilo.ai/discord"
-        private const val SUPPORT_URL = "https://kilo.ai/support"
-        private val DISCORD_ICON = IconLoader.getIcon("/icons/discord.svg", EmptySessionPanel::class.java)
     }
 }

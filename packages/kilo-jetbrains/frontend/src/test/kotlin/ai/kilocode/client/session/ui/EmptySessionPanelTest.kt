@@ -216,9 +216,10 @@ class EmptySessionPanelTest : BasePlatformTestCase() {
 
         assertEquals(
             listOf(
+                KiloBundle.message("feedback.dialog.issue"),
                 KiloBundle.message("feedback.dialog.github"),
-                KiloBundle.message("feedback.dialog.discord"),
-                KiloBundle.message("feedback.dialog.support"),
+                KiloBundle.message("feedback.dialog.docs"),
+                KiloBundle.message("feedback.dialog.community"),
             ),
             buttons.map { it.text },
         )
@@ -228,14 +229,14 @@ class EmptySessionPanelTest : BasePlatformTestCase() {
         assertEquals(panel.feedbackUrls(), opened)
     }
 
-    fun `test feedback discord action has icon`() {
+    fun `test feedback community action has icon`() {
         val panel = panel()
         val content = panel.feedbackContent()
-        val discord = UIUtil.uiTraverser(content)
+        val community = UIUtil.uiTraverser(content)
             .filter(JButton::class.java)
-            .first { it.text == KiloBundle.message("feedback.dialog.discord") }
+            .first { it.text == KiloBundle.message("feedback.dialog.community") }
 
-        assertNotNull(discord.icon)
+        assertNotNull(community.icon)
     }
 
     fun `test renderer aligns title center and time east`() {
