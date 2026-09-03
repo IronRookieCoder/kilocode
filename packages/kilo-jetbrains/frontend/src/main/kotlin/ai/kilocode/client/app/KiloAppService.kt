@@ -31,6 +31,7 @@ import com.intellij.openapi.components.service
 import com.intellij.openapi.project.ProjectManager
 import fleet.rpc.client.durable
 import java.util.concurrent.atomic.AtomicBoolean
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -48,6 +49,7 @@ import kotlinx.coroutines.launch
 class KiloAppService internal constructor(
     private val cs: CoroutineScope,
     private val rpc: KiloAppRpcApi?,
+    private val csCloudTasks: CsCloudTaskRunner = BackgroundableCsCloudTask(cs),
 ) {
     /** Platform constructor — resolves RPC from the service container. */
     constructor(cs: CoroutineScope) : this(cs, null)
@@ -185,9 +187,12 @@ class KiloAppService internal constructor(
 
     /** Run `csc cloud start` on the backend and notify the user of the outcome. */
     fun startCsCloudAsync() {
-        if (!csCloudStarting.compareAndSet(false, true)) return
+        if (!csCloudStarting.compareAndSet(false, true)) {
+            KiloNotifications.info(KiloBundle.message("csCloud.start.busy"))
+            return
+        }
         LOG.info("startCsCloudAsync: launching csc cloud start")
-        cs.launch {
+        csCloudTasks.queue(KiloBundle.message("csCloud.progress.start")) {
             try {
                 val result = call { startCsCloud() }
                 if (result.ok) {
@@ -205,6 +210,9 @@ class KiloAppService internal constructor(
                 } else {
                     KiloNotifications.error(KiloBundle.message("csCloud.start.failed"), result.message)
                 }
+            } catch (e: CancellationException) {
+                LOG.info("startCsCloudAsync cancelled")
+                throw e
             } catch (e: Exception) {
                 LOG.warn("startCsCloudAsync failed", e)
                 KiloNotifications.error(KiloBundle.message("csCloud.start.failed"), e.message)
@@ -218,11 +226,13 @@ class KiloAppService internal constructor(
 
     /** Install the csc CLI via npm on the backend, then start cs-cloud. */
     fun installCscAsync() {
-        if (!csCloudInstalling.compareAndSet(false, true)) return
+        if (!csCloudInstalling.compareAndSet(false, true)) {
+            KiloNotifications.info(KiloBundle.message("csCloud.install.busy"))
+            return
+        }
         LOG.info("installCscAsync: launching csc install")
-        cs.launch {
+        csCloudTasks.queue(KiloBundle.message("csCloud.progress.install")) {
             try {
-                KiloNotifications.info(KiloBundle.message("csCloud.install.start"))
                 val result = call { installCsc() }
                 if (result.ok) {
                     KiloNotifications.info(KiloBundle.message("csCloud.install.ok"))
@@ -245,6 +255,9 @@ class KiloAppService internal constructor(
                 } else {
                     KiloNotifications.error(KiloBundle.message("csCloud.install.failed"), result.message)
                 }
+            } catch (e: CancellationException) {
+                LOG.info("installCscAsync cancelled")
+                throw e
             } catch (e: Exception) {
                 LOG.warn("installCscAsync failed", e)
                 KiloNotifications.error(KiloBundle.message("csCloud.install.failed"), e.message)
