@@ -10,6 +10,7 @@ import ai.kilocode.backend.testing.MockCliServer
 import ai.kilocode.backend.testing.TestLog
 import ai.kilocode.jetbrains.api.client.DefaultApi
 import ai.kilocode.log.KiloLog
+import ai.kilocode.rpc.ConnectionErrorCode
 import ai.kilocode.rpc.dto.AgentConfigPatchDto
 import ai.kilocode.rpc.dto.CompactionPatchDto
 import ai.kilocode.rpc.dto.ConfigPatchDto
@@ -41,6 +42,10 @@ import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import kotlin.test.assertContains
+
+/** Mirrors the backend's auth-required diagnostic (private in main sources). */
+private const val AUTH_REQUIRED =
+    "CoStrict sign-in is missing or has expired - click Sign in to finish the csc auth login browser sign-in; cs-cloud re-reads auth.json on every request, so no restart is needed"
 
 class KiloBackendAppServiceTest {
 
@@ -157,8 +162,9 @@ class KiloBackendAppServiceTest {
         val cases = listOf(
             ConnectionState.Error("missing URL", "cs-cloud server URL was not found") to "csc is not installed or cs-cloud has not been started - install csc (npm install -g @costrict/csc) and run `csc cloud start` to download and start cs-cloud automatically",
             ConnectionState.Error("stopped", "Connection refused") to "cs-cloud daemon is not running - start it with `csc cloud start` (or use the Start action in the retry menu)",
-            ConnectionState.Error("missing key", "cs-cloud API key was not found") to "cs-cloud API key was not found - run `csc cloud start` or set CS_BRIDGE_API_KEY / CS_CLOUD_API_KEY",
-            ConnectionState.Error("unauthorized", "unauthorized: invalid credential (HTTP 401)") to "cs-cloud API key is invalid",
+            ConnectionState.Error("missing key", "cs-cloud API key was not found") to AUTH_REQUIRED,
+            ConnectionState.Error("unauthorized", "unauthorized: invalid credential (HTTP 401)") to AUTH_REQUIRED,
+            ConnectionState.Error("unauthorized", "unauthorized", code = ConnectionErrorCode.UNAUTHORIZED) to AUTH_REQUIRED,
             ConnectionState.Error("unavailable", "unavailable: Service Unavailable (HTTP 503)") to "csc agent is unavailable - check that csc is installed and `csc cloud start` finished starting the agent",
         )
         cases.forEach { (failure, detail) ->

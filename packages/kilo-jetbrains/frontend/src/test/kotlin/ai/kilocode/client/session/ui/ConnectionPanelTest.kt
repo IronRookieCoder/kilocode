@@ -96,7 +96,7 @@ class ConnectionPanelTest : SessionControllerTestBase() {
         assertTrue(panel.detailsVisible())
     }
 
-    fun `test recovery menu offers cs-cloud actions only for cs-cloud failures`() {
+    fun `test recovery menu maps each failure code to its fix`() {
         edt {
             panel.onEvent(SessionControllerEvent.ConnectionChanged.ShowError("CLI startup failed", null))
         }
@@ -111,10 +111,7 @@ class ConnectionPanelTest : SessionControllerTestBase() {
             ))
         }
 
-        assertEquals(
-            listOf("Kilo.Restart", "Kilo.Reinstall", "Kilo.StartCsCloud", "Kilo.InstallCsc"),
-            panel.recoveryActionIds(),
-        )
+        assertEquals(listOf("Kilo.InstallCsc"), panel.recoveryActionIds())
 
         edt {
             panel.onEvent(SessionControllerEvent.ConnectionChanged.ShowError(
@@ -124,23 +121,37 @@ class ConnectionPanelTest : SessionControllerTestBase() {
             ))
         }
 
-        assertEquals(
-            listOf("Kilo.Restart", "Kilo.Reinstall", "Kilo.StartCsCloud"),
-            panel.recoveryActionIds(),
-        )
+        assertEquals(listOf("Kilo.StartCsCloud"), panel.recoveryActionIds())
 
         edt {
             panel.onEvent(SessionControllerEvent.ConnectionChanged.ShowError(
                 "Connection failed",
-                "cs-cloud API key is invalid",
+                "cs-cloud rejected the current credentials",
                 code = ConnectionErrorCode.UNAUTHORIZED,
             ))
         }
 
-        assertEquals(
-            listOf("Kilo.Restart", "Kilo.Reinstall", "Kilo.StartCsCloud"),
-            panel.recoveryActionIds(),
-        )
+        assertEquals(listOf("Kilo.SignInCsCloud"), panel.recoveryActionIds())
+
+        edt {
+            panel.onEvent(SessionControllerEvent.ConnectionChanged.ShowError(
+                "Connection failed",
+                "could not run npm: not found",
+                code = ConnectionErrorCode.NPM_NOT_FOUND,
+            ))
+        }
+
+        assertEquals(listOf("Kilo.InstallCsc"), panel.recoveryActionIds())
+
+        edt {
+            panel.onEvent(SessionControllerEvent.ConnectionChanged.ShowError(
+                "Workspace failed",
+                "workspace did not start",
+                code = "workspace",
+            ))
+        }
+
+        assertEquals(listOf("Kilo.Restart", "Kilo.Reinstall"), panel.recoveryActionIds())
     }
 
     fun `test workspace error shows retry without details`() {

@@ -268,15 +268,13 @@ class ConnectionPanel(
     }
 
     /** Recovery actions offered for the current failure, newest first. */
-    internal fun recoveryActionIds(): List<String> = buildList {
-        add("Kilo.Restart")
-        add("Kilo.Reinstall")
-        if (code == ConnectionErrorCode.CSC_NOT_INSTALLED || code == ConnectionErrorCode.DAEMON_DOWN || code == ConnectionErrorCode.UNAUTHORIZED) {
-            add("Kilo.StartCsCloud")
-        }
-        if (code == ConnectionErrorCode.CSC_NOT_INSTALLED) {
-            add("Kilo.InstallCsc")
-        }
+    internal fun recoveryActionIds(): List<String> = when (code) {
+        // Start cs-cloud cannot succeed without csc, so install it first.
+        ConnectionErrorCode.CSC_NOT_INSTALLED, ConnectionErrorCode.NPM_NOT_FOUND -> listOf("Kilo.InstallCsc")
+        ConnectionErrorCode.DAEMON_DOWN -> listOf("Kilo.StartCsCloud")
+        ConnectionErrorCode.UNAUTHORIZED -> listOf("Kilo.SignInCsCloud")
+        // Legacy Core fallback chain and codes without a dedicated fix.
+        else -> listOf("Kilo.Restart", "Kilo.Reinstall")
     }
 
     override fun dispose() {
