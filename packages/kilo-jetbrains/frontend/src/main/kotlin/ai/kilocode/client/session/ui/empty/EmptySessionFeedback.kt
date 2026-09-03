@@ -87,9 +87,6 @@ internal class EmptySessionFeedback(
                 horizontalAlignment = JBLabel.CENTER
             }
             val actions = Stack.vertical(gap = UiStyle.Gap.sm())
-                .next(ActionButton(KiloBundle.message("feedback.dialog.issue"), AllIcons.Ide.Feedback) {
-                    open(CostrictLinks.FEEDBACK)
-                }.align(HAlign.CENTER, VAlign.CENTER))
                 .next(ActionButton(KiloBundle.message("feedback.dialog.github"), AllIcons.Vcs.Vendors.Github) {
                     open(CostrictLinks.ISSUES)
                 }.align(HAlign.CENTER, VAlign.CENTER))
@@ -109,7 +106,7 @@ internal class EmptySessionFeedback(
                 .fill(UiStyle.Gap.xs())
         }
 
-        fun urls() = listOf(CostrictLinks.FEEDBACK, CostrictLinks.ISSUES, CostrictLinks.DOCS, CostrictLinks.DOWNLOAD)
+        fun urls() = listOf(CostrictLinks.ISSUES, CostrictLinks.DOCS, CostrictLinks.DOWNLOAD)
 
         private fun messageHtml() = XmlStringUtil.wrapInHtml(
             "<div style='text-align:center'>${XmlStringUtil.escapeString(KiloBundle.message("feedback.dialog.message"))}</div>"

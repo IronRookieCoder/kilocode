@@ -216,7 +216,6 @@ class EmptySessionPanelTest : BasePlatformTestCase() {
 
         assertEquals(
             listOf(
-                KiloBundle.message("feedback.dialog.issue"),
                 KiloBundle.message("feedback.dialog.github"),
                 KiloBundle.message("feedback.dialog.docs"),
                 KiloBundle.message("feedback.dialog.community"),
