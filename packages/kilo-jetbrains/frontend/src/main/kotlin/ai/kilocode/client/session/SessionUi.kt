@@ -227,10 +227,12 @@ class SessionUi(
     private var refreshJob: Job? = null
     private var openJob: Job? = null
     private var disposed = false
+    private val setupNotice = CsCloudSetupNotifier(project)
 
     init {
         Disposer.register(this, popup)
         buildUi()
+        controller.addListener(this, setupNotice)
         Disposer.register(this, selection)
         applyStyle(style)
         scroll.show(body(controller.model.state))

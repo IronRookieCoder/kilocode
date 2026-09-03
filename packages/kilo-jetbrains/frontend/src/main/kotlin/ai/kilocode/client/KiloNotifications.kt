@@ -44,13 +44,26 @@ object KiloNotifications {
     }
 
     fun suggestion(project: Project?, title: String, content: String?, actionLabel: String, action: () -> Unit) {
+        suggestion(project, title, content, actionLabel, action, KiloBundle.message("common.dont.show.again")) {}
+    }
+
+    /** Suggestion with a primary action plus a second one, e.g. a persistent "Don't show again". */
+    fun suggestion(
+        project: Project?,
+        title: String,
+        content: String?,
+        actionLabel: String,
+        action: () -> Unit,
+        dismissLabel: String,
+        onDismiss: () -> Unit,
+    ) {
         val notification = NotificationGroupManager.getInstance()
             .getNotificationGroup(GROUP)
             ?.createNotification(title, content ?: "", NotificationType.INFORMATION)
             ?: Notification(GROUP, title, content ?: "", NotificationType.INFORMATION)
         notification.setSuggestionType(true)
         notification.addAction(NotificationAction.createSimpleExpiring(actionLabel) { action() })
-        notification.addAction(NotificationAction.createSimpleExpiring(KiloBundle.message("common.dont.show.again")) {})
+        notification.addAction(NotificationAction.createSimpleExpiring(dismissLabel) { onDismiss() })
         notification.notify(project)
     }
 }

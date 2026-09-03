@@ -9,12 +9,14 @@ import ai.kilocode.client.session.SessionActivityKind
 import ai.kilocode.client.session.history.HistoryTime
 import ai.kilocode.client.session.history.LocalHistoryItem
 import ai.kilocode.client.session.controller.SessionController
+import ai.kilocode.client.session.controller.SessionControllerEvent
 import ai.kilocode.client.session.ui.empty.EmptySessionPanel
 import ai.kilocode.client.session.ui.style.SessionUiStyle
 import ai.kilocode.client.ui.FilledBadgeIcon
 import ai.kilocode.client.testing.FakeAppRpcApi
 import ai.kilocode.client.testing.FakeSessionRpcApi
 import ai.kilocode.client.testing.FakeWorkspaceRpcApi
+import ai.kilocode.rpc.ConnectionErrorCode
 import ai.kilocode.rpc.dto.KiloAppStateDto
 import ai.kilocode.rpc.dto.KiloAppStatusDto
 import ai.kilocode.rpc.dto.KiloWorkspaceStateDto
@@ -352,6 +354,110 @@ class EmptySessionPanelTest : BasePlatformTestCase() {
         assertNull(badgeText(cell))
     }
 
+    fun `test empty state guides the user to install csc`() {
+        val clicked = mutableListOf<String>()
+        val browsed = mutableListOf<String>()
+        val panel = panel(runGuideAction = { clicked.add(it) }, browse = { browsed.add(it) })
+
+        panel.onEvent(SessionControllerEvent.ConnectionChanged.ShowError(
+            KiloBundle.message("csCloud.error.csc_not_installed.title"),
+            "csc is not installed",
+            code = ConnectionErrorCode.CSC_NOT_INSTALLED,
+        ))
+
+        assertTrue(panel.guideVisible())
+        assertEquals(KiloBundle.message("csCloud.error.csc_not_installed.title"), panel.guideTitleText())
+        assertEquals(KiloBundle.message("csCloud.guide.installCsc"), panel.guideActionText())
+        assertTrue(panel.guideDocsVisible())
+
+        panel.clickGuideAction()
+        panel.clickGuideDocs()
+
+        assertEquals(listOf("Kilo.InstallCsc"), clicked)
+        assertEquals(listOf(CSC_INSTALL_DOCS_URL), browsed)
+    }
+
+    fun `test empty state guide maps each failure code to its fix`() {
+        val clicked = mutableListOf<String>()
+        val panel = panel(runGuideAction = { clicked.add(it) })
+
+        panel.onEvent(SessionControllerEvent.ConnectionChanged.ShowError(
+            KiloBundle.message("csCloud.error.daemon_down.title"),
+            "connection refused",
+            code = ConnectionErrorCode.DAEMON_DOWN,
+        ))
+        assertEquals(KiloBundle.message("csCloud.guide.startCsCloud"), panel.guideActionText())
+        assertFalse(panel.guideDocsVisible())
+
+        panel.clickGuideAction()
+
+        panel.onEvent(SessionControllerEvent.ConnectionChanged.ShowError(
+            KiloBundle.message("csCloud.error.unauthorized.title"),
+            "cs-cloud rejected the current credentials",
+            code = ConnectionErrorCode.UNAUTHORIZED,
+        ))
+        assertEquals(KiloBundle.message("csCloud.guide.signIn"), panel.guideActionText())
+
+        panel.clickGuideAction()
+
+        assertEquals(listOf("Kilo.StartCsCloud", "Kilo.SignInCsCloud"), clicked)
+    }
+
+    fun `test empty state guide stays hidden without a fixable cs-cloud failure`() {
+        val panel = panel()
+
+        panel.onEvent(SessionControllerEvent.ConnectionChanged.ShowError("Connection failed", null))
+        panel.onEvent(SessionControllerEvent.ConnectionChanged.ShowError(
+            "Connection failed",
+            "could not run npm: not found",
+            code = ConnectionErrorCode.NPM_NOT_FOUND,
+        ))
+        panel.onEvent(SessionControllerEvent.ConnectionChanged.ShowError(
+            "Workspace failed",
+            "workspace did not start",
+            code = "workspace",
+        ))
+        panel.onEvent(SessionControllerEvent.ConnectionChanged.ShowWarning("Configuration warnings", null))
+
+        assertFalse(panel.guideVisible())
+    }
+
+    fun `test empty state guide resets once the connection recovers`() {
+        val panel = panel()
+
+        panel.onEvent(SessionControllerEvent.ConnectionChanged.ShowError(
+            KiloBundle.message("csCloud.error.daemon_down.title"),
+            null,
+            code = ConnectionErrorCode.DAEMON_DOWN,
+        ))
+        assertTrue(panel.guideVisible())
+
+        panel.onEvent(SessionControllerEvent.ConnectionChanged.ShowConnecting)
+        assertFalse(panel.guideVisible())
+
+        panel.onEvent(SessionControllerEvent.ConnectionChanged.ShowError(
+            KiloBundle.message("csCloud.error.daemon_down.title"),
+            null,
+            code = ConnectionErrorCode.DAEMON_DOWN,
+        ))
+        assertTrue(panel.guideVisible())
+
+        panel.onEvent(SessionControllerEvent.ConnectionChanged.Hide)
+        assertFalse(panel.guideVisible())
+    }
+
+    fun `test minimal mode never shows the guide`() {
+        val panel = panel(minimal = true)
+
+        panel.onEvent(SessionControllerEvent.ConnectionChanged.ShowError(
+            KiloBundle.message("csCloud.error.csc_not_installed.title"),
+            null,
+            code = ConnectionErrorCode.CSC_NOT_INSTALLED,
+        ))
+
+        assertFalse(panel.guideVisible())
+    }
+
     fun `test timestamp normalization handles seconds and milliseconds`() {
         assertEquals(1_700_000_000_000L, HistoryTime.millis(LocalHistoryItem(session("ses_1", 1_700_000_000))))
         assertEquals(1_700_000_000_000L, HistoryTime.millis(LocalHistoryItem(session("ses_1", 1_700_000_000_000))))
@@ -372,8 +478,20 @@ class EmptySessionPanelTest : BasePlatformTestCase() {
         history: () -> Unit = {},
         activity: () -> Map<String, SessionActivityKind> = { sessions.activitySnapshot() },
         titles: () -> Map<String, String> = { emptyMap() },
+        browse: (String) -> Unit = {},
+        runGuideAction: (String) -> Unit = {},
         minimal: Boolean = false,
-    ) = EmptySessionPanel(testRootDisposable, controller, recents, history, activity, titles, minimal = minimal)
+    ) = EmptySessionPanel(
+        testRootDisposable,
+        controller,
+        recents,
+        history,
+        activity,
+        titles,
+        browse = browse,
+        runGuideAction = runGuideAction,
+        minimal = minimal,
+    )
 
     private fun flush() = runBlocking {
         delay(100)
