@@ -27,6 +27,8 @@ data class ModelDto(
     val autoRouting: ModelAutoRoutingDto? = null,
     val terminalBench: ModelTerminalBenchDto? = null,
     val mayTrainOnYourPrompts: Boolean = false,
+    val creditConsumption: Double? = null,
+    val creditDiscount: Double? = null,
 )
 
 @Serializable

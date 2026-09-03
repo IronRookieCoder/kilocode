@@ -561,6 +561,8 @@ class SessionUi(
                             reasoning = it.reasoning,
                             attachment = it.attachment,
                             mayTrainOnYourPrompts = it.mayTrainOnYourPrompts,
+                            creditConsumption = it.creditConsumption,
+                            creditDiscount = it.creditDiscount,
                         )
                     }
                     val selected =

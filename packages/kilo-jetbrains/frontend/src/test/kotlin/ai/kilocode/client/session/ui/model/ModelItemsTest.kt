@@ -40,6 +40,29 @@ class ModelItemsTest : BasePlatformTestCase() {
         assertTrue(gpt.attachment)
     }
 
+    fun `test carries billing rates onto the item`() {
+        val providers = ProvidersDto(
+            providers = listOf(
+                ProviderDto(
+                    "costrict", "Costrict",
+                    models = mapOf(
+                        "Auto" to ModelDto("Auto", "Auto", creditConsumption = 0.9, creditDiscount = 0.9),
+                        "Kimi-K3" to ModelDto("Kimi-K3", "Kimi K3", creditConsumption = 20.0),
+                    ),
+                ),
+            ),
+            connected = listOf("costrict"),
+            defaults = emptyMap(),
+        )
+
+        val auto = modelItems(providers).single { it.key == "costrict/Auto" }
+        assertEquals(0.9, auto.creditConsumption)
+        assertEquals(0.9, auto.creditDiscount)
+        val k3 = modelItems(providers).single { it.key == "costrict/Kimi-K3" }
+        assertEquals(20.0, k3.creditConsumption)
+        assertNull(k3.creditDiscount)
+    }
+
     fun `test null providers yields no items`() {
         assertTrue(modelItems(null).isEmpty())
     }

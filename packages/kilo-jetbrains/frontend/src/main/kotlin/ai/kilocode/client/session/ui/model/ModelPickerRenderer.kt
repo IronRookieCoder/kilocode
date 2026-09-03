@@ -73,6 +73,7 @@ internal class ModelPickerRenderer private constructor(
         val item = value.item
         if (item == null) {
             parts.title.append(value.emptyText, SimpleTextAttributes(SimpleTextAttributes.STYLE_BOLD, foreground))
+            credit = null
             parts.badgeLabel.isVisible = false
             parts.byokLabel.isVisible = false
             parts.warn.isVisible = false
@@ -86,6 +87,9 @@ internal class ModelPickerRenderer private constructor(
             parts.title.append(" ", SimpleTextAttributes(SimpleTextAttributes.STYLE_PLAIN, secondary))
         }
         parts.title.append(name.model, SimpleTextAttributes(SimpleTextAttributes.STYLE_BOLD, foreground))
+
+        credit = ModelText.creditLabel(item)
+        credit?.let { parts.title.append(" $it", SimpleTextAttributes(SimpleTextAttributes.STYLE_PLAIN, secondary)) }
 
         parts.warn.isVisible = ModelText.collectsData(item)
         parts.badgeLabel.isVisible = item.free && !item.byok
@@ -105,6 +109,8 @@ internal class ModelPickerRenderer private constructor(
 
     internal fun starIcon(): Icon? = parts.star.icon
 
+    internal fun creditText(): String? = credit
+
     internal fun badgeVisible(): Boolean = parts.badgeLabel.isVisible
 
     internal fun badgeText(): String = parts.badge.text
@@ -116,6 +122,8 @@ internal class ModelPickerRenderer private constructor(
     internal fun warningTooltip(): String? = parts.warn.toolTipText
 
     private class BadgeLabel(icon: Icon) : JBLabel(icon)
+
+    private var credit: String? = null
 
     private data class Parts(
         val title: SimpleColoredComponent,

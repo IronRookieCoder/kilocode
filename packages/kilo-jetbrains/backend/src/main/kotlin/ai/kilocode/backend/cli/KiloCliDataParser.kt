@@ -1474,6 +1474,8 @@ object KiloCliDataParser {
             autoRouting = model.autoRouting?.let { ModelAutoRoutingDto(it.models) },
             terminalBench = model.terminalBench?.let { ModelTerminalBenchDto(it.overallScore, it.avgAttemptCostUsd) },
             mayTrainOnYourPrompts = model.mayTrainOnYourPrompts,
+            creditConsumption = model.creditConsumption,
+            creditDiscount = model.creditDiscount,
         )
     }
 
@@ -1524,6 +1526,8 @@ object KiloCliDataParser {
             },
             terminalBench = parseTerminalBench(obj["terminalBench"]),
             mayTrainOnYourPrompts = obj.bool("mayTrainOnYourPrompts"),
+            creditConsumption = obj.num("creditConsumption"),
+            creditDiscount = obj.num("creditDiscount"),
         )
     }
 

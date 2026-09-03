@@ -774,6 +774,8 @@ data class ModelItem(
     val reasoning: Boolean = false,
     val attachment: Boolean = false,
     val mayTrainOnYourPrompts: Boolean = false,
+    val creditConsumption: Double? = null,
+    val creditDiscount: Double? = null,
 ) {
     val key: String get() = "$provider/$id"
 }

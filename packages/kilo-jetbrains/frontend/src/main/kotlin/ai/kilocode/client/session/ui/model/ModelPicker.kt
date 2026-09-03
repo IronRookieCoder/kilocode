@@ -15,6 +15,7 @@ import com.intellij.ide.util.PropertiesComponent
 import com.intellij.ui.CollectionListModel
 import com.intellij.util.ui.JBUI
 import com.intellij.xml.util.XmlStringUtil
+import kotlin.math.roundToLong
 import java.awt.Cursor
 import java.awt.event.MouseAdapter
 import java.awt.event.MouseEvent
@@ -50,6 +51,8 @@ class ModelPicker : PickerButton() {
         val reasoning: Boolean = false,
         val attachment: Boolean = false,
         val mayTrainOnYourPrompts: Boolean = false,
+        val creditConsumption: Double? = null,
+        val creditDiscount: Double? = null,
     ) {
         val key: String get() = "$provider/$id"
 
@@ -316,5 +319,21 @@ internal object ModelText {
     fun freeLabel(): String = KiloBundle.message("model.picker.free")
 
     fun collectsData(item: ModelPicker.Item): Boolean = item.mayTrainOnYourPrompts
+
+    /**
+     * Billing rate label following csc's rule: the Auto router shows its
+     * discount percentage, every other model shows its credit multiplier.
+     * Null when the daemon did not report rates for the model.
+     */
+    fun creditLabel(item: ModelPicker.Item): String? = when {
+        item.id == "Auto" && item.creditDiscount != null ->
+            KiloBundle.message("model.picker.creditDiscount", (item.creditDiscount * 100).roundToLong())
+        item.creditConsumption != null ->
+            KiloBundle.message("model.picker.creditRate", formatCredit(item.creditConsumption))
+        else -> null
+    }
+
+    private fun formatCredit(value: Double): String =
+        if (value == value.toLong().toDouble()) value.toLong().toString() else value.toString()
 
 }

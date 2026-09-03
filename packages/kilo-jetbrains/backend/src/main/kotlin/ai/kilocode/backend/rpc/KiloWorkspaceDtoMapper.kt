@@ -114,6 +114,8 @@ internal object KiloWorkspaceDtoMapper {
         autoRouting = m.autoRouting?.let { ModelAutoRoutingDto(it.models) },
         terminalBench = m.terminalBench?.let { ModelTerminalBenchDto(it.overallScore, it.avgAttemptCostUsd) },
         mayTrainOnYourPrompts = m.mayTrainOnYourPrompts,
+        creditConsumption = m.creditConsumption,
+        creditDiscount = m.creditDiscount,
     )
 
     private fun agent(a: AgentInfo) = AgentDto(

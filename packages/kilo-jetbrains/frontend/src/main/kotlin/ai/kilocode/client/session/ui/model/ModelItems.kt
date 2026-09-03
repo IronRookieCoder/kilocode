@@ -38,6 +38,8 @@ internal fun modelItems(providers: ProvidersDto?, includeSmall: Boolean = false)
                     reasoning = model.reasoning,
                     attachment = model.attachment,
                     mayTrainOnYourPrompts = model.mayTrainOnYourPrompts,
+                    creditConsumption = model.creditConsumption,
+                    creditDiscount = model.creditDiscount,
                 )
                 if (!includeSmall && ModelText.small(item)) return@mapNotNull null
                 item

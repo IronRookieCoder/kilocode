@@ -1692,6 +1692,30 @@ class KiloCliDataParserTest {
         }
 
         @Test
+        fun `parseProviders - maps model billing rates`() {
+            val raw = """{
+                "all": [{
+                    "id": "costrict", "name": "Costrict", "source": "api", "env": [], "options": {},
+                    "models": {
+                        "Auto": {"id": "Auto", "name": "Auto", "creditConsumption": 0.9, "creditDiscount": 0.9},
+                        "Kimi-K3": {"id": "Kimi-K3", "name": "Kimi K3", "creditConsumption": 20}
+                    }
+                }],
+                "default": {}, "connected": []
+            }"""
+
+            val provider = KiloCliDataParser.parseProviders(raw).providers[0]
+            val auto = provider.models["Auto"]
+            assertNotNull(auto)
+            assertEquals(0.9, auto.creditConsumption)
+            assertEquals(0.9, auto.creditDiscount)
+            val k3 = provider.models["Kimi-K3"]
+            assertNotNull(k3)
+            assertEquals(20.0, k3.creditConsumption)
+            assertNull(k3.creditDiscount)
+        }
+
+        @Test
         fun `parseProviders - maps model preview metadata`() {
             val raw = """{
                 "all": [{

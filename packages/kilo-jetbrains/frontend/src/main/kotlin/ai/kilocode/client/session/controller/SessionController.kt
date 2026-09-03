@@ -1099,6 +1099,8 @@ class SessionController(
                                         reasoning = info.reasoning,
                                         attachment = info.attachment,
                                         mayTrainOnYourPrompts = info.mayTrainOnYourPrompts,
+                                        creditConsumption = info.creditConsumption,
+                                        creditDiscount = info.creditDiscount,
                                     )
                                 }
                             }

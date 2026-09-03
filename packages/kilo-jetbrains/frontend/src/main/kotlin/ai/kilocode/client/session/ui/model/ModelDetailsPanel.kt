@@ -168,6 +168,7 @@ internal class ModelDetailsPanel(
                     item.outputPrice?.takeIf { it > 0.0 }?.let { add(KiloBundle.message("model.picker.details.output") to price(it)) }
                 }
             }
+            ModelText.creditLabel(item)?.let { add(KiloBundle.message("model.picker.details.creditRate") to it) }
             ctx?.let { add(KiloBundle.message("model.picker.details.context") to context(it)) }
         }
     }

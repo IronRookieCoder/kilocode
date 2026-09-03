@@ -41,6 +41,20 @@ class ModelPickerTest : BasePlatformTestCase() {
         assertTrue(ModelSearch.matches("clso", "Claude Sonnet"))
     }
 
+    fun `test credit label follows the csc display rule`() {
+        val auto = ModelPicker.Item("Auto", "Auto", "costrict", "Auto", creditDiscount = 0.9)
+        assertEquals("90% discount", ModelText.creditLabel(auto))
+
+        val k3 = ModelPicker.Item("Kimi-K3", "Kimi K3", "costrict", "Kimi K3", creditConsumption = 20.0)
+        assertEquals("20x credit", ModelText.creditLabel(k3))
+
+        val miniMax = ModelPicker.Item("MiniMax-M3", "MiniMax", "costrict", "MiniMax", creditConsumption = 0.8)
+        assertEquals("0.8x credit", ModelText.creditLabel(miniMax))
+
+        val unrated = ModelPicker.Item("GLM-5", "GLM 5", "costrict", "GLM 5")
+        assertNull(ModelText.creditLabel(unrated))
+    }
+
     fun `test section order starts with favorites and recommended`() {
         val rows = modelPickerRows(listOf(
             item("gpt-4o", "GPT 4o", "openai", "OpenAI"),

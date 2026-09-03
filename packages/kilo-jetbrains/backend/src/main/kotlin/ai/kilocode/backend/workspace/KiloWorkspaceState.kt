@@ -71,6 +71,8 @@ data class ModelInfo(
     val autoRouting: ModelAutoRoutingInfo? = null,
     val terminalBench: ModelTerminalBenchInfo? = null,
     val mayTrainOnYourPrompts: Boolean = false,
+    val creditConsumption: Double? = null,
+    val creditDiscount: Double? = null,
 )
 
 data class ModelLimitInfo(
