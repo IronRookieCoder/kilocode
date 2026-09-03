@@ -268,11 +268,6 @@ internal class ModelsSettingsContent(
             defaults,
         ))
         rows.row(SettingsRow(
-            KiloBundle.message("settings.models.smallModel.title"),
-            KiloBundle.message("settings.models.smallModel.description"),
-            small,
-        ))
-        rows.row(SettingsRow(
             KiloBundle.message("settings.models.subagentModel.title"),
             KiloBundle.message("settings.models.subagentModel.description"),
             subagent,

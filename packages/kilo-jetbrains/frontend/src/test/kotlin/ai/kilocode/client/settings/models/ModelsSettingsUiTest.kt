@@ -3,6 +3,7 @@ package ai.kilocode.client.settings.models
 import ai.kilocode.client.util.edtWait
 import ai.kilocode.client.app.KiloAppService
 import ai.kilocode.client.app.KiloWorkspaceService
+import ai.kilocode.client.plugin.KiloBundle
 import ai.kilocode.client.session.ui.model.ModelPicker
 import ai.kilocode.client.testing.FakeAppRpcApi
 import ai.kilocode.client.testing.FakeWorkspaceRpcApi
@@ -331,6 +332,11 @@ class ModelsSettingsUiTest : BasePlatformTestCase() {
         edt {
             assertTrue(pickers(panel).first().selectedForTest()?.attachment == true)
         }
+    }
+
+    fun `test small model row is hidden`() {
+        val smallModelTitle = KiloBundle.message("settings.models.smallModel.title")
+        assertFalse(text(requireUi()).contains(smallModelTitle))
     }
 
     private fun providers(): ProvidersDto = ProvidersDto(
