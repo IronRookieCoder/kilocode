@@ -762,7 +762,7 @@ class SessionUiLayoutTest : SessionUiTestBase() {
         rpc.recentGate!!.complete(Unit)
     }
 
-    fun `test account overlay shows after recents complete`() {
+    fun `test account overlay stays hidden after recents complete`() {
         appRpc.state.value = KiloAppStateDto(KiloAppStatusDto.READY, profile = ProfileDto(email = "user@example.com"))
         rpc.recent.add(session("ses_1"))
         ui = newUi(displayMs = 1_000)
@@ -770,23 +770,21 @@ class SessionUiLayoutTest : SessionUiTestBase() {
         settle()
 
         val overlay = find<SessionAccountOverlay>(ui)
-        assertTrue(overlay.isVisible)
+        assertFalse(overlay.isVisible)
     }
 
-    fun `test account overlay hides after first prompt`() {
+    fun `test account overlay stays hidden after first prompt`() {
         appRpc.state.value = KiloAppStateDto(KiloAppStatusDto.READY, profile = ProfileDto(email = "user@example.com"))
         rpc.recent.add(session("ses_1"))
         ui = newUi(displayMs = 1_000)
         settle()
-
-        val overlay = find<SessionAccountOverlay>(ui)
-        assertTrue(overlay.isVisible)
 
         com.intellij.openapi.application.ApplicationManager.getApplication().invokeAndWait {
             controller().prompt("hello")
         }
         settle()
 
+        val overlay = find<SessionAccountOverlay>(ui)
         assertFalse(overlay.isVisible)
     }
 
@@ -799,7 +797,7 @@ class SessionUiLayoutTest : SessionUiTestBase() {
         assertFalse(overlay.isVisible)
     }
 
-    fun `test account overlay uses prompt panel top and right insets`() {
+    fun `test account overlay is registered but never visible`() {
         appRpc.state.value = KiloAppStateDto(KiloAppStatusDto.READY, profile = ProfileDto(email = "user@example.com"))
         rpc.recent.add(session("ses_1"))
         ui = newUi(displayMs = 1_000)
@@ -808,12 +806,9 @@ class SessionUiLayoutTest : SessionUiTestBase() {
 
         val root = find<SessionRootPanel>(ui)
         val overlay = find<SessionAccountOverlay>(ui)
-        val top = JBUI.scale(SessionUiStyle.View.Prompt.PANEL_VERTICAL_PADDING)
-        val right = JBUI.scale(SessionUiStyle.View.Prompt.PANEL_HORIZONTAL_PADDING)
 
-        assertTrue(overlay.isVisible)
-        assertEquals(top, overlay.y)
-        assertEquals(root.overlay.width - overlay.width - right, overlay.x)
+        assertSame(root.overlay, overlay.parent)
+        assertFalse(overlay.isVisible)
     }
 
     private fun dropCard(drop: SessionDropOverlay) = drop.components
