@@ -40,7 +40,7 @@ internal class BrandLogoIcon private constructor(
     }
 
     companion object {
-        private const val LOGO_PATH = "/icons/kilo-content.png"
+        private const val LOGO_PATH = "/icons/costrict/logo.png"
 
         /** Logo size in logical pixels used by the empty-session panel. */
         const val PANEL_SIZE = 64
