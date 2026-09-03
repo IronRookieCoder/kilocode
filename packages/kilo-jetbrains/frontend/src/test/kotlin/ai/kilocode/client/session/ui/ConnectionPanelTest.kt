@@ -180,10 +180,10 @@ class ConnectionPanelTest : SessionControllerTestBase() {
 
         assertTrue(panel.retryVisible())
         assertEquals("Kilo.CliGroup", ConnectionPanel.CLI_GROUP_ID)
-        assertTrue(xml.contains("<group id=\"Kilo.CliGroup\" text=\"Core\" popup=\"true\">"))
+        assertTrue(xml.contains("<group id=\"Kilo.CliGroup\" text=\"cs-cloud\" popup=\"true\">"))
         assertTrue(xml.contains("<reference ref=\"Kilo.Restart\"/>"))
         assertTrue(xml.contains("<reference ref=\"Kilo.Reinstall\"/>"))
-        assertTrue(xml.contains("<reference ref=\"Kilo.CoreInfo\"/>"))
+        assertFalse("Core info menu entry must stay hidden", xml.contains("<reference ref=\"Kilo.CoreInfo\"/>"))
     }
 
     fun `test ready warnings show collapsed banner with retry`() {

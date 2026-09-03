@@ -188,13 +188,11 @@
         <action id="Kilo.ForceMigration"
                 class="ai.kilocode.client.actions.ForceMigrationAction"/>
 
-        <group id="Kilo.CliGroup" text="Core" popup="true">
+        <group id="Kilo.CliGroup" text="cs-cloud" popup="true">
             <reference ref="Kilo.Restart"/>
             <reference ref="Kilo.Reinstall"/>
             <reference ref="Kilo.InstallCsc"/>
             <reference ref="Kilo.StartCsCloud"/>
-            <separator/>
-            <reference ref="Kilo.CoreInfo"/>
         </group>
 
         <group id="Kilo.OpenConfigGroup" text="Config Files" popup="true">

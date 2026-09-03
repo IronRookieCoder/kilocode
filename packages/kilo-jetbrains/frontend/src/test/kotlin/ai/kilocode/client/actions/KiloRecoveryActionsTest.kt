@@ -78,13 +78,13 @@ class KiloRecoveryActionsTest : BasePlatformTestCase() {
         assertTrue("Reinstall should force-enable recovery action", event.presentation.isEnabled)
     }
 
-    fun `test restart action adds core suffix in connection retry popup`() {
+    fun `test restart action shows cs-cloud text in connection retry popup`() {
         val action = RestartKiloAction()
         val event = event(action, place = KiloActionPlaces.connectionRetryPopup())
 
         update(action, event)
 
-        assertEquals("Restart Core", event.presentation.text)
+        assertEquals("Restart cs-cloud", event.presentation.text)
     }
 
     fun `test reinstall action adds core suffix in connection retry popup`() {
@@ -116,17 +116,17 @@ class KiloRecoveryActionsTest : BasePlatformTestCase() {
         assertEquals(KiloBundle.message("action.Kilo.StartCsCloud.text"), event.presentation.text)
     }
 
-    fun `test core group has visible menu text and info action`() {
+    fun `test core group has visible menu text and hides info action`() {
         val xml = requireNotNull(javaClass.classLoader.getResourceAsStream("kilo.jetbrains.frontend.xml"))
             .bufferedReader()
             .use { it.readText() }
 
-        assertTrue(xml.contains("<group id=\"Kilo.CliGroup\" text=\"Core\" popup=\"true\">"))
+        assertTrue(xml.contains("<group id=\"Kilo.CliGroup\" text=\"cs-cloud\" popup=\"true\">"))
         assertTrue(xml.contains("<reference ref=\"Kilo.Restart\"/>"))
         assertTrue(xml.contains("<reference ref=\"Kilo.Reinstall\"/>"))
         assertTrue(xml.contains("<reference ref=\"Kilo.InstallCsc\"/>"))
         assertTrue(xml.contains("<reference ref=\"Kilo.StartCsCloud\"/>"))
-        assertTrue(xml.contains("<reference ref=\"Kilo.CoreInfo\"/>"))
+        assertFalse("Core info menu entry must stay hidden", xml.contains("<reference ref=\"Kilo.CoreInfo\"/>"))
         assertTrue(xml.contains("<group id=\"Kilo.OpenConfigGroup\" text=\"Config Files\" popup=\"true\">"))
         assertTrue(xml.contains("<reference ref=\"Kilo.OpenConfigGroup\"/>"))
         assertFalse(xml.contains("<action id=\"Kilo.ShowProfile\""))
