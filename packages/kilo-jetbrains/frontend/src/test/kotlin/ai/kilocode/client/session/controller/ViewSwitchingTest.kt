@@ -70,7 +70,6 @@ class ViewSwitchingTest : SessionControllerTestBase() {
         assertTrue(rpc.recentCalls.contains("/test" to SessionController.RECENT_LIMIT))
         assertControllerEvents("""
             AccountOverlayChanged hide
-            AccountOverlayChanged show loggedIn=false
             AppChanged
             WorkspaceChanged
             WorkspaceReady
@@ -90,7 +89,6 @@ class ViewSwitchingTest : SessionControllerTestBase() {
         assertTrue(rpc.recentCalls.contains("/test" to SessionController.RECENT_LIMIT))
         assertControllerEvents("""
             AccountOverlayChanged hide
-            AccountOverlayChanged show loggedIn=false
             AppChanged
             WorkspaceChanged
             WorkspaceReady
@@ -109,7 +107,6 @@ class ViewSwitchingTest : SessionControllerTestBase() {
         assertTrue(rpc.recentCalls.isEmpty())
         assertControllerEvents("""
             AccountOverlayChanged hide
-            AccountOverlayChanged show loggedIn=false
             AppChanged
             WorkspaceChanged
             ViewChanged progress
@@ -385,7 +382,7 @@ class ViewSwitchingTest : SessionControllerTestBase() {
 
     // --- account overlay controller tests ---
 
-    fun `test empty session with workspace ready emits account overlay show`() {
+    fun `test empty session with workspace ready never shows account overlay`() {
         projectRpc.state.value = workspaceReady()
         rpc.recent.add(session("ses_1"))
         val m = controller()
@@ -393,12 +390,11 @@ class ViewSwitchingTest : SessionControllerTestBase() {
 
         flush()
 
-        assertTrue(events.any { it is SessionControllerEvent.AccountOverlayChanged.Show })
-        val show = events.filterIsInstance<SessionControllerEvent.AccountOverlayChanged.Show>().last()
-        assertEquals("AccountOverlayChanged show loggedIn=false", show.toString())
+        assertFalse(events.any { it is SessionControllerEvent.AccountOverlayChanged.Show })
+        assertEquals("AccountOverlayChanged hide", events.filterIsInstance<SessionControllerEvent.AccountOverlayChanged>().last().toString())
     }
 
-    fun `test empty session overlay show includes logged in profile`() {
+    fun `test empty session with logged in profile never shows account overlay`() {
         projectRpc.state.value = workspaceReady()
         rpc.recent.add(session("ses_1"))
         val prof = ProfileDto(
@@ -412,9 +408,7 @@ class ViewSwitchingTest : SessionControllerTestBase() {
 
         flush()
 
-        val show = events.filterIsInstance<SessionControllerEvent.AccountOverlayChanged.Show>().last()
-        assertEquals("AccountOverlayChanged show loggedIn=true", show.toString())
-        assertEquals(prof.email, show.account.profile?.email)
+        assertFalse(events.any { it is SessionControllerEvent.AccountOverlayChanged.Show })
     }
 
     fun `test first prompt hides overlay`() {
@@ -456,7 +450,7 @@ class ViewSwitchingTest : SessionControllerTestBase() {
         assertFalse(events.any { it is SessionControllerEvent.AccountOverlayChanged.Show })
     }
 
-    fun `test app profile change refreshes overlay while allowed`() {
+    fun `test app profile change never shows account overlay`() {
         projectRpc.state.value = workspaceReady()
         rpc.recent.add(session("ses_1"))
         val m = controller()
@@ -468,11 +462,10 @@ class ViewSwitchingTest : SessionControllerTestBase() {
         flush()
 
         val shows = events.filterIsInstance<SessionControllerEvent.AccountOverlayChanged.Show>()
-        assertTrue(shows.isNotEmpty())
-        assertTrue(shows.last().account.profile?.email == "user@example.com")
+        assertTrue(shows.isEmpty())
     }
 
-    fun `test selecting personal account emits switching overlay`() {
+    fun `test selecting personal account never shows switching overlay`() {
         projectRpc.state.value = workspaceReady()
         rpc.recent.add(session("ses_1"))
         appRpc.state.value = KiloAppStateDto(
@@ -491,10 +484,7 @@ class ViewSwitchingTest : SessionControllerTestBase() {
         edt { m.selectOrganization(null) }
         flush()
 
-        val show = events.filterIsInstance<SessionControllerEvent.AccountOverlayChanged.Show>()
-            .first { it.account.switching }
-        assertTrue(show.account.switching)
-        assertNull(show.account.targetOrgId)
+        assertFalse(events.any { it is SessionControllerEvent.AccountOverlayChanged.Show })
         assertEquals(null, appRpc.orgSelections.last())
     }
 
@@ -507,7 +497,8 @@ class ViewSwitchingTest : SessionControllerTestBase() {
         // Add a new listener after initial events are done
         val replayed = collect(m)
 
-        assertTrue(replayed.any { it is SessionControllerEvent.AccountOverlayChanged.Show })
+        assertTrue(replayed.any { it is SessionControllerEvent.AccountOverlayChanged.Hide })
+        assertFalse(replayed.any { it is SessionControllerEvent.AccountOverlayChanged.Show })
     }
 
     fun `test overlay hide event has correct string`() {
