@@ -172,6 +172,9 @@
         <action id="Kilo.StartCsCloud"
                 class="ai.kilocode.client.actions.StartCsCloudAction"/>
 
+        <action id="Kilo.SignInCsCloud"
+                class="ai.kilocode.client.actions.SignInCsCloudAction"/>
+
         <action id="Kilo.CoreInfo"
                 class="ai.kilocode.client.actions.CoreInfoAction"/>
 

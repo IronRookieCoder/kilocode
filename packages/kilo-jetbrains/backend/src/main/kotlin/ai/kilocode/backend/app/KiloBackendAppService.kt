@@ -1112,6 +1112,10 @@ private fun summary(patch: ConfigPatchDto): String {
 
 private data class ConnectionDiagnostic(val status: Int?, val message: String)
 
+/** 401/403 guidance: the fix is signing in again, not configuring developer-facing API keys. */
+private const val AUTH_REQUIRED_DIAGNOSTIC =
+    "CoStrict sign-in is missing or has expired - click Sign in to finish the csc auth login browser sign-in; cs-cloud re-reads auth.json on every request, so no restart is needed"
+
 /** Keep transport failures actionable without exposing credentials or raw request payloads. */
 private fun connectionDiagnostic(state: ConnectionState.Error): ConnectionDiagnostic {
     val raw = state.details?.trim().takeUnless { it.isNullOrEmpty() } ?: state.message
@@ -1131,15 +1135,15 @@ private fun connectionDiagnostic(state: ConnectionState.Error): ConnectionDiagno
         )
         ConnectionErrorCode.UNAUTHORIZED -> return ConnectionDiagnostic(
             status,
-            "cs-cloud API key was not found - run `csc cloud start` or set CS_BRIDGE_API_KEY / CS_CLOUD_API_KEY",
+            AUTH_REQUIRED_DIAGNOSTIC,
         )
     }
     val lower = raw.lowercase()
     if (lower.contains("api key was not found") || lower.contains("missing api key")) {
-        return ConnectionDiagnostic(status, "cs-cloud API key was not found - run `csc cloud start` or set CS_BRIDGE_API_KEY / CS_CLOUD_API_KEY")
+        return ConnectionDiagnostic(status, AUTH_REQUIRED_DIAGNOSTIC)
     }
     if (status == 401 || status == 403 || lower.contains("unauthorized") || lower.contains("invalid api key")) {
-        return ConnectionDiagnostic(status, "cs-cloud API key is invalid")
+        return ConnectionDiagnostic(status, AUTH_REQUIRED_DIAGNOSTIC)
     }
     if (status == 503 || lower.contains("agent_down") || lower.contains("agent is unavailable")) {
         return ConnectionDiagnostic(status, "csc agent is unavailable - check that csc is installed and `csc cloud start` finished starting the agent")

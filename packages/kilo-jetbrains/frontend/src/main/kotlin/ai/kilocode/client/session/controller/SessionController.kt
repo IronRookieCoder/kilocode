@@ -34,6 +34,7 @@ import ai.kilocode.client.util.UiTimer
 import ai.kilocode.client.util.UiTimerSource
 import ai.kilocode.client.util.UiTimers
 import ai.kilocode.client.util.edtLater as edt
+import ai.kilocode.rpc.ConnectionErrorCode
 import ai.kilocode.rpc.dto.ChatEventDto
 import ai.kilocode.rpc.dto.ConfigWarningDto
 import ai.kilocode.rpc.dto.ConfigUpdateDto
@@ -77,6 +78,7 @@ import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.launch
 import java.awt.Component
 import java.nio.file.Path
+import java.util.concurrent.CopyOnWriteArrayList
 
 /**
  * Session lifecycle orchestrator for a single session.
@@ -142,7 +144,10 @@ class SessionController(
 
     val model = SessionModel()
 
-    private val listeners = mutableListOf<SessionControllerListener>()
+    // Copy-on-write: listeners register while UI panels are built from inside fire() itself
+    // (e.g. the empty-session panel hooks up on first view change), so delivery must iterate a
+    // stable snapshot instead of a list that grows mid-loop.
+    private val listeners = CopyOnWriteArrayList<SessionControllerListener>()
     private var ref: SessionRef? = ref
     private val sid: String? get() = (ref as? SessionRef.Local)?.id
     private val directory: String get() = workspace.directory
@@ -2506,11 +2511,28 @@ class SessionController(
         val workspace = model.workspace
 
         if (app.status == KiloAppStatusDto.ERROR) {
-            return SessionControllerEvent.ConnectionChanged.ShowError(
-                KiloBundle.message("session.connection.error.app"),
-                app.errors.toErrorText() ?: app.error,
-                code = app.errors.firstOrNull()?.code,
-            )
+            val code = app.errors.firstOrNull()?.code
+            val diagnostic = app.errors.toErrorText() ?: app.error
+            val copy = csCloudErrorCopy(code)
+            return if (copy == null) {
+                SessionControllerEvent.ConnectionChanged.ShowError(
+                    KiloBundle.message("session.connection.error.app"),
+                    diagnostic,
+                    code = code,
+                )
+            } else {
+                val (titleKey, descKey) = copy
+                SessionControllerEvent.ConnectionChanged.ShowError(
+                    KiloBundle.message(titleKey),
+                    // Keep the raw English diagnostic underneath the localized guidance so the
+                    // technical details stay available in the expandable details area.
+                    listOfNotNull(
+                        KiloBundle.message(descKey),
+                        diagnostic?.takeIf { it.isNotBlank() },
+                    ).joinToString("\n\n"),
+                    code = code,
+                )
+            }
         }
 
         if (app.status == KiloAppStatusDto.DOWNLOADING) {
@@ -2828,6 +2850,23 @@ internal data class ControllerStateSnapshot(
     val sessionLoadState: String,
     val recentsState: String,
 )
+
+/**
+ * Localized banner copy for a stable cs-cloud connection error code, as the bundle keys for the
+ * summary (`first`) and the actionable guidance (`second`). Returns null for codes without copy
+ * so the generic "Connection failed" banner still applies.
+ */
+private fun csCloudErrorCopy(code: String?): Pair<String, String>? = when (code) {
+    ConnectionErrorCode.CSC_NOT_INSTALLED ->
+        "csCloud.error.csc_not_installed.title" to "csCloud.error.csc_not_installed.desc"
+    ConnectionErrorCode.DAEMON_DOWN ->
+        "csCloud.error.daemon_down.title" to "csCloud.error.daemon_down.desc"
+    ConnectionErrorCode.UNAUTHORIZED ->
+        "csCloud.error.unauthorized.title" to "csCloud.error.unauthorized.desc"
+    ConnectionErrorCode.NPM_NOT_FOUND ->
+        "csCloud.error.npm_not_found.title" to "csCloud.error.npm_not_found.desc"
+    else -> null
+}
 
 private fun List<LoadErrorDto>.toErrorText(): String? {
     val out = mapNotNull { it.toDetailLine() }

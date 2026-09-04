@@ -3,6 +3,10 @@ package ai.kilocode.client.session.ui.empty
 import ai.kilocode.client.plugin.KiloBundle
 import ai.kilocode.client.session.SessionActivityKind
 import ai.kilocode.client.session.controller.SessionController
+import ai.kilocode.client.session.controller.SessionControllerEvent
+import ai.kilocode.client.session.controller.SessionControllerListener
+import ai.kilocode.client.session.ui.CsCloudGuideCard
+import ai.kilocode.client.session.ui.runRegisteredAction
 import ai.kilocode.client.session.ui.style.SessionEditorStyle
 import ai.kilocode.client.session.ui.style.SessionEditorStyleTarget
 import ai.kilocode.client.session.ui.style.SessionUiStyle
@@ -53,9 +57,10 @@ class EmptySessionPanel(
     private val activity: () -> Map<String, SessionActivityKind> = { emptyMap() },
     private val titles: () -> Map<String, String> = { emptyMap() },
     private val browse: (String) -> Unit = BrowserUtil::browse,
+    private val runGuideAction: (String) -> Unit = ::runRegisteredAction,
     private val timers: UiTimerSource = UiTimers,
     private val minimal: Boolean = false,
-) : BorderLayoutPanel(), Disposable, SessionEditorStyleTarget {
+) : BorderLayoutPanel(), Disposable, SessionEditorStyleTarget, SessionControllerListener {
     private var style = SessionEditorStyle.current()
     val view: Align = align(
         HAlign.CENTER,
@@ -100,6 +105,13 @@ class EmptySessionPanel(
         add(welcomeLabel, BorderLayout.CENTER)
     }
 
+    /** Same recovery guidance as the connection banner, so a failed start is actionable here too. */
+    private val guide = CsCloudGuideCard(
+        browse = browse,
+        centered = true,
+        runAction = runGuideAction,
+    )
+
     init {
         Disposer.register(parent, this)
         Disposer.register(this, feedback)
@@ -122,7 +134,10 @@ class EmptySessionPanel(
             isOpaque = false
             add(logo, BorderLayout.NORTH)
             if (!minimal) add(description.align(HAlign.CENTER, VAlign.CENTER), BorderLayout.CENTER)
+            // Below the welcome text, above History — the same fix the connection banner offers.
+            if (!minimal) add(guide, BorderLayout.SOUTH)
         }
+        guide.border = JBUI.Borders.empty(UiStyle.Gap.sm(), 0, UiStyle.Gap.sm(), 0)
 
         val actions = Stack.vertical(gap = UiStyle.Gap.lg())
         if (!minimal) actions.next(Centerizer(historyButton, Centerizer.TYPE.HORIZONTAL))
@@ -135,6 +150,28 @@ class EmptySessionPanel(
         add(header, BorderLayout.NORTH)
         if (!minimal && recent.hasSessions()) add(recent, BorderLayout.CENTER)
         add(south, BorderLayout.SOUTH)
+        controller.addListener(this, this)
+    }
+
+    /** Mirrors the connection banner: guide for a fixable cs-cloud failure, nothing otherwise. */
+    override fun onEvent(event: SessionControllerEvent) {
+        when (event) {
+            is SessionControllerEvent.ConnectionChanged.ShowError -> guide.sync(event.code)
+
+            is SessionControllerEvent.ConnectionChanged.Hide,
+            is SessionControllerEvent.ConnectionChanged.ShowConnecting,
+            is SessionControllerEvent.ConnectionChanged.ShowDownloading,
+            is SessionControllerEvent.ConnectionChanged.ShowWarning -> guide.sync(null)
+
+            else -> return
+        }
+        // A child visibility change alone does not schedule a layout pass.
+        refresh()
+    }
+
+    private fun refresh() {
+        revalidate()
+        repaint()
     }
 
     internal fun recentCount() = recent.count()
@@ -190,6 +227,18 @@ class EmptySessionPanel(
     internal fun descriptionMaximumSize() = description.maximumSize
 
     internal fun historyButtonPreferredWidth() = historyButton.preferredSize.width
+
+    internal fun guideVisible() = guide.isVisible && !minimal
+
+    internal fun guideTitleText() = guide.guideTitle()
+
+    internal fun guideActionText() = guide.guideActionLabel()
+
+    internal fun guideDocsVisible() = guide.guideDocsVisible()
+
+    internal fun clickGuideAction() = guide.clickGuideAction()
+
+    internal fun clickGuideDocs() = guide.clickGuideDocs()
 
     internal fun initialized() = true
 

@@ -1,17 +1,33 @@
 package ai.kilocode.client.app
 
+import ai.kilocode.client.plugin.KiloBundle
 import ai.kilocode.client.testing.FakeAppRpcApi
+import ai.kilocode.client.testing.TEST_WAIT_MS
+import ai.kilocode.rpc.ConnectionErrorCode
+import ai.kilocode.rpc.dto.CsCloudStartDto
 import ai.kilocode.rpc.dto.KiloAppStateDto
 import ai.kilocode.rpc.dto.KiloAppStatusDto
 import ai.kilocode.rpc.dto.ProfileBalanceDto
 import ai.kilocode.rpc.dto.ProfileDto
 import ai.kilocode.rpc.dto.ProfileOrganizationDto
+import com.intellij.notification.Notification
+import com.intellij.notification.NotificationType
+import com.intellij.notification.Notifications
+import com.intellij.openapi.application.ApplicationManager
 import com.intellij.testFramework.fixtures.BasePlatformTestCase
+import java.util.concurrent.ConcurrentLinkedQueue
+import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.CountDownLatch
+import kotlin.coroutines.CoroutineContext
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.yield
 import kotlinx.coroutines.withTimeout
@@ -28,12 +44,17 @@ class KiloAppServiceTest : BasePlatformTestCase() {
     private lateinit var rpc: FakeAppRpcApi
     private lateinit var app: KiloAppService
 
+    /** Copy-on-write: the notification subscriber thread races with the test's own iteration. */
+    private val notifications = CopyOnWriteArrayList<Notification>()
+
     override fun setUp() {
         super.setUp()
         scope = CoroutineScope(SupervisorJob())
         rpc = FakeAppRpcApi()
-        app = KiloAppService(scope, rpc)
+        // No-op runner: the service launches the work itself, so the progress task is not needed.
+        app = KiloAppService(scope, rpc) { _, _ -> }
         app._state.value = KiloAppStateDto(KiloAppStatusDto.READY)
+        notifications.clear()
     }
 
     override fun tearDown() {
@@ -52,10 +73,200 @@ class KiloAppServiceTest : BasePlatformTestCase() {
         currentOrgId: String? = null,
     ) = ProfileDto(email = email, name = name, organizations = orgs, balance = balance, currentOrgId = currentOrgId)
 
+    /**
+     * Waits for [done] on the test's own coroutine scheduler.
+     *
+     * Deliberately no EDT pumping here: the platform test framework runs this class's test bodies
+     * on the EDT inside `runBlocking`, so the EDT is parked and any `invokeAndWait`-based pump
+     * would deadlock against it.
+     */
     private suspend fun waitUntil(done: () -> Boolean) {
-        withTimeout(5_000) {
+        withTimeout(TEST_WAIT_MS) {
             while (!done()) yield()
         }
+    }
+
+    /** [waitUntil] for a value that only appears once (or only grows), returning the first non-null. */
+    private suspend fun <T : Any> waitUntilValue(poll: () -> T?): T {
+        waitUntil { poll() != null }
+        return poll()!!
+    }
+
+    // ------ installCscAsync notifications ------
+
+    /** Records the notifications the service raises, whatever project (or none) it attaches them to. */
+    private fun recordNotifications() {
+        val subscriber = object : Notifications {
+            override fun notify(notification: Notification) {
+                notifications.add(notification)
+            }
+        }
+        val disposable = testRootDisposable
+        project.messageBus.connect(disposable).subscribe(Notifications.TOPIC, subscriber)
+        ApplicationManager.getApplication().messageBus.connect(disposable).subscribe(Notifications.TOPIC, subscriber)
+    }
+
+    private suspend fun runInstallAndAwaitErrors(): Notification {
+        recordNotifications()
+        app.installCscAsync()
+        // The "installing" feedback lives in the background task now, so the only notice is the outcome.
+        return waitUntilValue { notifications.firstOrNull { it.type == NotificationType.ERROR } }
+    }
+
+    fun `test installCscAsync keeps the install failure title for the install stage`() = runBlocking(Dispatchers.Default) {
+        rpc.csCloudInstall = CsCloudStartDto(ok = false, message = "npm install failed", stage = CsCloudStartDto.STAGE_INSTALL)
+
+        val error = runInstallAndAwaitErrors()
+
+        assertEquals(KiloBundle.message("csCloud.install.failed"), error.title)
+        assertEquals("npm install failed", error.content)
+    }
+
+    fun `test installCscAsync reports the start failure when only cs-cloud fails to start`() = runBlocking(Dispatchers.Default) {
+        rpc.csCloudInstall = CsCloudStartDto(ok = false, message = "port 3000 busy", stage = CsCloudStartDto.STAGE_START)
+
+        val error = runInstallAndAwaitErrors()
+
+        assertEquals(KiloBundle.message("csCloud.install.failed.start"), error.title)
+        assertEquals("port 3000 busy", error.content)
+    }
+
+    fun `test installCscAsync falls back to the install title when the stage is unknown`() = runBlocking(Dispatchers.Default) {
+        rpc.csCloudInstall = CsCloudStartDto(ok = false, message = "cs-cloud daemon is not managed by this connection")
+
+        val error = runInstallAndAwaitErrors()
+
+        assertEquals(KiloBundle.message("csCloud.install.failed"), error.title)
+        assertEquals("cs-cloud daemon is not managed by this connection", error.content)
+    }
+
+    fun `test installCscAsync offers installation docs and the npm page when npm is missing`() = runBlocking(Dispatchers.Default) {
+        rpc.csCloudInstall = CsCloudStartDto(
+            ok = false,
+            message = "no package manager was found",
+            code = ConnectionErrorCode.NPM_NOT_FOUND,
+            stage = CsCloudStartDto.STAGE_INSTALL,
+        )
+
+        val error = runInstallAndAwaitErrors()
+
+        assertEquals(KiloBundle.message("csCloud.install.failed"), error.title)
+        assertEquals(KiloBundle.message("csCloud.install.npmMissing.desc"), error.content)
+        assertEquals(2, error.actions.size)
+        assertEquals(KiloBundle.message("csCloud.install.npmMissing.docs"), error.actions[0].templateText)
+        assertEquals(KiloBundle.message("action.Kilo.OpenCscNpm.text"), error.actions[1].templateText)
+    }
+
+    fun `test installCscAsync announces success without an error notice`() = runBlocking(Dispatchers.Default) {
+        rpc.csCloudInstall = CsCloudStartDto(ok = true, message = "installed")
+
+        recordNotifications()
+        app.installCscAsync()
+        waitUntil { notifications.isNotEmpty() }
+
+        // Only the success outcome is raised - the progress feedback moved into the background task.
+        assertEquals(listOf(KiloBundle.message("csCloud.install.ok")), notifications.map { it.title }.distinct())
+        assertTrue(notifications.none { it.type == NotificationType.ERROR })
+    }
+
+    fun `test installCscAsync reports a busy install instead of ignoring a second click`() = runBlocking(Dispatchers.Default) {
+        var job: Job? = null
+        val runner = CsCloudTaskRunner { _, queued -> job = queued }
+        val cancellable = KiloAppService(scope, rpc, runner)
+        rpc.csCloudInstallGate = CompletableDeferred()
+        recordNotifications()
+        cancellable.installCscAsync()
+        waitUntil { rpc.csCloudInstalls == 1 }
+
+        cancellable.installCscAsync()
+
+        assertEquals(1, rpc.csCloudInstalls) // a second click must not start a second install
+        val busy = waitUntilValue { notifications.firstOrNull { it.title == KiloBundle.message("csCloud.install.busy") } }
+        assertEquals(NotificationType.INFORMATION, busy.type)
+
+        // The first install must settle (job done = lock released) before the next click: the
+        // outcome notification is posted inside the job, so it is not a lock-released signal.
+        rpc.csCloudInstallGate!!.complete(Unit)
+        job!!.join()
+        cancellable.installCscAsync()
+        waitUntil { rpc.csCloudInstalls == 2 }
+    }
+
+    fun `test installCscAsync releases the lock when the background task is cancelled`() = runBlocking(Dispatchers.Default) {
+        var job: Job? = null
+        val runner = CsCloudTaskRunner { _, queued -> job = queued }
+        val cancellable = KiloAppService(scope, rpc, runner)
+        rpc.csCloudInstallGate = CompletableDeferred()
+        recordNotifications()
+
+        cancellable.installCscAsync()
+        waitUntil { rpc.csCloudInstalls == 1 }
+        job!!.cancelAndJoin()
+
+        assertTrue("cancelling must not be reported as a failure", notifications.none { it.type == NotificationType.ERROR })
+        // The lock is released, so a fresh install can start right away.
+        cancellable.installCscAsync()
+        waitUntil { rpc.csCloudInstalls == 2 }
+    }
+
+    fun `test installCscAsync releases the lock when cancel lands before the work runs`() = runBlocking(Dispatchers.Default) {
+        // Hold the work coroutine back so the cancel below lands before its first dispatch - the
+        // body (and any finally inside it) is then skipped entirely.
+        val paused = PausedDispatcher()
+        val frozenScope = CoroutineScope(SupervisorJob() + paused)
+        val cancelling = CsCloudTaskRunner { _, job -> job.cancel() }
+        val cancellable = KiloAppService(frozenScope, rpc, cancelling)
+        recordNotifications()
+
+        cancellable.installCscAsync()
+
+        assertEquals(0, rpc.csCloudInstalls) // the cancelled run must not reach the backend
+        assertTrue("cancel must not be reported as a failure", notifications.none { it.type == NotificationType.ERROR })
+        paused.resume()
+
+        // The lock did not leak: a fresh install goes through and reaches the backend.
+        cancellable.installCscAsync()
+        waitUntil { rpc.csCloudInstalls == 1 }
+        frozenScope.cancel()
+    }
+
+    fun `test startCsCloudAsync reports a busy start instead of ignoring a second click`() = runBlocking(Dispatchers.Default) {
+        var job: Job? = null
+        val runner = CsCloudTaskRunner { _, queued -> job = queued }
+        val cancellable = KiloAppService(scope, rpc, runner)
+        rpc.csCloudStartGate = CompletableDeferred()
+        recordNotifications()
+        cancellable.startCsCloudAsync()
+        waitUntil { rpc.csCloudStarts == 1 }
+
+        cancellable.startCsCloudAsync()
+
+        assertEquals(1, rpc.csCloudStarts) // a second click must not start a second start
+        val busy = waitUntilValue { notifications.firstOrNull { it.title == KiloBundle.message("csCloud.start.busy") } }
+        assertEquals(NotificationType.INFORMATION, busy.type)
+
+        // The first start must settle (job done = lock released) before the next click: the
+        // outcome notification is posted inside the job, so it is not a lock-released signal.
+        rpc.csCloudStartGate!!.complete(Unit)
+        job!!.join()
+        cancellable.startCsCloudAsync()
+        waitUntil { rpc.csCloudStarts == 2 }
+    }
+
+    fun `test startCsCloudAsync releases the lock when the background task is cancelled`() = runBlocking(Dispatchers.Default) {
+        var job: Job? = null
+        val runner = CsCloudTaskRunner { _, queued -> job = queued }
+        val cancellable = KiloAppService(scope, rpc, runner)
+        rpc.csCloudStartGate = CompletableDeferred()
+        recordNotifications()
+
+        cancellable.startCsCloudAsync()
+        waitUntil { rpc.csCloudStarts == 1 }
+        job!!.cancelAndJoin()
+
+        assertTrue("cancelling must not be reported as a failure", notifications.none { it.type == NotificationType.ERROR })
+        cancellable.startCsCloudAsync()
+        waitUntil { rpc.csCloudStarts == 2 }
     }
 
     fun `test fetchCoreInfoAsync dedupes in flight requests`() = runBlocking(Dispatchers.Default) {
@@ -216,5 +427,32 @@ class KiloAppServiceTest : BasePlatformTestCase() {
     fun `test startLogin with null directory is forwarded`() = runBlocking(Dispatchers.Default) {
         app.startLogin(null)
         assertEquals(listOf<String?>(null), rpc.startDirectories)
+    }
+}
+
+/**
+ * Coroutine dispatcher that parks dispatched blocks until [resume] is called, so a test can
+ * cancel a job before its coroutine is ever dispatched (the body and its `finally` never run).
+ */
+private class PausedDispatcher : CoroutineDispatcher() {
+    private val gate = CountDownLatch(1)
+    private val parked = ConcurrentLinkedQueue<Runnable>()
+
+    override fun isDispatchNeeded(context: CoroutineContext): Boolean = true
+
+    override fun dispatch(context: CoroutineContext, block: Runnable) {
+        parked.add(block)
+        drainIfResumed()
+    }
+
+    /** Unparks the dispatcher and runs everything parked so far (on the calling thread). */
+    fun resume() {
+        gate.countDown()
+        drainIfResumed()
+    }
+
+    private fun drainIfResumed() {
+        if (gate.count != 0L) return
+        while (true) parked.poll()?.run() ?: return
     }
 }

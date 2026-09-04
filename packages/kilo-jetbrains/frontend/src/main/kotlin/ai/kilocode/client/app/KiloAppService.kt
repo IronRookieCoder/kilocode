@@ -4,6 +4,7 @@ package ai.kilocode.client.app
 
 import ai.kilocode.rpc.KiloAppRpcApi
 import ai.kilocode.rpc.dto.ConfigPatchDto
+import ai.kilocode.rpc.dto.CsCloudStartDto
 import ai.kilocode.rpc.dto.DeviceAuthDto
 import ai.kilocode.rpc.dto.HealthDto
 import ai.kilocode.rpc.dto.KiloAppStateDto
@@ -21,6 +22,7 @@ import ai.kilocode.log.KiloLog
 import ai.kilocode.client.KiloNotifications
 import ai.kilocode.client.actions.InstallCscAction
 import ai.kilocode.client.plugin.KiloBundle
+import ai.kilocode.client.session.ui.CSC_INSTALL_DOCS_URL
 import ai.kilocode.client.settings.KiloLogSettingsService
 import ai.kilocode.rpc.ConnectionErrorCode
 import com.intellij.ide.BrowserUtil
@@ -29,6 +31,7 @@ import com.intellij.openapi.components.service
 import com.intellij.openapi.project.ProjectManager
 import fleet.rpc.client.durable
 import java.util.concurrent.atomic.AtomicBoolean
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -46,6 +49,7 @@ import kotlinx.coroutines.launch
 class KiloAppService internal constructor(
     private val cs: CoroutineScope,
     private val rpc: KiloAppRpcApi?,
+    private val csCloudTasks: CsCloudTaskRunner = BackgroundableCsCloudTask(),
 ) {
     /** Platform constructor — resolves RPC from the service container. */
     constructor(cs: CoroutineScope) : this(cs, null)
@@ -190,9 +194,12 @@ class KiloAppService internal constructor(
 
     /** Run `csc cloud start` on the backend and notify the user of the outcome. */
     fun startCsCloudAsync() {
-        if (!csCloudStarting.compareAndSet(false, true)) return
+        if (!csCloudStarting.compareAndSet(false, true)) {
+            KiloNotifications.info(KiloBundle.message("csCloud.start.busy"))
+            return
+        }
         LOG.info("startCsCloudAsync: launching csc cloud start")
-        cs.launch {
+        runCsCloudTask(KiloBundle.message("csCloud.progress.start"), release = { csCloudStarting.set(false) }) {
             try {
                 val result = call { startCsCloud() }
                 if (result.ok) {
@@ -210,45 +217,69 @@ class KiloAppService internal constructor(
                 } else {
                     KiloNotifications.error(KiloBundle.message("csCloud.start.failed"), result.message)
                 }
+            } catch (e: CancellationException) {
+                LOG.info("startCsCloudAsync cancelled")
+                throw e
             } catch (e: Exception) {
                 LOG.warn("startCsCloudAsync failed", e)
                 KiloNotifications.error(KiloBundle.message("csCloud.start.failed"), e.message)
-            } finally {
-                csCloudStarting.set(false)
             }
         }
+    }
+
+    /**
+     * Runs the cs-cloud work in the app scope, ties the lock release to the job, and shows the
+     * job as a cancellable background task titled [title].
+     *
+     * The release must be tied to the job rather than to a `finally` inside [work]: a cancel that
+     * lands before the coroutine is first dispatched skips its body entirely, and a `finally`
+     * there would never run — leaking the lock until the IDE restarts.
+     */
+    private fun runCsCloudTask(title: String, release: () -> Unit, work: suspend () -> Unit) {
+        val job = cs.launch { work() }
+        job.invokeOnCompletion { release() }
+        csCloudTasks.queue(title, job)
     }
 
     private val csCloudInstalling = AtomicBoolean(false)
 
     /** Install the csc CLI via npm on the backend, then start cs-cloud. */
     fun installCscAsync() {
-        if (!csCloudInstalling.compareAndSet(false, true)) return
+        if (!csCloudInstalling.compareAndSet(false, true)) {
+            KiloNotifications.info(KiloBundle.message("csCloud.install.busy"))
+            return
+        }
         LOG.info("installCscAsync: launching csc install")
-        cs.launch {
+        runCsCloudTask(KiloBundle.message("csCloud.progress.install"), release = { csCloudInstalling.set(false) }) {
             try {
-                KiloNotifications.info(KiloBundle.message("csCloud.install.start"))
                 val result = call { installCsc() }
                 if (result.ok) {
                     KiloNotifications.info(KiloBundle.message("csCloud.install.ok"))
                 } else if (result.code == ConnectionErrorCode.NPM_NOT_FOUND) {
                     val project = ProjectManager.getInstance().openProjects.firstOrNull { !it.isDefault }
+                    LOG.warn("installCscAsync: no package manager found - ${result.message}")
                     KiloNotifications.error(
                         project,
                         KiloBundle.message("csCloud.install.failed"),
-                        result.message,
-                        KiloBundle.message("action.Kilo.OpenCscNpm.text"),
-                    ) {
-                        BrowserUtil.browse(InstallCscAction.CSC_NPM_URL)
-                    }
+                        KiloBundle.message("csCloud.install.npmMissing.desc"),
+                        primaryLabel = KiloBundle.message("csCloud.install.npmMissing.docs"),
+                        primaryAction = { BrowserUtil.browse(CSC_INSTALL_DOCS_URL) },
+                        secondaryLabel = KiloBundle.message("action.Kilo.OpenCscNpm.text"),
+                        secondaryAction = { BrowserUtil.browse(InstallCscAction.CSC_NPM_URL) },
+                    )
+                } else if (result.stage == CsCloudStartDto.STAGE_START) {
+                    // Install itself succeeded — only the daemon failed to come up, so the copy
+                    // must not send the user back to reinstalling csc.
+                    KiloNotifications.error(KiloBundle.message("csCloud.install.failed.start"), result.message)
                 } else {
                     KiloNotifications.error(KiloBundle.message("csCloud.install.failed"), result.message)
                 }
+            } catch (e: CancellationException) {
+                LOG.info("installCscAsync cancelled")
+                throw e
             } catch (e: Exception) {
                 LOG.warn("installCscAsync failed", e)
                 KiloNotifications.error(KiloBundle.message("csCloud.install.failed"), e.message)
-            } finally {
-                csCloudInstalling.set(false)
             }
         }
     }

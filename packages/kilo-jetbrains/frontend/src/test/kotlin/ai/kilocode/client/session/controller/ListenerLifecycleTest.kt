@@ -55,6 +55,35 @@ class ListenerLifecycleTest : SessionControllerTestBase() {
         """, events1)
     }
 
+    fun `test listener registered while an event is delivered is wired without breaking the loop`() {
+        val m = controller()
+        val first = mutableListOf<SessionControllerEvent>()
+        val late = mutableListOf<SessionControllerEvent>()
+        val d1 = Disposer.newDisposable("mid-fire-parent")
+        val d2 = Disposer.newDisposable("late-parent")
+        Disposer.register(parent, d1)
+        Disposer.register(parent, d2)
+
+        // The UI panels hook themselves up from inside event delivery (empty-session panel,
+        // setup notifier), i.e. the listeners list grows while fire() iterates it.
+        var registered = false
+        m.addListener(d1) { event ->
+            first.add(event)
+            if (!registered) {
+                registered = true
+                m.addListener(d2) { late.add(it) }
+            }
+        }
+
+        edt { m.prompt("go") }
+        flush()
+        edt { m.prompt("again") }
+        flush()
+
+        assertTrue("the first listener must receive events", first.isNotEmpty())
+        assertTrue("the listener registered mid-delivery must receive later events", late.isNotEmpty())
+    }
+
     fun `test session status idle fires StateChanged to Idle`() {
         val (m, _, modelEvents) = prompted()
 

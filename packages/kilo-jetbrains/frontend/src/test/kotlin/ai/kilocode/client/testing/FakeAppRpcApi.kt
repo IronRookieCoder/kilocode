@@ -76,6 +76,9 @@ class FakeAppRpcApi : KiloAppRpcApi {
     var csCloudStarts = 0
         private set
 
+    /** When set, [startCsCloud] awaits it before returning, to model an in-flight start. */
+    var csCloudStartGate: CompletableDeferred<Unit>? = null
+
     override suspend fun connect() {
         assertNotEdt("connect")
         connected = true
@@ -136,6 +139,7 @@ class FakeAppRpcApi : KiloAppRpcApi {
     override suspend fun startCsCloud(): CsCloudStartDto {
         assertNotEdt("startCsCloud")
         csCloudStarts += 1
+        csCloudStartGate?.await()
         return csCloudStart
     }
 
@@ -143,9 +147,13 @@ class FakeAppRpcApi : KiloAppRpcApi {
     var csCloudInstalls = 0
         private set
 
+    /** When set, [installCsc] awaits it before returning, to model an in-flight install. */
+    var csCloudInstallGate: CompletableDeferred<Unit>? = null
+
     override suspend fun installCsc(): CsCloudStartDto {
         assertNotEdt("installCsc")
         csCloudInstalls += 1
+        csCloudInstallGate?.await()
         return csCloudInstall
     }
 
