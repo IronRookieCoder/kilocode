@@ -307,6 +307,10 @@ class KiloMigrationServiceTest : BasePlatformTestCase() {
         assertEquals(true, autocomplete[0].enableChatAutocomplete)
     }
 
+    fun `test defaults never preselect autocomplete`() {
+        assertFalse(MigrationSelectionBuilder.defaults(sampleDetection()).settings.autocomplete)
+    }
+
     private fun sampleDetection() = LegacyMigrationDetectionDto(
         providers = listOf(
             MigrationProviderInfoDto("profile1", "anthropic", "claude-3", true, true, "anthropic"),

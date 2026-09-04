@@ -2367,8 +2367,10 @@ class SessionController(
     }
 
     private fun showAccountOverlay() {
-        acctAllowed = true
-        setAccountOverlayState(SessionControllerEvent.AccountOverlayChanged.Show(accountSnapshot()))
+        // Costrict (B5, 2026-09-03 spec revision): the account/org-switch overlay entry is hidden.
+        // Keep the snapshot/event/overlay pipeline intact for restore — never allow Show.
+        acctAllowed = false
+        setAccountOverlayState(SessionControllerEvent.AccountOverlayChanged.Hide)
     }
 
     private fun hideAccountOverlay() {

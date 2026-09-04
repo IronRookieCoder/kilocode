@@ -54,8 +54,8 @@ class DisplayNameI18nTest {
 
     @Test
     fun `root settings page and notification groups carry the Costrict brand`() {
-        assertEquals("Costrict", KiloBundle.message("settings.kilo.displayName"))
-        assertEquals("Costrict", KiloBundle.message("notification.group.kilo"))
+        assertEquals("CoStrict", KiloBundle.message("settings.kilo.displayName"))
+        assertEquals("CoStrict", KiloBundle.message("notification.group.kilo"))
         assertEquals("CoStrict Code Review", KiloBundle.message("notification.group.codereview"))
     }
 
@@ -95,6 +95,16 @@ class DisplayNameI18nTest {
             val value = zh[key] ?: throw AssertionError("zh_CN bundle misses $key")
             assertTrue(value.isNotBlank(), "zh_CN value for $key must not be blank")
             assertTrue(!value.contains("Kilo"), "zh_CN value for $key must not mention Kilo: $value")
+        }
+    }
+
+    @Test
+    fun `csCloud login card is translated in zh bundles`() {
+        for (name in listOf("KiloBundle_zh_CN.properties", "KiloBundle_zh_TW.properties")) {
+            val zh = bundle(name)
+            val value = zh["session.login.required.csCloud.title"]
+                ?: throw AssertionError("$name misses csCloud login title")
+            assertTrue(!value.contains("Sign in"), "$name csCloud login title must be translated: $value")
         }
     }
 }

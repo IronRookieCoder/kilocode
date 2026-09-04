@@ -159,9 +159,9 @@ class ConnectionDelayTest : SessionControllerTestBase() {
         assertEquals("Workspace not supported", event.summary)
         assertEquals(
             "Workspace path: /test\n\n" +
-                "Costrict runs on your host machine, so it can't reach the files inside WSL.\n\n" +
-                "Option 1: Open the project in the container or WSL with JetBrains Gateway so Costrict runs next to your code.\n" +
-                "Option 2: Open the project directly from your local filesystem so Costrict can reach the files.",
+                "CoStrict runs on your host machine, so it can't reach the files inside WSL.\n\n" +
+                "Option 1: Open the project in the container or WSL with JetBrains Gateway so CoStrict runs next to your code.\n" +
+                "Option 2: Open the project directly from your local filesystem so CoStrict can reach the files.",
             event.detail,
         )
         assertEquals("workspace", event.source)
@@ -186,9 +186,9 @@ class ConnectionDelayTest : SessionControllerTestBase() {
         assertEquals("Workspace not supported", event.summary)
         assertEquals(
             "Workspace path: /test\n\n" +
-                "Costrict can't resolve this workspace path on your local filesystem.\n\n" +
-                "Option 1: Open the project in the container or WSL with JetBrains Gateway so Costrict runs next to your code.\n" +
-                "Option 2: Open the project directly from your local filesystem so Costrict can reach the files.",
+                "CoStrict can't resolve this workspace path on your local filesystem.\n\n" +
+                "Option 1: Open the project in the container or WSL with JetBrains Gateway so CoStrict runs next to your code.\n" +
+                "Option 2: Open the project directly from your local filesystem so CoStrict can reach the files.",
             event.detail,
         )
     }

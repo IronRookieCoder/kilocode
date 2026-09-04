@@ -214,4 +214,7 @@ data class KiloAppStateDto(
     val config: ConfigDto? = null,
     val profile: ProfileDto? = null,
     val migration: LegacyMigrationDetectionDto? = null,
+
+    /** Connection provider id (e.g. "cs-cloud"); null for the default CLI provider. */
+    val providerId: String? = null,
 )

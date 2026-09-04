@@ -49,6 +49,7 @@ import ai.kilocode.client.session.ui.selection.SessionHoverCopyOverlay
 import ai.kilocode.client.session.ui.selection.SessionSelection
 import ai.kilocode.client.session.ui.style.SessionEditorStyle
 import ai.kilocode.client.session.ui.style.SessionEditorStyleTarget
+import ai.kilocode.client.ui.CostrictLinks
 import ai.kilocode.client.ui.layout.HAlign
 import ai.kilocode.client.ui.layout.VAlign
 import ai.kilocode.client.ui.layout.align
@@ -857,7 +858,7 @@ class SessionUi(
             SlashAction.VARIANT to { prompt.reasoning.open() },
             SlashAction.COMPACT to { controller.compact() },
             SlashAction.SETTINGS to { openKiloSettings() },
-            SlashAction.HELP to { BrowserUtil.browse("https://kilo.ai/docs") },
+            SlashAction.HELP to { BrowserUtil.browse(CostrictLinks.DOCS) },
         )
         return SlashAction.ALL.map { spec -> bind(spec, fns.getValue(spec)) }
     }

@@ -1,12 +1,13 @@
 package ai.kilocode.client.session.ui
 
-import ai.kilocode.client.plugin.KiloBundle
 import ai.kilocode.client.session.controller.SessionController
 import ai.kilocode.client.session.controller.SessionControllerEvent
 import ai.kilocode.client.session.controller.SessionControllerTestBase
 import ai.kilocode.client.session.ui.style.SessionEditorStyle
 import ai.kilocode.client.ui.UiStyle
 import ai.kilocode.rpc.ConnectionErrorCode
+import ai.kilocode.rpc.dto.KiloAppStatusDto
+import ai.kilocode.rpc.dto.KiloAppStateDto
 import com.intellij.ui.components.JBScrollPane
 import java.awt.Dimension
 import javax.swing.border.CompoundBorder
@@ -37,16 +38,12 @@ class ConnectionPanelTest : SessionControllerTestBase() {
         assertFalse(panel.retryVisible())
     }
 
-    fun `test downloading hides retry and details`() {
+    fun `test downloading entry is hidden and panel stays invisible`() {
         edt {
             panel.onEvent(SessionControllerEvent.ConnectionChanged.ShowDownloading(42, "1.2.3", "darwin-arm64"))
         }
 
-        assertTrue(panel.isVisible)
-        assertEquals(KiloBundle.message("session.connection.downloading.version", "1.2.3", "darwin-arm64", 42), panel.summaryText())
-        assertEquals("", panel.detailsText())
-        assertFalse(panel.toggleVisible())
-        assertFalse(panel.detailsVisible())
+        assertFalse(panel.isVisible)
         assertFalse(panel.retryVisible())
     }
 
@@ -143,6 +140,22 @@ class ConnectionPanelTest : SessionControllerTestBase() {
         )
     }
 
+    fun `test recovery menu hides reinstall on cs-cloud provider`() {
+        edt {
+            controller.model.app = KiloAppStateDto(
+                KiloAppStatusDto.ERROR,
+                providerId = "cs-cloud",
+            )
+            panel.onEvent(SessionControllerEvent.ConnectionChanged.ShowError(
+                "Connection failed",
+                "cs-cloud server URL was not found",
+                code = ConnectionErrorCode.CSC_NOT_INSTALLED,
+            ))
+        }
+
+        assertEquals(listOf("Kilo.Restart", "Kilo.StartCsCloud", "Kilo.InstallCsc"), panel.recoveryActionIds())
+    }
+
     fun `test workspace error shows retry without details`() {
         edt {
             panel.onEvent(SessionControllerEvent.ConnectionChanged.ShowError("Workspace failed", null))
@@ -167,10 +180,10 @@ class ConnectionPanelTest : SessionControllerTestBase() {
 
         assertTrue(panel.retryVisible())
         assertEquals("Kilo.CliGroup", ConnectionPanel.CLI_GROUP_ID)
-        assertTrue(xml.contains("<group id=\"Kilo.CliGroup\" text=\"Core\" popup=\"true\">"))
+        assertTrue(xml.contains("<group id=\"Kilo.CliGroup\" text=\"cs-cloud\" popup=\"true\">"))
         assertTrue(xml.contains("<reference ref=\"Kilo.Restart\"/>"))
         assertTrue(xml.contains("<reference ref=\"Kilo.Reinstall\"/>"))
-        assertTrue(xml.contains("<reference ref=\"Kilo.CoreInfo\"/>"))
+        assertFalse("Core info menu entry must stay hidden", xml.contains("<reference ref=\"Kilo.CoreInfo\"/>"))
     }
 
     fun `test ready warnings show collapsed banner with retry`() {

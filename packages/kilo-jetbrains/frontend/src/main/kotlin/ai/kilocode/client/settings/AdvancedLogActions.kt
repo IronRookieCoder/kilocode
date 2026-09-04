@@ -2,6 +2,7 @@ package ai.kilocode.client.settings
 
 import ai.kilocode.client.app.KiloAppService
 import ai.kilocode.client.plugin.KiloBundle
+import ai.kilocode.client.ui.CostrictBrand
 import ai.kilocode.log.KiloLog
 import ai.kilocode.rpc.dto.LogFileDto
 import com.intellij.ide.actions.RevealFileAction
@@ -76,9 +77,9 @@ internal object AdvancedLogActions {
     private fun notify(type: NotificationType, title: String, content: String? = null) {
         ApplicationManager.getApplication().invokeLater {
             val notification = NotificationGroupManager.getInstance()
-                .getNotificationGroup("Kilo Code")
+                .getNotificationGroup(CostrictBrand.NOTIFICATION_GROUP)
                 ?.createNotification(title, content.orEmpty(), type)
-                ?: Notification("Kilo Code", title, content.orEmpty(), type)
+                ?: Notification(CostrictBrand.NOTIFICATION_GROUP, title, content.orEmpty(), type)
             notification.notify(ProjectManager.getInstance().openProjects.firstOrNull { !it.isDefault })
         }
     }

@@ -3,9 +3,11 @@ package ai.kilocode.client.settings.models
 import ai.kilocode.client.util.edtWait
 import ai.kilocode.client.app.KiloAppService
 import ai.kilocode.client.app.KiloWorkspaceService
+import ai.kilocode.client.plugin.KiloBundle
 import ai.kilocode.client.session.ui.model.ModelPicker
 import ai.kilocode.client.testing.FakeAppRpcApi
 import ai.kilocode.client.testing.FakeWorkspaceRpcApi
+import ai.kilocode.client.ui.CostrictBrand
 import ai.kilocode.rpc.dto.ConfigDto
 import ai.kilocode.rpc.dto.KiloAppStateDto
 import ai.kilocode.rpc.dto.KiloAppStatusDto
@@ -283,7 +285,7 @@ class ModelsSettingsUiTest : BasePlatformTestCase() {
         rpc.configUpdateGate?.complete(Unit)
 
         flushUntil {
-            notes.any { it.groupId == "Kilo Code" && it.type == NotificationType.ERROR }
+            notes.any { it.groupId == CostrictBrand.NOTIFICATION_GROUP && it.type == NotificationType.ERROR }
         }
         assertEquals(1, rpc.configUpdateAttempts)
         assertTrue(notes.any { it.title == "Failed to save model settings" })
@@ -305,21 +307,21 @@ class ModelsSettingsUiTest : BasePlatformTestCase() {
         workspaceRpc.models = ModelsWorkspaceDto(providers = providers())
         edt { ui = ModelsSettingsUi(uiScope, app, workspaces, directory = "/test") }
         val panel = requireUi()
-        flushUntil { text(panel).contains("Old") && text(panel).contains("Sign in to Costrict") }
+        flushUntil { text(panel).contains("Old") && text(panel).contains("Sign in to CoStrict") }
         val banner = edt { components(panel.top).filterIsInstance<InlineBanner>().single() }
         rpc.configUpdateGate = CompletableDeferred()
 
         edt {
             select(panel, "new")
             panel.applyDraft()
-            assertTrue(text(panel).contains("Sign in to Costrict"))
+            assertTrue(text(panel).contains("Sign in to CoStrict"))
             assertSame(banner, components(panel.top).filterIsInstance<InlineBanner>().single())
         }
 
         rpc.configUpdateGate?.complete(Unit)
         flushUntil { rpc.configPatches.isNotEmpty() }
         edt {
-            assertTrue(text(panel).contains("Sign in to Costrict"))
+            assertTrue(text(panel).contains("Sign in to CoStrict"))
             assertSame(banner, components(panel.top).filterIsInstance<InlineBanner>().single())
         }
     }
@@ -330,6 +332,11 @@ class ModelsSettingsUiTest : BasePlatformTestCase() {
         edt {
             assertTrue(pickers(panel).first().selectedForTest()?.attachment == true)
         }
+    }
+
+    fun `test small model row is hidden`() {
+        val smallModelTitle = KiloBundle.message("settings.models.smallModel.title")
+        assertFalse(text(requireUi()).contains(smallModelTitle))
     }
 
     private fun providers(): ProvidersDto = ProvidersDto(

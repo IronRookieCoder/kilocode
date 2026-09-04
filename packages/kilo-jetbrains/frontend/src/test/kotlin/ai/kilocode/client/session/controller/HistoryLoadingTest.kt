@@ -76,7 +76,6 @@ class HistoryLoadingTest : SessionControllerTestBase() {
         assertModelEvents("HistoryLoaded", modelEvents)
         assertControllerEvents("""
             AccountOverlayChanged hide
-            AccountOverlayChanged show loggedIn=false
             AppChanged
             WorkspaceChanged
             ViewChanged progress

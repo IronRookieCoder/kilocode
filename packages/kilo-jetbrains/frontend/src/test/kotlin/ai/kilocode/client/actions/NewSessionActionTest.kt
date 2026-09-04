@@ -21,7 +21,7 @@ class NewSessionActionTest : BasePlatformTestCase() {
         assertEquals(1, manager.created)
         assertTrue(event.presentation.isEnabled)
         assertEquals("New Session", action.templatePresentation.text)
-        assertEquals("Start a new Costrict session", action.templatePresentation.description)
+        assertEquals("Start a new CoStrict session", action.templatePresentation.description)
         assertNotNull(action.templatePresentation.icon)
     }
 

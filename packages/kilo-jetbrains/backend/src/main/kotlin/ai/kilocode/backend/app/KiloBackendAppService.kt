@@ -149,6 +149,9 @@ class KiloBackendAppService private constructor(
     private val connection = connectionProvider.create(cs, reconnect = {
         cs.launch { reconnect() }
     }, log = log, timeout = loadTimeoutMs)
+
+    /** Connection provider id — lets the frontend tailor recovery actions per provider. */
+    val providerId: String get() = connectionProvider.id
     // kilocode_change end
 
     private var watcher: Job? = null

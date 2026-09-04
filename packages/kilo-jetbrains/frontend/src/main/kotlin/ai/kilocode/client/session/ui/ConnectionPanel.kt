@@ -129,7 +129,9 @@ class ConnectionPanel(
 
             is SessionControllerEvent.ConnectionChanged.ShowConnecting -> showConnecting()
 
-            is SessionControllerEvent.ConnectionChanged.ShowDownloading -> showDownloading(event.percent, event.version, event.platform)
+            // Costrict (B2): download progress entry hidden — event class, banner method and
+            // bundle keys stay for restore.
+            is SessionControllerEvent.ConnectionChanged.ShowDownloading -> Unit
 
             is SessionControllerEvent.ConnectionChanged.ShowError -> {
                 showError(event.summary, event.detail, event.code)
@@ -270,7 +272,8 @@ class ConnectionPanel(
     /** Recovery actions offered for the current failure, newest first. */
     internal fun recoveryActionIds(): List<String> = buildList {
         add("Kilo.Restart")
-        add("Kilo.Reinstall")
+        // Costrict (A5): cs-cloud manages its own lifecycle — Reinstall is a Kilo-CLI action.
+        if (controller.model.app.providerId != "cs-cloud") add("Kilo.Reinstall")
         if (code == ConnectionErrorCode.CSC_NOT_INSTALLED || code == ConnectionErrorCode.DAEMON_DOWN || code == ConnectionErrorCode.UNAUTHORIZED) {
             add("Kilo.StartCsCloud")
         }
