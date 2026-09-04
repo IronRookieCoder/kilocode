@@ -46,8 +46,14 @@ class AgentBehaviorConfigurableTest : BasePlatformTestCase() {
     }
 
     fun `test workflows provider hides page in cs cloud mode`() {
-        assertNull(WorkflowsConfigurableProvider(csCloud = true).createConfigurable())
-        assertTrue(WorkflowsConfigurableProvider(csCloud = false).createConfigurable() is WorkflowsConfigurable)
+        assertFalse(WorkflowsConfigurableProvider(csCloud = true).canCreateConfigurable())
+        assertTrue(WorkflowsConfigurableProvider(csCloud = false).canCreateConfigurable())
+    }
+
+    fun `test workflows provider always creates a configurable`() {
+        val cfg = WorkflowsConfigurableProvider(csCloud = true).createConfigurable()
+
+        assertEquals(WorkflowsConfigurable::class.java, cfg.javaClass)
     }
 
     fun `test navigation page is inert`() {

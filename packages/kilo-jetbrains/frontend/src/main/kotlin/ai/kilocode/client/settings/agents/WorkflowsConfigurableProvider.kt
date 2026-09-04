@@ -10,9 +10,9 @@ import com.intellij.openapi.options.ConfigurableProvider
  * metadata only, so file-level workflows cannot be listed or edited there.
  */
 class WorkflowsConfigurableProvider(private val csCloud: Boolean? = null) : ConfigurableProvider() {
-    override fun createConfigurable(): Configurable? {
-        val hidden = csCloud ?: (service<KiloAppService>().state.value.providerId == "cs-cloud")
-        if (hidden) return null
-        return WorkflowsConfigurable()
-    }
+    override fun canCreateConfigurable(): Boolean = !hidden()
+
+    override fun createConfigurable(): Configurable = WorkflowsConfigurable()
+
+    private fun hidden(): Boolean = csCloud ?: (service<KiloAppService>().state.value.providerId == "cs-cloud")
 }

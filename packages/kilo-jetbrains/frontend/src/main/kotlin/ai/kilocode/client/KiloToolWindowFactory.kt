@@ -56,6 +56,10 @@ class KiloToolWindowFactory : ToolWindowFactory, DumbAware {
 
 private val LOG = KiloLog.create(KiloToolWindowFactory::class.java)
 
+// Agent Manager（Beta）入口当前隐藏：只关闭工具窗 Tab 的注册，面板及其代码全部保留。
+// 置 true 可恢复 Tab；工具栏 + 按钮的可见性绑定 AGENT_MANAGER 数据键，会随之自动恢复。
+private const val AGENT_MANAGER_TAB_ENABLED = false
+
 @Service(Service.Level.PROJECT)
 internal class KiloToolWindowSetupService(
     private val project: Project,
@@ -94,14 +98,6 @@ internal class KiloToolWindowSetupService(
         try {
             val manager = SessionSidePanelManager(project, workspace)
 
-            val worktrees = WorktreeController(
-                service<KiloWorktreeService>(),
-                workspace.directory,
-                cs,
-                activity = project.service<KiloSessionService>().activity,
-            )
-            val agentManagerPanel = AgentManagerPanel(manager, worktrees, project)
-
             val chat = object : JPanel(BorderLayout()), DataProvider {
                 override fun getData(dataId: String): Any? {
                     if (SessionManager.KEY.`is`(dataId)) return manager
@@ -111,17 +107,6 @@ internal class KiloToolWindowSetupService(
                 }
             }
             chat.add(manager.component, BorderLayout.CENTER)
-            val agent = object : JPanel(BorderLayout()), DataProvider {
-                override fun getData(dataId: String): Any? {
-                    // Expose the shared manager here too so History works from the Agent Manager tab.
-                    if (SessionManager.KEY.`is`(dataId)) return manager
-                    if (SessionManager.WORKSPACE_KEY.`is`(dataId)) return workspace
-                    if (SidePanelKeys.MODE.`is`(dataId)) return SidePanelMode.AGENT_MANAGER
-                    if (SidePanelKeys.WORKTREE_PANEL.`is`(dataId)) return agentManagerPanel
-                    return null
-                }
-            }
-            agent.add(agentManagerPanel.component, BorderLayout.CENTER)
 
             // Hide the "Costrict" id label in the header so only the content tabs remain.
             toolWindow.component.putClientProperty(ToolWindowContentUi.HIDE_ID_LABEL, "true")
@@ -131,21 +116,42 @@ internal class KiloToolWindowSetupService(
             chatContent.applySidePanelMode(SidePanelMode.CHAT)
             chatContent.setDisposer(manager)
             chatContent.setPreferredFocusedComponent { manager.defaultFocusedComponent }
-            val agentContent = factory.createContent(agent, KiloBundle.message("sidePanel.mode.agentManager"), false)
-            agentContent.applySidePanelMode(SidePanelMode.AGENT_MANAGER)
-            agentContent.applyAgentManagerBetaBadge()
-            agentContent.setPreferredFocusedComponent { agentManagerPanel.component }
             toolWindow.contentManager.addContent(chatContent)
-            toolWindow.contentManager.addContent(agentContent)
-            val listener = object : ContentManagerListener {
-                override fun selectionChanged(event: ContentManagerEvent) {
-                    if (event.operation == ContentManagerEvent.ContentOperation.add && event.content === agentContent) {
-                        agentManagerPanel.refresh()
+
+            if (AGENT_MANAGER_TAB_ENABLED) {
+                val worktrees = WorktreeController(
+                    service<KiloWorktreeService>(),
+                    workspace.directory,
+                    cs,
+                    activity = project.service<KiloSessionService>().activity,
+                )
+                val agentManagerPanel = AgentManagerPanel(manager, worktrees, project)
+                val agent = object : JPanel(BorderLayout()), DataProvider {
+                    override fun getData(dataId: String): Any? {
+                        // Expose the shared manager here too so History works from the Agent Manager tab.
+                        if (SessionManager.KEY.`is`(dataId)) return manager
+                        if (SessionManager.WORKSPACE_KEY.`is`(dataId)) return workspace
+                        if (SidePanelKeys.MODE.`is`(dataId)) return SidePanelMode.AGENT_MANAGER
+                        if (SidePanelKeys.WORKTREE_PANEL.`is`(dataId)) return agentManagerPanel
+                        return null
                     }
                 }
+                agent.add(agentManagerPanel.component, BorderLayout.CENTER)
+                val agentContent = factory.createContent(agent, KiloBundle.message("sidePanel.mode.agentManager"), false)
+                agentContent.applySidePanelMode(SidePanelMode.AGENT_MANAGER)
+                agentContent.applyAgentManagerBetaBadge()
+                agentContent.setPreferredFocusedComponent { agentManagerPanel.component }
+                toolWindow.contentManager.addContent(agentContent)
+                val listener = object : ContentManagerListener {
+                    override fun selectionChanged(event: ContentManagerEvent) {
+                        if (event.operation == ContentManagerEvent.ContentOperation.add && event.content === agentContent) {
+                            agentManagerPanel.refresh()
+                        }
+                    }
+                }
+                toolWindow.contentManager.addContentManagerListener(listener)
+                Disposer.register(manager) { toolWindow.contentManager.removeContentManagerListener(listener) }
             }
-            toolWindow.contentManager.addContentManagerListener(listener)
-            Disposer.register(manager) { toolWindow.contentManager.removeContentManagerListener(listener) }
             toolWindow.contentManager.setSelectedContent(chatContent)
             manager.newSession()
 
