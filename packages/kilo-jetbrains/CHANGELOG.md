@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.0.0-rc.1] - 2026-09-04
+
+### Added
+
+- First Costrict-branded release of the JetBrains plugin. Costrict is an open-source AI coding agent with Agent Manager worktrees, MCP integrations and multi-model support — visit https://costrict.ai for release highlights and documentation.
+- Integrate the Costrict `csc` CLI and the cs-cloud daemon: cloud model catalog with credit-rate display, read-only cloud skills and favorites, and health/reconnect handling for the local daemon.
+- Separate marketplace identity (`ai.costrict.jetbrains`, vendor Costrict) so Costrict versions and releases independently of upstream Kilo Code.
+
+### Changed
+
+- Rebranded from Kilo Code to Costrict across actions, settings pages, icons and notifications. This version line starts fresh at 1.0.0 and no longer follows the upstream 7.x numbering.
+
 ## 7.5.0
 
 ### Minor Changes

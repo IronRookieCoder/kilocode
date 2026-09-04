@@ -35,7 +35,7 @@
 - Run the `prepare-jetbrains-release` workflow with `kind=rc` and version `x.y.z-rc.n`.
 - Confirm the workflow created `jetbrains/vx.y.z-rc.n` immediately at the intended source commit.
 - Review and edit `packages/kilo-jetbrains/CHANGELOG.md` in the generated release PR.
-- Merge the release PR to trigger publish from `jetbrains/vx.y.z-rc.n`, for example `jetbrains/v7.0.1-rc.1`.
+- Merge the release PR to trigger publish from `jetbrains/vx.y.z-rc.n`, for example `jetbrains/v1.0.0-rc.1`.
 - Watch the `publish-jetbrains` workflow.
 - Confirm the follow-up `publish-jetbrains-bundled` workflow completes and attaches `kilo-code-x.y.z-rc.n-bundled.zip` to the prerelease.
 - Download and retain the workflow artifact if needed.

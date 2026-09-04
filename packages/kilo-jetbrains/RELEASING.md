@@ -70,12 +70,12 @@ Examples:
 
 ```text
 kind=rc
-version=7.3.13-rc.1
+version=1.0.0-rc.1
 ```
 
 ```text
 kind=stable
-version=7.3.13
+version=1.0.0
 ```
 
 ## Changelog Range Defaults
@@ -84,9 +84,9 @@ The workflow chooses a changelog base automatically and generates notes against 
 
 | Release | Default `from_tag` |
 |---|---|
-| First RC for a version, e.g. `7.3.13-rc.1` | Latest stable JetBrains tag. |
-| Later RC, e.g. `7.3.13-rc.2` | Previous RC for the same base version. |
-| Stable, e.g. `7.3.13` | Latest stable JetBrains tag, ignoring RCs. |
+| First RC for a version, e.g. `1.0.0-rc.1` | Latest stable JetBrains tag. |
+| Later RC, e.g. `1.0.0-rc.2` | Previous RC for the same base version. |
+| Stable, e.g. `1.0.0` | Latest stable JetBrains tag, ignoring RCs. |
 
 Use `from_tag` only to override this comparison range. It does not change the release target commit.
 
@@ -97,7 +97,7 @@ For the first stable JetBrains release, there may be no previous stable tag yet.
 The workflow creates or updates a branch like:
 
 ```text
-jetbrains/release/v7.3.13-rc.1
+jetbrains/release/v1.0.0-rc.1
 ```
 
 The PR updates:
@@ -170,8 +170,8 @@ If the immediate tag must be created manually because the prepare workflow could
 
 ```bash
 git fetch origin main
-git tag jetbrains/v7.3.13 <locked-main-sha>
-git push origin jetbrains/v7.3.13
+git tag jetbrains/v1.0.0 <locked-main-sha>
+git push origin jetbrains/v1.0.0
 ```
 
 ## Required GitHub Actions Secrets
