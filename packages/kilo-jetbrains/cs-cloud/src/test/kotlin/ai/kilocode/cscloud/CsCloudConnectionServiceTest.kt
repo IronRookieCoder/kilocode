@@ -15,6 +15,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.serialization.json.Json
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
@@ -29,6 +30,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertIs
+import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import java.util.concurrent.atomic.AtomicBoolean
@@ -242,6 +244,55 @@ class CsCloudConnectionServiceTest {
             assertEquals("Bearer secret", server.takeRequest().getHeader("Authorization"))
             service.dispose()
             assertEquals(ConnectionState.Disconnected, service.state.value)
+        } finally {
+            service.dispose()
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun `connection epoch advances when the stream reconnects and resets when disconnected`() = runBlocking {
+        val server = MockWebServer()
+        // The stream ending is how a daemon restart shows up on the wire: the reconnect that
+        // follows must move the connection epoch so MCP leases re-bind (P0-1).
+        server.enqueue(MockResponse().setBody("""{"ok":true,"data":{"status":"ok","version":"1.0.0"}}"""))
+        server.enqueue(
+            MockResponse()
+                .setHeader("Content-Type", "text/event-stream")
+                .setBody(": keepalive\n\n")
+                .setSocketPolicy(SocketPolicy.DISCONNECT_AT_END),
+        )
+        server.enqueue(MockResponse().setBody("""{"ok":true,"data":{"status":"ok","version":"1.0.0"}}"""))
+        server.enqueue(
+            MockResponse()
+                .setHeader("Content-Type", "text/event-stream")
+                .setSocketPolicy(SocketPolicy.KEEP_OPEN),
+        )
+        server.start()
+        val root = Files.createTempDirectory("cs-cloud-epoch")
+        Files.createDirectories(root.resolve(".costrict/cs-cloud"))
+        Files.writeString(root.resolve(".costrict/cs-cloud/server_url"), server.url("/").newBuilder().host("127.0.0.1").build().toString())
+        Files.writeString(root.resolve(".costrict/cs-cloud/config.json"), "{\"api_key\":\"secret\"}")
+        val service = CsCloudConnectionService(
+            scope,
+            CsCloudEndpointResolver(root, emptyMap()),
+            TestLog,
+            timeout = 5_000,
+            workspace = root,
+        )
+        try {
+            service.connect()
+            assertIs<ConnectionState.Connected>(service.state.value, service.state.value.toString())
+            val first = assertNotNull(service.connectionEpoch)
+
+            withTimeout(10_000) {
+                while (service.connectionEpoch == first) delay(50)
+            }
+            val second = assertNotNull(service.connectionEpoch)
+            assertTrue(second > first, "epoch must advance across connections: $first -> $second")
+
+            service.dispose()
+            assertNull(service.connectionEpoch, "epoch must be gone once the transport is closed")
         } finally {
             service.dispose()
             server.shutdown()

@@ -37,6 +37,7 @@ import okhttp3.Request
 import java.io.IOException
 import java.nio.file.Path
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
 
 /** Connection to an already-running local cs-cloud daemon. */
 class CsCloudConnectionService(
@@ -51,7 +52,7 @@ class CsCloudConnectionService(
     private val login: suspend () -> CsCloudStartDto = { CsCloudStartDto(false, "cs-cloud login is not configured") },
 ) : KiloConnection {
     private val bridge: Lazy<CsCloudMcpBridge> = lazy {
-        CsCloudMcpBridge(cs, { endpoint }, { clients?.apiClient }, IdeMcpSessionFactory.EP.extensionList.singleOrNull(), log)
+        CsCloudMcpBridge(cs, { endpoint }, { clients?.apiClient }, { connectionEpoch }, IdeMcpSessionFactory.EP.extensionList.singleOrNull(), log)
     }
     private val _state = MutableStateFlow<ConnectionState>(ConnectionState.Disconnected)
     private val _events = MutableSharedFlow<SseEvent>(extraBufferCapacity = 128)
@@ -60,8 +61,17 @@ class CsCloudConnectionService(
     private var sse = emptyList<CsCloudSseClient>()
     private var clients: CsCloudClients? = null
     private var endpoint: CsCloudEndpoint? = null
+
+    /**
+     * Monotonically increasing connection generation: bumps on every successful (re)connection so
+     * the MCP bridge can tell a daemon restart (same port, lost bindings) apart from a no-op and
+     * re-bind leases. Null while no connection is established. Internal for tests.
+     */
+    @Volatile internal var connectionEpoch: Long? = null
+        private set
     @Volatile private var disposed = false
     private var attempt = 0
+    private val epochCounter = AtomicLong()
 
     override val state: StateFlow<ConnectionState> = _state.asStateFlow()
     override val events: SharedFlow<SseEvent> = _events.asSharedFlow()
@@ -191,6 +201,9 @@ class CsCloudConnectionService(
             withTimeout(timeout.coerceAtLeast(1_000L)) { opened.await() }
             if (!disposed) {
                 attempt = 0
+                // Bump before Connected so recovery (which runs on that transition) re-binds
+                // leases against the current daemon generation, not a pre-restart epoch.
+                connectionEpoch = epochCounter.incrementAndGet()
                 _state.value = ConnectionState.Connected(0, "")
             }
         } catch (error: TimeoutCancellationException) {
@@ -286,6 +299,7 @@ class CsCloudConnectionService(
         val old = clients
         clients = null
         endpoint = null
+        connectionEpoch = null
         old?.let {
             shutdown(it.apiClient)
             shutdown(it.sseClient)

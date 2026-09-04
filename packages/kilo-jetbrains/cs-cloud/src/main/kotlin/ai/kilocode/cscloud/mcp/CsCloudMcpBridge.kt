@@ -54,10 +54,12 @@ class CsCloudMcpBridge(
     private val scope: CoroutineScope,
     private val endpoint: () -> CsCloudEndpoint?,
     private val client: () -> OkHttpClient?,
+    private val epoch: () -> Long?,
     private val factory: IdeMcpSessionFactory?,
     private val log: KiloLog,
+    private val project: (String) -> String? = ::platformProject,
 ) : KiloSessionCapabilities {
-    private data class Lease(val workspace: String, val generation: String, val tools: Set<String>, val job: Job, val epoch: String)
+    private data class Lease(val workspace: String, val generation: String, val tools: Set<String>, val job: Job, val epoch: Long)
     private val leases = ConcurrentHashMap<String, Lease>()
     private val locks = ConcurrentHashMap<String, Mutex>()
     private val json = Json { encodeDefaults = true; explicitNulls = false }
@@ -71,8 +73,11 @@ class CsCloudMcpBridge(
             releaseLocked(id)
             return@withLock CapabilityResult.Unavailable("tools_disabled")
         }
-        val epoch = endpoint()?.base ?: return@withLock CapabilityResult.Unavailable("ide_capability_unsupported")
-        leases[id]?.takeIf { it.workspace == workspace && it.tools == tools && it.epoch == epoch && it.job.isActive }?.let {
+        // The epoch is the connection generation, not the endpoint URL: a daemon restart on the
+        // same port must invalidate existing leases so the next ensure re-PUTs the binding
+        // (otherwise the session silently loses its IDE tools after e.g. a cs-cloud auto-upgrade).
+        val currentEpoch = epoch() ?: return@withLock CapabilityResult.Unavailable("ide_capability_unsupported")
+        leases[id]?.takeIf { it.workspace == workspace && it.tools == tools && it.epoch == currentEpoch && it.job.isActive }?.let {
             return@withLock CapabilityResult.Ready(it.generation, it.tools)
         }
         val generation = UUID.randomUUID().toString()
@@ -94,7 +99,7 @@ class CsCloudMcpBridge(
             job.cancel()
             return@withLock CapabilityResult.Unavailable(failure)
         }
-        val old = leases.put(id, Lease(workspace, generation, tools, job, epoch))
+        val old = leases.put(id, Lease(workspace, generation, tools, job, currentEpoch))
         old?.job?.cancel()
         old?.let { clear(id, it.generation, it.workspace) }
         CapabilityResult.Ready(generation, tools)
@@ -148,16 +153,18 @@ class CsCloudMcpBridge(
             .onFailure { log.warn("IDE MCP release failed conversation=${hash(id)} generation=${hash(generation)}", it) }
     }
 
-    private fun project(directory: String): String? {
-        val input = canonical(directory) ?: return null
-        val matches = ProjectManager.getInstance().openProjects.filterNot { it.isDefault || it.isDisposed }.mapNotNull { it.basePath?.let(::canonical) }.filter { it == input }
-        return matches.singleOrNull()
-    }
-
-    private fun canonical(value: String): String? = runCatching { Path.of(value).toRealPath().toString() }.getOrElse { runCatching { Path.of(value).toAbsolutePath().normalize().toString() }.getOrNull() }
     private fun code(error: Throwable) = error.message?.takeIf { it.matches(Regex("[a-z_]+")) } ?: "mcp_listener_failed"
     private fun hash(value: String) = MessageDigest.getInstance("SHA-256").digest(value.toByteArray()).take(6).joinToString("") { "%02x".format(it) }
 }
+
+/** Resolves the single open project whose canonical base path equals [directory]; null when none matches exactly. */
+private fun platformProject(directory: String): String? {
+    val input = canonical(directory) ?: return null
+    val matches = ProjectManager.getInstance().openProjects.filterNot { it.isDefault || it.isDisposed }.mapNotNull { it.basePath?.let(::canonical) }.filter { it == input }
+    return matches.singleOrNull()
+}
+
+private fun canonical(value: String): String? = runCatching { Path.of(value).toRealPath().toString() }.getOrElse { runCatching { Path.of(value).toAbsolutePath().normalize().toString() }.getOrNull() }
 
 internal fun capabilityBindReason(error: Throwable): String {
     if (error !is CsCloudRequestException) return "ide_capability_bind_failed"
