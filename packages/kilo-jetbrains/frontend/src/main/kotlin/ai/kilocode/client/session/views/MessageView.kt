@@ -98,6 +98,7 @@ class MessageView(
     private var openDiff: SessionDiffOpener = { _, _, _ -> }
     private var sessionId: String? = null
     private var reverted = false
+    private var revertEnabled = revert != null
 
     init {
         isOpaque = false
@@ -515,6 +516,12 @@ class MessageView(
         syncVisibility()
     }
 
+    @RequiresEdt
+    fun setRevertEnabled(value: Boolean) {
+        revertEnabled = value && revert != null
+        wrap?.bar?.setActionsVisible(revertEnabled)
+    }
+
     /**
      * An empty message (no rendered parts) would otherwise lay out as a ~1px row and add a stray gap
      * at the top of its turn — a bare user turn anchor is the common case. Keep such a message present
@@ -584,7 +591,7 @@ class MessageView(
         private val footer = JPanel(BorderLayout()).also { it.isOpaque = false }
         val bar = MessageToolbar(
             { prompt?.copyMarkdown(trim = false) },
-            revert?.let { fn -> { fn(msg.info.id) } },
+            revert?.let { fn -> { if (revertEnabled) fn(msg.info.id) } },
         )
         private val placeholder = bar.placeholder()
         private var reverting = false
@@ -601,6 +608,7 @@ class MessageView(
             footer.border = JBUI.Borders.emptyTop(UiStyle.Gap.xs())
             footer.add(placeholder.align(HAlign.RIGHT, VAlign.TOP), BorderLayout.CENTER)
             add(footer, BorderLayout.SOUTH)
+            bar.setActionsVisible(revertEnabled)
         }
 
         override fun copyText(): String? = prompt?.copyMarkdown(trim = false)

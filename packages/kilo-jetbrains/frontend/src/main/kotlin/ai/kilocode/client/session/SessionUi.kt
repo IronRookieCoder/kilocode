@@ -415,6 +415,7 @@ class SessionUi(
         ).also {
             it.outcome = outcome
             it.setDiffOpener(::openInlineDiff, controller.id)
+            it.setRevertEnabled(controller.model.app.providerId != "cs-cloud")
             it.onHover = { view, on -> if (on) popup.show(view) else popup.notifyExit(view) }
         }
         header = SessionHeaderPanel(controller, this, readonly) { openBranchChanges() }
@@ -447,6 +448,8 @@ class SessionUi(
             completion = completion,
             cs = cs,
             hostedInEditorTab = manager?.hostedInEditorTab == true,
+            // csc daemon 未实现 /enhance-prompt，隐藏入口避免必然失败（保留 enhance 链路代码）
+            showEnhance = false,
         )
         connection = ConnectionPanel(this, controller)
         root.addOverlay(connection) { pane, child ->
@@ -597,6 +600,7 @@ class SessionUi(
 
                 is SessionControllerEvent.AppChanged -> {
                     if (readonly) return@addListener
+                    messageBody.setRevertEnabled(controller.model.app.providerId != "cs-cloud")
                     prompt.setReady(controller.model.isReady())
                 }
 

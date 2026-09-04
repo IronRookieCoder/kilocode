@@ -232,6 +232,33 @@ class ConfigSelectionTest : SessionControllerTestBase() {
         assertFalse(m.model.modelOverride)
     }
 
+    fun `test cs cloud falls back to costrict auto`() {
+        appRpc.models = ModelStateDto(recent = listOf(ModelSelectionDto("kilo", "kilo-auto/free")))
+        appRpc.state.value = KiloAppStateDto(
+            KiloAppStatusDto.READY,
+            providerId = "cs-cloud",
+            config = ConfigDto(model = "missing/model"),
+        )
+        projectRpc.state.value = workspaceReady(
+            providers = listOf(
+                ProviderDto(
+                    id = "costrict",
+                    name = "CoStrict",
+                    models = mapOf("Auto" to ModelDto(id = "Auto", name = "Auto")),
+                ),
+            ),
+            connected = listOf("costrict"),
+            defaults = emptyMap(),
+        )
+        val m = controller()
+        collect(m)
+        flush()
+
+        assertEquals("costrict/Auto", m.model.defaultModel)
+        assertEquals("costrict/Auto", m.model.model)
+        assertFalse(m.model.modelOverride)
+    }
+
     fun `test reset recomputes variants for computed model`() {
         appRpc.models = ModelStateDto(
             model = mapOf("code" to ModelSelectionDto("openai", "gpt")),

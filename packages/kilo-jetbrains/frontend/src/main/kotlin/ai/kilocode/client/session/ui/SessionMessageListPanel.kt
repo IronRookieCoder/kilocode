@@ -90,6 +90,7 @@ class SessionMessageListPanel(
     private var stable = -1
     private var pendingReflow = false
     private var dead = false
+    private var revertEnabled = revert != null
 
     var onHover: ((PartView, Boolean) -> Unit)? = null
     var onReflow: ((Boolean) -> Unit)? = null
@@ -234,6 +235,14 @@ class SessionMessageListPanel(
         turnViews.values.forEach { it.setDiffOpener(openDiff, sessionId) }
     }
 
+    @RequiresEdt
+    fun setRevertEnabled(value: Boolean) {
+        revertEnabled = value && revert != null
+        turnViews.values.forEach { it.setRevertEnabled(revertEnabled) }
+        banner?.setAvailable(revertEnabled)
+        refresh()
+    }
+
     // ------ public lookup API ------
 
     /** Find the [MessageView] for a message by id, or null if not present. */
@@ -302,6 +311,7 @@ class SessionMessageListPanel(
     private fun onTurnAdded(turn: ai.kilocode.client.session.model.Turn) {
         val tv = TurnView(turn.id, openFile, style, openUrl, selection, openAttachment, resize, repo, ::hover, revert, deleteQueued, onOpenSubagent).also {
             it.setDiffOpener(openDiff, sessionId)
+            it.setRevertEnabled(revertEnabled)
         }
         turnViews[turn.id] = tv
         for (msgId in turn.messageIds) {
@@ -371,6 +381,7 @@ class SessionMessageListPanel(
         for (turn in model.turns()) {
             val tv = TurnView(turn.id, openFile, style, openUrl, selection, openAttachment, resize, repo, ::hover, revert, deleteQueued, onOpenSubagent).also {
                 it.setDiffOpener(openDiff, sessionId)
+                it.setRevertEnabled(revertEnabled)
             }
             turnViews[turn.id] = tv
             for (msgId in turn.messageIds) {

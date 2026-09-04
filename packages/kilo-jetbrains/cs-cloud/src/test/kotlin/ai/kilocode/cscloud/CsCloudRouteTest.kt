@@ -44,6 +44,94 @@ class CsCloudRouteTest {
     }
 
     @Test
+    fun `unwraps csc agent list envelope for the generated client`() {
+        val server = MockWebServer()
+        server.enqueue(MockResponse().setBody("""{"value":[{"name":"build","mode":"primary"}]}"""))
+        server.start()
+        val client = OkHttpClient.Builder()
+            .addInterceptor(CsCloudRoute.interceptor())
+            .addInterceptor(CsCloudRoute.responseInterceptor())
+            .build()
+
+        try {
+            val api = DefaultApi(server.url("/").toString().trimEnd('/'), client)
+            val agent = api.appAgents().single()
+            assertEquals("build", agent.name)
+            assertEquals(emptyList(), agent.permission)
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun `keeps csc agent list when response is already an array`() {
+        val server = MockWebServer()
+        server.enqueue(MockResponse().setBody("[{\"name\":\"build\",\"mode\":\"primary\",\"permission\":null,\"options\":null}]"))
+        server.start()
+        val client = OkHttpClient.Builder()
+            .addInterceptor(CsCloudRoute.interceptor())
+            .addInterceptor(CsCloudRoute.responseInterceptor())
+            .build()
+
+        try {
+            val response = client.newCall(Request.Builder().url(server.url("/agent/")).build()).execute()
+            assertEquals("[{\"name\":\"build\",\"mode\":\"primary\",\"permission\":[],\"options\":{}}]", response.body!!.string())
+            assertEquals("/api/v1/agents/session-modes", server.takeRequest().path)
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun `serves cs cloud commands as builtin skills for the kilo backend`() {
+        val server = MockWebServer()
+        server.enqueue(
+            MockResponse().setBody(
+                """[
+                {"name":"review","description":"代码缺陷检测","scope":"prompt"},
+                {"name":"favorites","description":"Manage favorite skills","scope":"shared","category":"skill"},
+                {"description":"no name is not parseable"}
+            ]""",
+            )
+        )
+        server.start()
+        val client = OkHttpClient.Builder()
+            .addInterceptor(CsCloudRoute.interceptor())
+            .addInterceptor(CsCloudRoute.responseInterceptor())
+            .build()
+
+        try {
+            val response = client.newCall(
+                Request.Builder().url(server.url("/skill?directory=%2Ftmp%2Fworkspace")).build()
+            ).execute()
+
+            assertEquals("/api/v1/agents/commands", server.takeRequest().path)
+            val skills = KiloCliDataParser.parseAgentBehaviorSkills(response.body!!.string())
+
+            assertEquals(listOf("review", "favorites"), skills.map { it.name })
+            assertEquals(listOf("builtin:review", "builtin:favorites"), skills.map { it.location })
+            assertEquals("代码缺陷检测", skills.single { it.name == "review" }.description)
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun `normalizes responses when daemon endpoint has a path prefix`() {
+        val server = MockWebServer()
+        server.enqueue(MockResponse().setBody("[{\"name\":\"build\",\"mode\":\"primary\"}]"))
+        server.start()
+        val client = OkHttpClient.Builder().addInterceptor(CsCloudRoute.responseInterceptor()).build()
+
+        try {
+            val response = client.newCall(Request.Builder().url(server.url("/bridge/api/v1/agents/session-modes")).build()).execute()
+            assertTrue(response.body!!.string().contains("\"options\":{}"))
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
     fun `stubs provider auth without hitting the cs cloud daemon`() {
         val server = MockWebServer()
         server.start()
@@ -126,6 +214,25 @@ class CsCloudRouteTest {
     }
 
     @Test
+    fun `normalizes conversation envelope and detail model`() {
+        val server = MockWebServer()
+        server.enqueue(MockResponse().setBody("""{"value":[{"id":"ses_1","model":"Mimo-V2.5-Pro"}]}"""))
+        server.enqueue(MockResponse().setBody("""{"id":"ses_1","model":"Mimo-V2.5-Pro"}"""))
+        server.start()
+        val client = OkHttpClient.Builder().addInterceptor(CsCloudRoute.responseInterceptor()).build()
+
+        try {
+            val list = client.newCall(Request.Builder().url(server.url("/api/v1/conversations/")).build()).execute()
+            assertEquals("[{\"id\":\"ses_1\",\"model\":{\"id\":\"Mimo-V2.5-Pro\",\"providerID\":\"\"},\"projectID\":\"\",\"title\":\"\",\"version\":\"\",\"time\":{\"created\":0,\"updated\":0}}]", list.body!!.string())
+
+            val detail = client.newCall(Request.Builder().url(server.url("/api/v1/conversations/ses_1")).build()).execute()
+            assertTrue(detail.body!!.string().contains("\"model\":{\"id\":\"Mimo-V2.5-Pro\""))
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
     fun `normalizes csc conversation creation response`() {
         val server = MockWebServer()
         server.enqueue(MockResponse().setBody("""{
@@ -135,7 +242,7 @@ class CsCloudRouteTest {
         val client = OkHttpClient.Builder().addInterceptor(CsCloudRoute.responseInterceptor()).build()
 
         try {
-            val response = client.newCall(Request.Builder().url(server.url("/api/v1/conversations")).build()).execute()
+            val response = client.newCall(Request.Builder().url(server.url("/api/v1/conversations")).post("{}".toRequestBody()).build()).execute()
             val item = KiloCliDataParser.parseSession(response.body!!.string())
 
             assertEquals("ses_new", item.id)

@@ -55,6 +55,13 @@ internal class MessageToolbar(
     }
 
     @RequiresEdt
+    fun setActionsVisible(value: Boolean) {
+        buttons.forEach { it.isVisible = value }
+        revalidate()
+        repaint()
+    }
+
+    @RequiresEdt
     fun active() = isVisible && button.isEnabled
 
     @RequiresEdt

@@ -2080,6 +2080,7 @@ class SessionController(
             mode = cfg.agent[agent]?.model?.let(::selection),
             global = cfg.model?.let(::selection),
             recent = app.models.value.recent,
+            fallback = fallback(model.app.providerId),
         )?.key
         if (saved != null) return valid(model.workspace.providers, saved)?.key ?: auto
         return auto
@@ -2093,6 +2094,7 @@ class SessionController(
             mode = cfg?.agent?.get(agent)?.model?.let(::selection),
             global = cfg?.model?.let(::selection),
             recent = app.models.value.recent,
+            fallback = fallback(model.app.providerId),
         )?.key
     }
 
@@ -2772,6 +2774,12 @@ private fun unsupported(reason: String?, directory: String): String {
 
 private const val KILO_PROVIDER = "kilo"
 private const val KILO_AUTO_MODEL = "kilo-auto/free"
+private const val CSC_PROVIDER = "costrict"
+private const val CSC_AUTO_MODEL = "Auto"
+
+private fun fallback(provider: String?): ModelSelectionDto =
+    if (provider == "cs-cloud") ModelSelectionDto(CSC_PROVIDER, CSC_AUTO_MODEL)
+    else ModelSelectionDto(KILO_PROVIDER, KILO_AUTO_MODEL)
 
 private fun resolveModelSelection(
     providers: ProvidersDto?,

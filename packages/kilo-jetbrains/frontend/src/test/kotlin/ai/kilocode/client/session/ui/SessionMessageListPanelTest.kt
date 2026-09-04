@@ -518,6 +518,33 @@ class SessionMessageListPanelTest : BasePlatformTestCase() {
         assertEquals("u1", called)
     }
 
+    fun `test rollback action hides when provider disables revert`() {
+        var called: String? = null
+        panel = SessionMessageListPanel(model, parent, openFile = openFile, revert = { called = it })
+        model.upsertMessage(msg("u1", "user"))
+        model.updateContent("u1", part("p1", "u1", "text", text = "hello"))
+        val message = panel.findMessage("u1")!!
+        val toolbar = components(message).filterIsInstance<SessionCopyTarget>().single { it.copyToolbar != null }.copyToolbar as MessageToolbar
+        val rollback = components(toolbar)
+            .filterIsInstance<JButton>()
+            .first { it.toolTipText == KiloBundle.message("revert.message.rollback") }
+
+        panel.setRevertEnabled(false)
+        rollback.doClick()
+        model.upsertMessage(msg("u2", "user"))
+        model.updateContent("u2", part("p2", "u2", "text", text = "later"))
+        val next = panel.findMessage("u2")!!
+        val nextToolbar = components(next).filterIsInstance<SessionCopyTarget>().single { it.copyToolbar != null }.copyToolbar as MessageToolbar
+        val nextRollback = components(nextToolbar)
+            .filterIsInstance<JButton>()
+            .first { it.toolTipText == KiloBundle.message("revert.message.rollback") }
+        nextRollback.doClick()
+
+        assertFalse(rollback.isVisible)
+        assertFalse(nextRollback.isVisible)
+        assertNull(called)
+    }
+
     fun `test rollback state shows inline prompt progress and suppresses toolbar`() {
         var cancelled = false
         panel = SessionMessageListPanel(model, parent, openFile = openFile, revert = {}, cancelRevert = { cancelled = true })

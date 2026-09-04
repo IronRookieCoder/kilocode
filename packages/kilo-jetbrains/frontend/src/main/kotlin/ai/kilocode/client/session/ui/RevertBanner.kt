@@ -84,6 +84,7 @@ class RevertBanner(
 
     private val rows = LinkedHashMap<String, Row>()
     private var progress: RevertProgress? = null
+    private var available = true
 
     private val hint = JBLabel(KiloBundle.message("revert.banner.hint")).apply {
         font = JBFont.small()
@@ -115,8 +116,8 @@ class RevertBanner(
     @RequiresEdt
     fun update() {
         val revert = model.revert()
-        isVisible = revert != null
-        if (revert == null) return
+        isVisible = available && revert != null
+        if (!available || revert == null) return
         val total = model.revertedCount()
         title.text = KiloBundle.message(if (total == 1) "revert.banner.count.one" else "revert.banner.count.other", total)
         setActionVisible("all", total > 1)
@@ -141,6 +142,13 @@ class RevertBanner(
         }
         revalidate()
         repaint()
+    }
+
+    @RequiresEdt
+    fun setAvailable(value: Boolean) {
+        if (available == value) return
+        available = value
+        update()
     }
 
     @RequiresEdt

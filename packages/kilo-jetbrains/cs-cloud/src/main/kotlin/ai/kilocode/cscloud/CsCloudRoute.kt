@@ -3,6 +3,7 @@ package ai.kilocode.cscloud
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
@@ -25,10 +26,10 @@ object CsCloudRoute {
     private const val workspaceHeader = "X-Workspace-Directory"
     private const val clientHeader = "X-Session-Client"
     private const val client = "kilo-jetbrains"
+    internal const val BUILTIN_PREFIX = "builtin:"
 
     fun rewrite(request: Request, prefix: String = "", roots: List<Path> = emptyList()): Request {
-        val full = request.url.encodedPath
-        val path = full.removePrefix(prefix).ifEmpty { "/" }
+        val path = clientPath(request.url.encodedPath, prefix)
         val route = route(path)
         val workspacePath = request.url.queryParameter(workspace)
         val builder = request.url.newBuilder().encodedPath("${prefix.trimEnd('/')}$route")
@@ -49,10 +50,10 @@ object CsCloudRoute {
     }
 
     fun interceptor(prefix: String = "", roots: () -> List<Path> = { emptyList() }): Interceptor = Interceptor { chain ->
-        val path = chain.request().url.encodedPath.removePrefix(prefix).ifEmpty { "/" }
+        val path = clientPath(chain.request().url.encodedPath, prefix)
         val body = when (path) {
             "/kilo/profile" -> return@Interceptor local(chain.request(), 401, "{}")
-            "/kilo/notifications", "/config/warnings", "/skill" -> "[]"
+            "/kilo/notifications", "/config/warnings" -> "[]"
             "/provider/auth" -> "{}"
             else -> null
         }
@@ -65,8 +66,9 @@ object CsCloudRoute {
         val body = response.body ?: return@Interceptor response
         val text = body.string()
         if (!response.isSuccessful) throw CsCloudRequestException.fromResponse(response, text)
+        val path = apiPath(response.request.url.encodedPath)
         val data = when {
-            response.request.url.encodedPath.endsWith("/api/v1/runtime/health") -> {
+            path == "/api/v1/runtime/health" -> {
                 val health = CsCloudHealth.parseHealth(text)
                 buildJsonObject {
                     put("healthy", health.healthy)
@@ -74,8 +76,11 @@ object CsCloudRoute {
                     put("capabilities", JsonArray(health.capabilities.sorted().map(::JsonPrimitive)))
                 }.toString()
             }
-            response.request.url.encodedPath.endsWith("/api/v1/agents/models") -> models(text)
-            response.request.url.encodedPath.endsWith("/api/v1/conversations") -> conversations(text)
+            path == "/api/v1/agents/models" -> models(text)
+            path == "/api/v1/agents/session-modes" -> agents(text)
+            path == "/api/v1/agents/commands" -> commands(text)
+            path == "/api/v1/conversations" -> conversations(text, list = response.request.method == "GET")
+            isConversationDetail(path) -> conversations(text, list = false)
             else -> text
         }
         response.newBuilder().body(data.toResponseBody(body.contentType())).build()
@@ -99,13 +104,61 @@ object CsCloudRoute {
         }.toString()
     }
 
-    private fun conversations(raw: String): String {
+    /** CSC versions return either an array or a `value` envelope for this list. */
+    private fun agents(raw: String): String {
         val root = Json.parseToJsonElement(raw)
-        return when (root) {
-            is JsonArray -> JsonArray(root.map(::conversation)).toString()
-            else -> conversation(root).toString()
-        }
+        val value = (root as? JsonObject)?.get("value") ?: root
+        val array = value as? JsonArray ?: return value.toString()
+        return JsonArray(array.map { item ->
+            val obj = item as? JsonObject ?: return@map item
+            JsonObject(buildMap {
+                putAll(obj)
+                if (obj["permission"] == null || obj["permission"] is JsonNull) put("permission", JsonArray(emptyList()))
+                if (obj["options"] == null || obj["options"] is JsonNull) put("options", JsonObject(emptyMap()))
+            })
+        }).toString()
     }
+
+    /** CSC serves skills through the commands list: tag every entry as a read-only builtin. */
+    private fun commands(raw: String): String {
+        val root = Json.parseToJsonElement(raw)
+        val value = (root as? JsonObject)?.get("value") ?: root
+        val array = value as? JsonArray ?: return value.toString()
+        return JsonArray(array.map { item ->
+            val obj = item as? JsonObject ?: return@map item
+            val name = (obj["name"] as? JsonPrimitive)?.contentOrNull ?: return@map obj
+            JsonObject(buildMap {
+                putAll(obj)
+                if (obj["location"] == null || obj["location"] is JsonNull) put("location", JsonPrimitive("$BUILTIN_PREFIX$name"))
+                if (obj["builtin"] == null || obj["builtin"] is JsonNull) put("builtin", JsonPrimitive(true))
+            })
+        }).toString()
+    }
+
+    private fun conversations(raw: String, list: Boolean): String {
+        val root = Json.parseToJsonElement(raw)
+        val value = (root as? JsonObject)?.get("value") ?: root
+        if (list) {
+            val array = value as? JsonArray ?: return value.toString()
+            return JsonArray(array.map(::conversation)).toString()
+        }
+        return conversation(value).toString()
+    }
+
+    private fun isConversationDetail(path: String): Boolean {
+        val prefix = "/api/v1/conversations/"
+        val id = path.removePrefix(prefix)
+        return path.startsWith(prefix) && id.isNotEmpty() && !id.contains('/')
+    }
+
+    private fun apiPath(raw: String): String {
+        val path = raw.trimEnd('/').ifEmpty { "/" }
+        val index = path.lastIndexOf("/api/v1/")
+        return if (index >= 0) path.substring(index) else path
+    }
+
+    private fun clientPath(raw: String, prefix: String): String =
+        raw.removePrefix(prefix).trimEnd('/').ifEmpty { "/" }
 
     private fun conversation(value: JsonElement): JsonElement {
         val obj = value as? JsonObject ?: return value
@@ -150,6 +203,7 @@ object CsCloudRoute {
         path == "/provider" -> "/api/v1/agents/models"
         path == "/agent" -> "/api/v1/agents/session-modes"
         path == "/command" -> "/api/v1/agents/commands"
+        path == "/skill" -> "/api/v1/agents/commands"
         path == "/path" -> "/api/v1/runtime/path"
         path == "/find/file" -> "/api/v1/runtime/find/file"
         else -> path

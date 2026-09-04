@@ -46,6 +46,7 @@ class TurnView(
     private val messages = LinkedHashMap<String, MessageView>()
     private var modified: ModifiedFilesView? = null
     private var settled = true
+    private var revertEnabled = revert != null
     private var openDiff: SessionDiffOpener = { _, _, _ -> }
     private var sessionId: String? = null
 
@@ -80,6 +81,7 @@ class TurnView(
     fun addMessage(msg: Message): MessageView {
         val view = MessageView(msg, openFile, style, openUrl, selection, openAttachment, resize, repo, hover, revert, onOpenSubagent).also {
             it.setDiffOpener(openDiff, sessionId)
+            it.setRevertEnabled(revertEnabled)
         }
         messages[msg.info.id] = view
         val idx = modified?.let { components.indexOf(it) } ?: componentCount
@@ -132,6 +134,12 @@ class TurnView(
     fun syncCopyToolbars() {
         val id = messages.values.reversed().firstNotNullOfOrNull { it.latestAssistantCopyId() }
         for (view in messages.values) view.syncCopyToolbar(id)
+    }
+
+    @RequiresEdt
+    fun setRevertEnabled(value: Boolean) {
+        revertEnabled = value && revert != null
+        messages.values.forEach { it.setRevertEnabled(revertEnabled) }
     }
 
     /** Look up a nested [MessageView] by message id. */
