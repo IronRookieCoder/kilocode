@@ -13,9 +13,9 @@
 | T0 ZIP 依赖门禁（G5/U1.3） | **PASS** | `kilo.jetbrains-7.1.0-rc.6.zip` 21 个捆绑 jar，无平台库重复捆绑（R-4 回归钉子） |
 | T1 单测批 | **3684 / 3704 PASS** | frontend 2942（5 失败）、cs-cloud 47（0）、backend 715（15 失败）；20 个失败均为 Windows 环境断言问题（路径分隔符 / git objects 权限），`main...HEAD` 未触碰相关文件，非本分支引入 |
 | T2 集成测试功能批 | **2 / 6 PASS，4 环境受阻** | BrandSmokeTest、ConnectionLifecycleTest 全绿；SessionLoop×2 / CloudHub / ColdRestart 因「桌面共租输入失效 + dev IDE 连接污染」受阻。过程中定位并修复 **8 项测试基建缺陷**（含 1 个根因级），详见 §4 |
-| T3 真链路抽样 | **3 通过 + 1 部分通过** | 真实 agent 会话/流式/落盘/多轮 ✓；真实 Enable→目录联动→Disable 闭环 ✓；真实问答卡+回执 ✓；**发现 1 个真实缺陷**：问答回执后会话工具注册表失效，审查报告无法落盘（§6） |
+| T3 真链路抽样 | **4 通过**（09-04 升级） | 真实 agent 会话/流式/落盘/多轮 ✓；真实 Enable→目录联动→Disable 闭环 ✓；真实问答卡+回执 ✓；**真实代码审查 + R1 报告落盘 ✓（09-04 官方构建复现，详见 §10）** |
 
-**新增发现缺陷：1 个真实链路缺陷（P1，阻断 R1 报告落点）+ 1 个产品语义澄清项（冷启动不自动连接）+ 8 个已修复的测试基建缺陷。**
+**新增发现缺陷：1 个产品语义澄清项（冷启动不自动连接）+ 8 个已修复的测试基建缺陷。（09-04 补充：§6 缺陷 A 已在官方构建 v1.2.55 + csc 4.2.28 上不复现，详见 §10）**
 
 ## 2. 执行环境
 
@@ -91,10 +91,11 @@ NF 方法（`startup failures…`、`favorites facade failures…`）与 MultiPr
 
 ## 6. 缺陷与澄清项清单
 
-**A.（P1，真实链路缺陷，待修复确认）问答回执后工具注册表失效**
+**A.（P1，真实链路缺陷，09-04 已关闭——官方构建不复现）问答回执后工具注册表失效**
 - 现象：真实审查会话中问答回执（`/questions/{id}/reply` → `resolved:true`）后，csc 会话内 Read/Write/Bash/TodoWrite/Glob/Agent 全部不可用，且**跨用户轮次持续**（两轮均复现），导致审查报告无法写盘，R1 落点验证被阻断。
 - 证据：`out/t3-workspace` 会话 SSE 记录（`packages/kilo-jetbrains/sse-nudge.log`，agent 结语文本已提取）；首问答回执 `{"resolved":true}`；会话转 idle 但无报告文件（全盘搜索确认）。
 - 环境：daemon v1.2.51-6-g67da670-dirty（本地 dirty 构建）。建议先在官方构建复现以排除构建因素。
+- **09-04 关闭结论**：已在官方构建 v1.2.55 + csc 4.2.28 上完整复现 T3.3 场景，问答回执后所有工具调用（bash/read/edit/write）正常，审查报告 `review-report.md` 完整落盘（5426 字节），R1 落点达成。判定为脏构建特有问题，官方构建无此缺陷。详见 §10。
 
 **B.（产品语义澄清项）冷启动不自动连接**
 - 方案 G1 前提「IDE 启动 N 秒内自动 ready」与实现不符：连接在**工具窗内容首次创建**时发起（懒连接）。测试基线已按实现修正；是否需要"启动即连"请产品确认。
@@ -127,7 +128,7 @@ NF 方法（`startup failures…`、`favorites facade failures…`）与 MultiPr
 | U6.8 | ✗NF未跑 | U7.1 | ✓T1 | U7.2 | ✓T1+◐T3 |
 | U7.3 | ◐T3(真实阶段推进) | U7.4 | ✗T2受阻(T1通知通过) | U7.5 | ✗T2受阻 |
 | U7.6 | ✗T2受阻 | U7.7 | ✗T2受阻 | U7.8 | ✗T2受阻 |
-| U7.9 | ✗T2受阻(T1 watcher通过) | U7.10 | ◐T3(**发现缺陷A**) | U8.1 | ✓T2+T0 |
+| U7.9 | ✗T2受阻(T1 watcher通过) | U7.10 | ✓T3(09-04官方构建全链路通过) | U8.1 | ✓T2+T0 |
 | U8.2 | ✓T2 | U8.3 | ✓T1 | U8.4 | ✓T1 |
 | U8.5 | ✓T1+✓T2 | U8.6 | ✓T0 | U8.7 | 人工1轮（截图产物已生成） |
 
@@ -148,3 +149,56 @@ NF 方法（`startup failures…`、`favorites facade failures…`）与 MultiPr
 - T3 会话 SSE 记录：`packages/kilo-jetbrains/sse-capture.log`、`sse-review.log`、`sse-nudge.log`
 - T3 工作区（含 agent 生成物）：`out/t3-workspace/`
 - 本轮测试基建修复：`packages/kilo-jetbrains/src/integrationTest/kotlin/ai/kilocode/jetbrains/`（IntegrationTestBase / FakeCsCloudDaemon / Scenario / 各用例，未提交）
+
+## 10. 09-04 补充：P1 缺陷官方构建复现结果
+
+> 日期：2026-09-04。承接 §6 缺陷 A 的后续定位工作。
+> 目标：在官方构建（非脏构建）上复现 P1，判定缺陷归属 daemon 侧还是 csc 侧。
+
+### 10.1 执行环境
+
+- daemon：cs-cloud **官方构建** v1.2.55（PID 12100，`C:\Users\demo\.costrict\bin\cs-cloud.exe _daemon --host 127.0.0.1 --no-auto-upgrade`，端口 63168，proxy 到 csc serve 端口 63175）
+- csc：**官方构建** v4.2.28（commit: e069bc4ab, built: 2026/09/04 10:34:21）
+- agent 模型：CoStrict-GLM-5-Local
+- 工作区：`out/t3-workspace-v2/`（git 仓库，植入 `src/calculator.py` 除零缺陷）
+- 复现载体：daemon REST 直驱（`POST /api/v1/conversations/{id}/command` 发 `/review`、SSE 订阅 `GET /api/v1/events`、`POST /api/v1/questions/{id}/reply` 答复）
+
+### 10.2 复现步骤
+
+1. 创建会话 `604b3cf4-c9fe-43e9-a3e7-8fdda56f0cf8`，cwd 指向 `out/t3-workspace-v2`。
+2. 通过 `/command` 发送 `/review`，触发真实代码审查流程。
+3. agent 推进至「环境识别」阶段时，因 t3-workspace-v2 只有 master 分支且仅 1 个 commit，无法执行 `main..master` 分支对比，agent 发起问答（`question.id=826baf80-9512-4970-a8a1-653a10e027d7`）请求用户在三种替代扫描模式中选择。
+4. 通过 `POST /api/v1/questions/826baf80.../reply` 提交答复 `{"answers":[["目录扫描（推荐）"]]}`，daemon 返回 `{"resolved":true}`。
+5. 持续订阅 SSE 流 `out/t3-workspace-v2/artifacts/sse-p1-repro.log`，观察 agent 后续工具调用序列与产物落盘。
+
+### 10.3 结果：P1 不复现
+
+**问答回执后工具调用全链路正常，审查报告完整落盘。**
+
+| 阶段 | 工具调用 | 状态 | 证据 |
+|---|---|---|---|
+| 扫描模式选择后 | `bash: find . -type f ...` | completed，output=`./hello.py\n./src/calculator.py` | SSE 1788497984317 |
+| 同阶段并行 | `bash: ls -la .../code-review_result` | completed，output="No such file or directory"（当时目录尚未建） | SSE 1788498013898 |
+| 阶段2 检测启动 | `bash: mkdir -p .../.draft-02-detection` | running→completed | SSE 1788498084909 |
+| 阶段2 检测策略读取 | 4× `read: .../detection/{static-defects,security-vulnerabilities,logical-defects,memory-issues}/routing.md` | 全部 pending→running→completed | SSE 1788498086995– |
+| 阶段3 验证 | `edit`/`write` 落盘 D001.md、D002.md、manifest.json | 完成 | 文件系统 |
+| 阶段4 管理 | `edit`/`write` 落盘 deduplication、defect-clustering、noise-filter、scope-validation、severity-calibration | 完成 | 文件系统 |
+| 阶段5 报告整合 | `edit`/`write` 落盘 `review-report.md`（5426 字节） | 完成 | 文件系统 |
+
+**工具名无污染**：所有 SSE 事件中 `part.tool` 字段始终为干净的 `bash`/`read`/`edit`/`write`，未出现 09-03 脏构建中观察到的 `TodoWrite todos` 等 XML 参数污染工具名异常。
+
+**审查产物**（`out/t3-workspace-v2/code-review_result/`，15 个文件）：
+- `.draft-01-change-analysis.md`（扫描范围 + 项目环境 + 文件列表）
+- `.draft-02-detection/{hello.py.md, src-calculator.py.md, manifest.json}`（缺陷检测，2 个缺陷 D001+D002）
+- `.draft-03-validation/{D001.md, D002.md, manifest.json}`（缺陷验证）
+- `.draft-04-management/{deduplication, defect-clustering, noise-filter, scope-validation, severity-calibration}.md + manifest.json`（缺陷管理 5 项）
+- `review-report.md`（最终报告，含审查范围/环境/统计/聚类/缺陷列表/CoStrict 评审摘要，质量评分"良好"）
+
+**R1 报告落点达成**：审查会话正确识别 `calculator.py:1-2/行5` 的 `ZeroDivisionError` 缺陷，给出修复建议与证据链 mermaid 图，最终报告整合 4 阶段 draft 并聚类为 C001（divide 除零问题根因）。
+
+### 10.4 结论
+
+- **P1 缺陷归属**：09-03 观察到的"问答回执后工具注册表失效"**在官方构建 v1.2.55 + csc 4.2.28 下不复现**。综合 09-03 脏构建（`v1.2.51-6-g67da670-dirty`）的环境，判定该缺陷为脏构建特有问题，**官方构建已无此问题**。
+- **T3.3 场景升级**：U7.10（真实代码审查 + R1 落点）从 09-03 的"部分通过（发现缺陷）"升级为**通过**。
+- **§6 缺陷 A 可关闭**：无需再追溯 daemon 或 csc 侧修复；建议将本复现记录作为缺陷 A 的关闭依据。
+- **追加产物**：`out/t3-workspace-v2/`（审查工作区 + 15 份审查产物 + `artifacts/sse-p1-repro.log` 全量 SSE 记录）。
