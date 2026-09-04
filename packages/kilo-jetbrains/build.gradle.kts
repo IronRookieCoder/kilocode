@@ -309,6 +309,13 @@ intellijPlatform {
 }
 
 tasks {
+    // The distribution filename is the only user-visible artifact name (GitHub Release asset,
+    // manual disk installs); plugin identity itself comes from the plugin.xml id
+    // (ai.costrict.jetbrains), so a product-named archive needs no deeper renaming.
+    named<Zip>("buildPlugin") {
+        archiveBaseName.set("costrict")
+    }
+
     named("verifyPluginSignature") {
         dependsOn("signPlugin")
     }

@@ -72,7 +72,7 @@ bun run build:production
 
 This builds the plugin without bundling CLI binaries. The backend downloads the pinned Kilo CLI release for the host platform at connect time.
 
-The built plugin archive is at `build/distributions/kilo.jetbrains-<version>.zip`. This zip can be installed in any JetBrains IDE via **Settings > Plugins > Install Plugin from Disk**.
+The built plugin archive is at `build/distributions/costrict-<version>.zip`. This zip can be installed in any JetBrains IDE via **Settings > Plugins > Install Plugin from Disk**.
 
 ---
 
