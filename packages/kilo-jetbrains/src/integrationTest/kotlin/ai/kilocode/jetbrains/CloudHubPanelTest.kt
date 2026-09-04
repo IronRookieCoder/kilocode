@@ -89,6 +89,8 @@ class CloudHubPanelTest : IntegrationTestBase() {
             awaitColdStartReady()
 
             // —— Segment U6.8/B12: load answers 404 — the page must surface an error, not die.
+            // The same launch replays 401/503 through the same affordance (CH-2): each failure
+            // mode must surface its typed guidance copy (hubError mapping).
             daemon.scenario.favorites.addAll(
                 listOf(FavoriteFixture("fav-vanishing", "Vanishing Skill", itemType = "skill", status = "Cloud")),
             )
@@ -102,6 +104,26 @@ class CloudHubPanelTest : IntegrationTestBase() {
             assertTrue(clickSettingsText({ it == "Enable" }), "'Enable' affordance never appeared")
             // The dialog survives the failure: branded page still readable (no crash).
             awaitSettingsText({ it.contains("Costrict") || it.contains("Cloud Hub") }, "settings page still alive")
+
+            // —— Segment CH-2a: load answers 401 → UNAUTHORIZED guidance points at sign-in ——
+            // Overrides match in insertion order, so re-arm by clearing the list first.
+            daemon.scenario.overrides.clear()
+            daemon.scenario.override("POST", Regex("/api/v1/agents/favorites/.*/load")) {
+                ai.kilocode.jetbrains.mock.MockResponse.error(401, "unauthorized", "auth expired")
+            }
+            assertTrue(clickSettingsText({ it == "Enable" }), "'Enable' affordance never appeared (401 segment)")
+            awaitSettingsText(
+                { it.contains("Sign in to CoStrict from the CoStrict connection panel") },
+                "UNAUTHORIZED guidance for Cloud Hub",
+            )
+
+            // —— Segment CH-2b: load answers 503 → INTERNAL fallback copy, dialog still alive ——
+            daemon.scenario.overrides.clear()
+            daemon.scenario.override("POST", Regex("/api/v1/agents/favorites/.*/load")) {
+                ai.kilocode.jetbrains.mock.MockResponse.error(503, "agent_down", "upstream unavailable")
+            }
+            assertTrue(clickSettingsText({ it == "Enable" }), "'Enable' affordance never appeared (503 segment)")
+            awaitSettingsText({ it.contains("Cloud Hub request failed") }, "INTERNAL fallback copy for Cloud Hub")
         }
     }
 

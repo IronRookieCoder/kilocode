@@ -1,5 +1,9 @@
 package ai.kilocode.jetbrains
 
+import com.intellij.driver.client.Driver
+import com.intellij.driver.sdk.Project
+import com.intellij.driver.sdk.getNotifications
+import com.intellij.driver.sdk.singleProject
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
@@ -10,6 +14,10 @@ import java.nio.file.Files
  * daemon-outage self-heal (M17) and the startup-failure diagnostics (M18/U2.5, M25.2/U2.4).
  * Each method = one IDE launch; the second method pays one extra launch for a fresh connection
  * state machine (already-Connected sessions replay degraded paths, not first-connect paths).
+ *
+ * The missing-server_url launch also covers the onboarding surface (P1-1/P1-7, OB-2/3/4): the
+ * guide-card affordance visibility, the one-shot install balloon, and the B2 rule that the
+ * legacy Core download banner never appears anywhere in the lifecycle (HD-4).
  */
 class ConnectionLifecycleTest : IntegrationTestBase() {
 
@@ -20,6 +28,8 @@ class ConnectionLifecycleTest : IntegrationTestBase() {
             awaitColdStartReady()
             // Ready state hides the ConnectionPanel: no retry affordance left in the frame.
             assertNoFrameText({ it.contains("Try again") })
+            // B2 (HD-4): the legacy Core download banner stays hidden in the ready state.
+            assertNoFrameText({ it.contains("Downloading") })
 
             // —— Segment U2.2: model catalog loaded from the mock ——
             daemon.awaitRequest("GET", "/api/v1/agents/models", READY_TIMEOUT_MS)
@@ -35,6 +45,8 @@ class ConnectionLifecycleTest : IntegrationTestBase() {
             val sseBefore = daemon.requests.count { it.path == "/api/v1/events" }
             daemon.start()
             daemon.awaitNewRequest("GET", "/api/v1/events", sseBefore, READY_TIMEOUT_MS)
+            // B2 (HD-4): still no download banner after the outage/self-heal round-trip.
+            assertNoFrameText({ it.contains("Downloading") })
         }
     }
 
@@ -45,6 +57,8 @@ class ConnectionLifecycleTest : IntegrationTestBase() {
         daemon.scenario.failHealth(401, "unauthorized", "invalid or missing API key")
         runPluginIde("costrictConnectionUnauthorized") {
             awaitFrameText({ it.contains("unauthorized", ignoreCase = true) }, timeoutMs = READY_TIMEOUT_MS)
+            // B2 (HD-4): even on the error path the legacy download banner never appears.
+            assertNoFrameText({ it.contains("Downloading") })
         }
 
         // —— Launch B: U2.4/M25.2 — non-loopback server_url → typed diagnostic, zero mock traffic.
@@ -77,12 +91,58 @@ class ConnectionLifecycleTest : IntegrationTestBase() {
         try {
             Files.deleteIfExists(serverUrl)
             runPluginIde("costrictConnectionMissingUrl") {
+                // The guide surfaces live in the tool window (connection banner card + empty-session
+                // welcome card) and the product connects lazily — open it to drive the failure path.
+                openCostrictToolWindow()
                 awaitFrameText({ it.contains("was not found", ignoreCase = true) }, timeoutMs = READY_TIMEOUT_MS)
-                // Typed recovery: the diagnostic code maps to InstallCsc/StartCsCloud affordances
-                // (asserted exhaustively at T1 by KiloRecoveryActionsTest).
+                // Typed recovery (OB-2/OB-4): the Install csc affordance is rendered by both guide
+                // surfaces; this frame-level check covers ConnectionPanel and EmptySessionPanel.
+                // SAFETY: assert presence only — clicking would run `npm install -g @costrict/csc`
+                // for real on this machine. The click/cancel chain stays manual
+                // (docs/cs-plugin-p2-onboarding-manual-verification.md); IntegrationTestBase has no
+                // PATH/env injection that would let a test stub npm.
+                awaitFrameText({ it.contains("Install csc", ignoreCase = true) }, timeoutMs = READY_TIMEOUT_MS)
+                // B2 (HD-4): the legacy Core download banner stays hidden here too.
+                assertNoFrameText({ it.contains("Downloading") })
+
+                // OB-3: the one-shot install balloon — fires exactly once per IDE session
+                // (OFFERED dedupe), although background discovery keeps re-failing for a while.
+                val project = singleProject()
+                awaitNotification(project, emptyList()) {
+                    it.contains("Install csc to connect to cs-cloud") && it.contains("@costrict/csc")
+                }
+                // Settle long enough for a duplicate balloon (broken dedupe) to show up, then
+                // require the balloon to still be a single entry in the notification list.
+                Thread.sleep(5_000)
+                val balloons = notificationSnapshot(project).filter { it.contains("@costrict/csc") }
+                assertEquals(1, balloons.size, "install balloon must fire exactly once per IDE session (OFFERED)")
             }
         } finally {
             daemon.start()
         }
+    }
+
+    // ------------------------------------------------------------------
+    // Onboarding (OB-3): balloon notifications via the driver notification API
+    // ------------------------------------------------------------------
+
+    private fun Driver.notificationSnapshot(project: Project) =
+        getNotifications(project).map { "${it.getGroupId()}|${it.getTitle()}|${it.getContent()}" }
+
+    private fun Driver.awaitNotification(
+        project: Project,
+        before: List<String>,
+        timeoutMs: Long = 30_000,
+        matches: (String) -> Boolean,
+    ) {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        var latest = notificationSnapshot(project)
+        while (System.currentTimeMillis() < deadline) {
+            val fresh = latest - before.toSet()
+            if (fresh.any(matches)) return
+            Thread.sleep(300)
+            latest = notificationSnapshot(project)
+        }
+        throw AssertionError("expected a matching notification within ${timeoutMs}ms; latest: ${latest.takeLast(10)}")
     }
 }

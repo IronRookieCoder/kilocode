@@ -22,6 +22,10 @@ import java.nio.file.Path
  *
  * Mock replay proves the plugin side of the protocol only; real agent semantics stay with
  * T3/人工 (spec §1 principle 4).
+ *
+ * Also covers the plan §5 P1 gaps: A-7 credit-rate labels in the model picker, U7.7/U7.8
+ * (abort must not produce a completion balloon; consecutive reports produce distinct ones)
+ * and the non-toolbar review entry points' wiring to the command channel.
  */
 class SessionLoopTest : IntegrationTestBase() {
 
@@ -179,6 +183,84 @@ class SessionLoopTest : IntegrationTestBase() {
         }
     }
 
+    @Test
+    fun `model picker surfaces daemon credit rates`() {
+        runPluginIde("costrictModelCreditRates") {
+            awaitColdStartReady()
+            awaitSessionUiReady()
+
+            // Deterministic front (A-7): the workspace load must have fetched the mock catalog
+            // that carries the billing rates the real daemon injects — coder-pro
+            // creditConsumption=3.0, coder-lite=0.5 (Scenario.modelsBody).
+            daemon.awaitRequest("GET", "/api/v1/agents/models", 20_000)
+
+            // Transit half: the picker button shows the daemon's provider/model label once the
+            // catalog reached the picker (ModelText.buttonLabel).
+            assertTrue(
+                clickFrameText({ it.contains("Costrict Cloud / Coder Pro") }),
+                "model picker button never showed the daemon provider/model label",
+            )
+            // Presentation half: opened popup rows append the credit labels
+            // (ModelText.creditLabel — "3x credit" / "0.5x credit"). The mock serves no Auto
+            // row, so the "% discount" branch stays with T1 (ModelPickerTest). If a
+            // heavy-weight popup ever escapes frame traversal this fails visibly; the degraded
+            // path for the rendered popup is then a manual UI check, the label rules
+            // themselves remain T1-covered.
+            awaitFrameText({ it.contains("3x credit") }, timeoutMs = 20_000)
+            awaitFrameText({ it.contains("0.5x credit") }, timeoutMs = 10_000)
+        }
+    }
+
+    @Test
+    fun `code review abort safety, repeat reports and other entry points`() {
+        runPluginIde("costrictCodeReviewSafety") {
+            awaitColdStartReady()
+            awaitSessionUiReady()
+            sendPrompt("warm up session for review entry points")
+            val promptPosts = promptAsyncPosts()
+            assertTrue(promptPosts.isNotEmpty(), "session must be live before review triggers")
+            val sessionId = sessionIdFrom(promptPosts.last().path)
+            val project = singleProject()
+
+            // —— Segment U7.2b: editor/project-view entries also send the review command ——
+            // Driver invokeAction carries no editor/selection/view context, so the target
+            // falls back to Changes; the exact `@/path` args grammar stays with T1
+            // (ReviewArgsTest). What is proven here is the wiring: both registered entry
+            // actions reach the daemon through the live session's command channel.
+            val before = commandPosts().size
+            invokeAction("Kilo.CodeReview.File")
+            invokeAction("Kilo.CodeReview.Directory")
+            awaitCommandCount(atLeast = before + 2)
+            val entries = commandPosts().drop(before)
+            assertTrue(
+                entries.all { it.body.contains("review") },
+                "entry commands must carry the review command: ${entries.map { it.body.take(120) }}",
+            )
+
+            // —— Segment U7.7 (★): abort before any report lands → no completion balloon ——
+            val preAbort = notificationSnapshot(project)
+            invokeAction("Kilo.CodeReview.Changes")
+            awaitCommandCount(atLeast = before + 3)
+            broadcastSafely(CsEvents.sessionStatus(fixtureProjectDir.toString(), sessionId, "busy", "Stage 2/5: collecting changes"))
+            invokeAction("Kilo.StopSession")
+            awaitAbortCount(atLeast = 1)
+            assertNoCompletionNotification(project, preAbort)
+
+            // —— Segment U7.8: two consecutive runs → two distinct version-pinned balloons ——
+            val reportPath = fixtureProjectDir.resolve("code-review_result").resolve("review-report.json")
+            writeReviewReport(reportPath, high = 1, middle = 0, low = 0, qualityLine = "质量评分：70")
+            val afterAbort = notificationSnapshot(project)
+            broadcastSafely(CsEvents.hostFileUpdated(fixtureProjectDir.toString(), reportPath.toString()))
+            awaitNotification(project, afterAbort, matches = { it.contains("质量评分：70") })
+
+            // A different body ⇒ a new (size, mtime) dedupe key ⇒ a second balloon.
+            writeReviewReport(reportPath, high = 2, middle = 1, low = 0, qualityLine = "质量评分：85")
+            val afterFirst = notificationSnapshot(project)
+            broadcastSafely(CsEvents.hostFileUpdated(fixtureProjectDir.toString(), reportPath.toString()))
+            awaitNotification(project, afterFirst, matches = { it.contains("质量评分：85") })
+        }
+    }
+
     // ------------------------------------------------------------------
     // Helpers
     // ------------------------------------------------------------------
@@ -230,6 +312,27 @@ class SessionLoopTest : IntegrationTestBase() {
             Thread.sleep(100)
         }
         throw AssertionError("abort POST count never reached $atLeast within ${timeoutMs}ms")
+    }
+
+    private fun awaitCommandCount(atLeast: Int, timeoutMs: Long = 20_000) {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < deadline) {
+            if (commandPosts().size >= atLeast) return
+            Thread.sleep(100)
+        }
+        throw AssertionError("command POST count never reached $atLeast within ${timeoutMs}ms")
+    }
+
+    /**
+     * U7.7 absence assertion: after an aborted review (no report ever landed) the completed
+     * balloon must never show. Absence is inherently timing-specific — settle once, then
+     * compare against the pre-abort snapshot.
+     */
+    private fun Driver.assertNoCompletionNotification(project: Project, before: List<String>, settleMs: Long = 3_000) {
+        Thread.sleep(settleMs)
+        val fresh = notificationSnapshot(project) - before.toSet()
+        val completed = fresh.filter { it.contains("code review completed") }
+        assertTrue(completed.isEmpty(), "aborted review must not produce a completion notification: $completed")
     }
 
     private fun Driver.notificationSnapshot(project: Project) =
