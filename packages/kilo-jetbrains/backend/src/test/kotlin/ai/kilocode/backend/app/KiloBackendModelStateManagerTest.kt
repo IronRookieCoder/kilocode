@@ -1,10 +1,10 @@
 package ai.kilocode.backend.app
 
 import ai.kilocode.backend.cli.KiloBackendHttpClients
+import ai.kilocode.backend.cli.KiloCliDataParser
 import ai.kilocode.backend.testing.MockCliServer
 import ai.kilocode.backend.testing.TestLog
 import ai.kilocode.rpc.dto.ModelFavoriteUpdateDto
-import ai.kilocode.rpc.dto.ModelSelectionDto
 import ai.kilocode.rpc.dto.ModelSelectionUpdateDto
 import ai.kilocode.rpc.dto.ModelVariantUpdateDto
 import kotlinx.coroutines.runBlocking
@@ -78,9 +78,32 @@ class KiloBackendModelStateManagerTest {
         val raw = dir.resolve("model.json").readText()
 
         assertEquals("auto", state.model["code"]?.modelID)
-        assertEquals(emptyList<ModelSelectionDto>(), state.recent)
+        assertEquals(listOf("kilo/auto"), state.recent.map { "${it.providerID}/${it.modelID}" })
         assertTrue(raw.contains("\"model\""), raw)
         assertTrue(raw.contains("\"recent\""), raw)
+        assertTrue(raw.contains("\"auto\""), raw)
+    }
+
+    @Test
+    fun `selection update records pick as most recent deduped and capped`() = runBlocking {
+        val port = start()
+        val recents = listOf("a/one", "b/two", "kilo/auto", "c/three", "d/four", "e/five")
+            .joinToString(",") { """{"providerID":"${it.substringBefore('/')}","modelID":"${it.substringAfter('/')}"}""" }
+        dir.resolve("model.json").writeText("""{"favorite":[],"recent":[$recents]}""")
+        val mgr = KiloBackendModelStateManager(log)
+        mgr.start(http, "http://127.0.0.1:$port")
+
+        val state = mgr.selection(ModelSelectionUpdateDto("code", "kilo", "auto"))
+
+        assertEquals(
+            listOf("kilo/auto", "a/one", "b/two", "c/three", "d/four"),
+            state.recent.map { "${it.providerID}/${it.modelID}" },
+        )
+        assertEquals(
+            listOf("kilo/auto", "a/one", "b/two", "c/three", "d/four"),
+            KiloCliDataParser.parseModelState(dir.resolve("model.json").readText()).recent
+                .map { "${it.providerID}/${it.modelID}" },
+        )
     }
 
     @Test

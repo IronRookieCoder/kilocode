@@ -57,6 +57,9 @@ class KiloAppService internal constructor(
     companion object {
         private val LOG = KiloLog.create(KiloAppService::class.java)
         private val init = KiloAppStateDto(KiloAppStatusDto.DISCONNECTED)
+
+        /** Matches the VS Code webview's RECENT_LIMIT for recently used models. */
+        private const val RECENT_MODEL_LIMIT = 5
     }
 
     private val started = AtomicBoolean(false)
@@ -430,7 +433,15 @@ class KiloAppService internal constructor(
 
     fun selectModel(agent: String, providerID: String, modelID: String) {
         val prev = _models.value
-        setModelState(prev.copy(model = prev.model + (agent to ModelSelectionDto(providerID, modelID))))
+        // Record the pick as most-recent (VS Code parity) so switching to a mode
+        // without its own saved model resolves to it instead of the Auto fallback.
+        val selection = ModelSelectionDto(providerID, modelID)
+        setModelState(
+            prev.copy(
+                model = prev.model + (agent to selection),
+                recent = pushRecentModel(prev.recent, selection),
+            ),
+        )
         cs.launch {
             try {
                 setModelState(call { updateModelSelection(ModelSelectionUpdateDto(agent, providerID, modelID)) })
@@ -497,6 +508,12 @@ class KiloAppService internal constructor(
     private fun setModelState(state: ModelStateDto) {
         _models.value = state
         _favorites.value = state.favorite
+    }
+
+    /** Moves [selection] to the front of [recent], deduped, capped at [RECENT_MODEL_LIMIT]. */
+    private fun pushRecentModel(recent: List<ModelSelectionDto>, selection: ModelSelectionDto): List<ModelSelectionDto> {
+        val key = selection.providerID to selection.modelID
+        return (listOf(selection) + recent.filterNot { it.providerID to it.modelID == key }).take(RECENT_MODEL_LIMIT)
     }
 
     /** Refresh the user profile and return the latest data. Null = not logged in. */

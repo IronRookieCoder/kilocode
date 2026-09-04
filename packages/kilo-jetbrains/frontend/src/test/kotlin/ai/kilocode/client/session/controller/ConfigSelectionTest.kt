@@ -333,6 +333,42 @@ class ConfigSelectionTest : SessionControllerTestBase() {
         assertTrue(m.model.modelOverride)
     }
 
+    fun `test selectAgent keeps last picked model when new agent has no saved model`() {
+        appRpc.state.value = KiloAppStateDto(KiloAppStatusDto.READY, providerId = "cs-cloud")
+        projectRpc.state.value = workspaceReady(
+            agents = listOf(
+                AgentDto(name = "code", displayName = "Build", mode = "code"),
+                AgentDto(name = "tdd", displayName = "TDD", mode = "code"),
+            ),
+            providers = listOf(
+                ProviderDto(
+                    id = "costrict",
+                    name = "CoStrict",
+                    models = mapOf(
+                        "Auto" to ModelDto(id = "Auto", name = "Auto"),
+                        "glm-4.7" to ModelDto(id = "glm-4.7", name = "GLM-4.7"),
+                    ),
+                ),
+            ),
+            connected = listOf("costrict"),
+            defaults = emptyMap(),
+        )
+        val m = controller()
+        collect(m)
+        flush()
+
+        assertEquals("costrict/Auto", m.model.model)
+
+        edt { m.selectModel("costrict", "glm-4.7") }
+        flush()
+        edt { m.selectAgent("tdd") }
+        flush()
+
+        assertEquals("costrict/glm-4.7", m.model.model)
+        assertEquals("costrict/glm-4.7", m.model.defaultModel)
+        assertFalse(m.model.modelOverride)
+    }
+
     fun `test selectVariant persists current model variant`() {
         projectRpc.state.value = workspaceReady(
             providers = listOf(

@@ -209,7 +209,13 @@ class FakeAppRpcApi : KiloAppRpcApi {
     override suspend fun updateModelSelection(update: ModelSelectionUpdateDto): ModelStateDto {
         assertNotEdt("updateModelSelection")
         selections.add(update)
-        models = models.copy(model = models.model + (update.agent to ModelSelectionDto(update.providerID, update.modelID)))
+        // Mirrors the backend state manager: picks are recorded as most-recent.
+        val selection = ModelSelectionDto(update.providerID, update.modelID)
+        val key = update.providerID to update.modelID
+        models = models.copy(
+            model = models.model + (update.agent to selection),
+            recent = (listOf(selection) + models.recent.filterNot { it.providerID to it.modelID == key }).take(5),
+        )
         return models
     }
 

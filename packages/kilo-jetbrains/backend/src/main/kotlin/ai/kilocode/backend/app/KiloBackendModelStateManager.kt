@@ -69,8 +69,11 @@ class KiloBackendModelStateManager(
     suspend fun selection(update: ModelSelectionUpdateDto): ModelStateDto = mutex.withLock {
         val raw = read()
         val state = KiloCliDataParser.parseModelState(raw.orEmpty())
-        val next = state.model + (update.agent to ModelSelectionDto(update.providerID, update.modelID))
-        val updated = state.copy(model = next)
+        val selection = ModelSelectionDto(update.providerID, update.modelID)
+        val next = state.model + (update.agent to selection)
+        // Record the pick as most-recent (VS Code parity) so switching to a mode
+        // without its own saved model resolves to it instead of the Auto fallback.
+        val updated = state.copy(model = next, recent = pushRecent(state.recent, selection))
         write(KiloCliDataParser.buildModelStateJson(raw, updated))
         updated
     }
@@ -131,4 +134,13 @@ class KiloBackendModelStateManager(
         }
     }
 
+}
+
+/** Matches the VS Code webview's RECENT_LIMIT for recently used models. */
+private const val RECENT_LIMIT = 5
+
+/** Moves [selection] to the front of [recent], deduped, capped at [RECENT_LIMIT]. */
+private fun pushRecent(recent: List<ModelSelectionDto>, selection: ModelSelectionDto): List<ModelSelectionDto> {
+    val key = selection.providerID to selection.modelID
+    return (listOf(selection) + recent.filterNot { it.providerID to it.modelID == key }).take(RECENT_LIMIT)
 }
