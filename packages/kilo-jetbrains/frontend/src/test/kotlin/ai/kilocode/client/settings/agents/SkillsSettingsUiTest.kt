@@ -460,13 +460,33 @@ class SkillsSettingsUiTest : BasePlatformTestCase() {
         assertFalse(descriptor.isChooseFiles)
     }
 
+    fun `test cs cloud skills are read only without sources section`() {
+        val panel = panel(csCloud = true)
+        flushUntil { rows(panel).size == 3 }
+        agentRpc.skills = agentRpc.skills + SkillDto("review", "Review code", "builtin:review")
+        edt { panel.reload(); true }
+        flushUntil { rows(panel).size == 4 }
+
+        edt {
+            val layout = panel.content.layout as BorderLayout
+            assertNull(layout.getLayoutComponent(BorderLayout.SOUTH))
+            val review = rows(panel).single { it.key == "builtin:review" }
+            assertEquals(listOf("built-in"), review.badges.map { it.text })
+            assertEquals(listOf("edit"), review.cells.map { it.id })
+            assertTrue(review.cells.single { it.id == "edit" }.primary)
+            assertNull(review.note)
+            true
+        }
+    }
+
     private fun panel(
         choose: (JComponent) -> String? = { null },
         source: (Boolean, Boolean, String) -> SettingsPathDialogHandle = { _, _, _ -> FakeSourceDialog(null) },
         edit: (SkillDto, Boolean) -> SkillEditDialogHandle = { _, _ -> FakeSkillDialog("# Plan\nUse steps") },
+        csCloud: Boolean? = null,
     ): SkillsSettingsUi {
         install()
-        val panel = edt { SkillsSettingsUi(scope!!, DIR, choose, source, edit) }
+        val panel = edt { SkillsSettingsUi(scope!!, DIR, choose, source, edit, csCloud) }
         ui = panel
         edt { panel.reload(); true }
         return panel

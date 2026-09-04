@@ -121,7 +121,7 @@
         <applicationConfigurable
                 parentId="ai.kilocode.jetbrains.settings.agentBehavior"
                 id="ai.kilocode.jetbrains.settings.agentBehavior.workflows"
-                instance="ai.kilocode.client.settings.agents.WorkflowsConfigurable"
+                provider="ai.kilocode.client.settings.agents.WorkflowsConfigurableProvider"
                 bundle="messages.KiloBundle"
                 key="settings.agentBehavior.workflows.displayName"/>
 

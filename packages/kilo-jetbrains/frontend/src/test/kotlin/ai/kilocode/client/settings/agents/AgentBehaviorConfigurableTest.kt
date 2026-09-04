@@ -26,13 +26,28 @@ class AgentBehaviorConfigurableTest : BasePlatformTestCase() {
     }
 
     fun `test createComponent contains child links in order`() {
-        val cfg = AgentBehaviorConfigurable()
+        val cfg = AgentBehaviorConfigurable(csCloud = false)
 
         edt {
             val panel = cfg.createComponent()
             val labels = links(panel as Container).map { it.text }
             assertEquals(listOf("Agents", "MCP Servers", "Skills", "Cloud Hub", "Workflows", "Rules"), labels)
         }
+    }
+
+    fun `test cs cloud mode hides workflows link`() {
+        val cfg = AgentBehaviorConfigurable(csCloud = true)
+
+        edt {
+            val panel = cfg.createComponent()
+            val labels = links(panel as Container).map { it.text }
+            assertEquals(listOf("Agents", "MCP Servers", "Skills", "Cloud Hub", "Rules"), labels)
+        }
+    }
+
+    fun `test workflows provider hides page in cs cloud mode`() {
+        assertNull(WorkflowsConfigurableProvider(csCloud = true).createConfigurable())
+        assertTrue(WorkflowsConfigurableProvider(csCloud = false).createConfigurable() is WorkflowsConfigurable)
     }
 
     fun `test navigation page is inert`() {

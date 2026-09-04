@@ -82,11 +82,13 @@ internal class SkillsSettingsUi(
         SettingsPathDialog(sourceDialogTitle(adding, path), value, if (path) choose else null)
     },
     private val edit: (SkillDto, Boolean) -> SkillEditDialogHandle = ::SkillEditDialog,
+    private val csCloud: Boolean? = null,
 ) : SettingsListPanel(scope, ActiveListConfig.Equal.copy(tooltip = false)), SettingsDraftPage {
     private val cs = scope
     private var dir = dir
     private var skills = emptyMap<String, SkillDto>()
     private val app get() = service<KiloAppService>()
+    private val csCloudMode = csCloud ?: (service<KiloAppService>().state.value.providerId == "cs-cloud")
     private val state = SettingsDraftState(skillsDraft(app.state.value.config?.skills ?: SkillsConfigDto()), ::saved)
     private var draft: SkillsDraft
         get() = state.draft
@@ -98,7 +100,8 @@ internal class SkillsSettingsUi(
     init {
         start()
         setCenter(skillScroll())
-        content.add(sources, BorderLayout.SOUTH)
+        // cs-cloud serves skills as read-only metadata, so local source management is hidden.
+        if (!csCloudMode) content.add(sources, BorderLayout.SOUTH)
     }
 
     fun setDirectory(value: String) {
@@ -299,7 +302,8 @@ internal class SkillsSettingsUi(
         val LOG = KiloLog.create(SkillsSettingsUi::class.java)
 
         fun key(skill: SkillDto) = skill.location.ifBlank { skill.name }
-        fun builtin(location: String) = location == BUILTIN || location == LEGACY_BUILTIN
+        // cs-cloud tags every skill with a "builtin:<name>" location; treat the prefix as builtin.
+        fun builtin(location: String) = location.startsWith(BUILTIN) || location == LEGACY_BUILTIN
     }
 }
 

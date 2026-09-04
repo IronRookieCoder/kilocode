@@ -13,7 +13,7 @@ import kotlin.test.assertTrue
  */
 class SettingsTreeOrderTest {
 
-    private data class Registration(val parentId: String, val id: String, val key: String, val instance: String)
+    private data class Registration(val parentId: String, val id: String, val key: String, val instance: String?, val provider: String?)
 
     private val registrations: List<Registration> by lazy {
         val xml = requireNotNull(javaClass.classLoader.getResourceAsStream("kilo.jetbrains.frontend.xml")) {
@@ -26,7 +26,10 @@ class SettingsTreeOrderTest {
             .map { block ->
                 fun attr(name: String) = Regex("$name=\"([^\"]+)\"").find(block)?.groupValues?.get(1)
                     ?: throw AssertionError("applicationConfigurable is missing $name: $block")
-                Registration(attr("parentId"), attr("id"), attr("key"), attr("instance"))
+                fun optional(name: String) = Regex("$name=\"([^\"]+)\"").find(block)?.groupValues?.get(1)
+                // instance/provider are mutually exclusive: the Workflows page registers through
+                // a provider so cs-cloud mode can hide it.
+                Registration(attr("parentId"), attr("id"), attr("key"), optional("instance"), optional("provider"))
             }
             .toList()
     }
@@ -83,7 +86,9 @@ class SettingsTreeOrderTest {
         for (registration in registrations) {
             // initialize = false: Configurable companions may need the platform, which a plain
             // unit test does not provide — only the class must exist and be loadable.
-            Class.forName(registration.instance, false, loader)
+            val className = registration.instance ?: registration.provider
+            assertTrue(!className.isNullOrBlank(), "no instance or provider for ${registration.id}")
+            Class.forName(className, false, loader)
             val display = KiloBundle.message(registration.key)
             assertTrue(display.isNotBlank() && display != registration.key, "displayName missing for ${registration.id}")
         }
