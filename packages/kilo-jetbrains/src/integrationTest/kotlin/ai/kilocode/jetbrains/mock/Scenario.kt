@@ -91,6 +91,13 @@ class Scenario {
     /** `POST /api/v1/conversations/{id}/abort` behavior (R-1: 404/410 must stay silent success). */
     @Volatile var abort: AbortBehavior = AbortBehavior.Ok
 
+    /**
+     * M 桥：whether health declares the IDE capability (default off — the M-1 gate scenario
+     * depends on the daemon NOT advertising `conversation_ide_capability_v1`). Flip via
+     * [withIdeCapability] so the default healthy body is rebuilt with the extra capability.
+     */
+    @Volatile var ideCapability: Boolean = false ; private set
+
     /** Favorites rows served by `GET /api/v1/agents/favorites`. */
     val favorites = CopyOnWriteArrayList<FavoriteFixture>()
 
@@ -106,6 +113,7 @@ class Scenario {
 
     fun reset() {
         overrides.clear()
+        ideCapability = false
         health = MockResponse.ok(healthyBody())
         sseAccept = true
         sseScript.clear()
@@ -114,6 +122,18 @@ class Scenario {
         favorites.clear()
         catalogSideEffects = false
         loadedFavorites.clear()
+    }
+
+    /**
+     * M 桥：advertise `conversation_ide_capability_v1` in the health envelope so the bridge's
+     * `supported()` gate passes and `ensure()` proceeds to bind (M-2/M-3). Must be called
+     * before the IDE connects; `reset()` turns it back off.
+     */
+    fun withIdeCapability(enabled: Boolean = true) {
+        ideCapability = enabled
+        if (health.status == 200) { // keep scripted failure health (failHealth) untouched
+            health = MockResponse.ok(healthyBody(capabilities = defaultCapabilities(ideCapability)))
+        }
     }
 
     /** Serve [responder] for any [method] request whose path matches [pathRegex]. */
@@ -135,8 +155,19 @@ class Scenario {
     }
 
     companion object {
+        /** The IDE capability the bridge's `supported()` looks for (`CsCloudMcpBridge`). */
+        const val IDE_CAPABILITY = "conversation_ide_capability_v1"
+
+        /** Default daemon capabilities; [withIde] appends the M-bridge IDE capability. */
+        private fun defaultCapabilities(withIde: Boolean = false): List<String> =
+            buildList {
+                add("agents")
+                add("favorites")
+                if (withIde) add(IDE_CAPABILITY)
+            }
+
         /** The daemon-side health envelope consumed by `CsCloudHealth.parseHealth`. */
-        fun healthyBody(version: String = "1.0.0-test", capabilities: List<String> = listOf("agents", "favorites")): String =
+        fun healthyBody(version: String = "1.0.0-test", capabilities: List<String> = defaultCapabilities()): String =
             """{"ok":true,"data":{"status":"ok","version":"$version","capabilities":${capabilities.joinToString(",", "[", "]") { "\"$it\"" }}}}"""
 
         /** The raw models catalog; `CsCloudRoute.responseInterceptor` normalizes it plugin-side.

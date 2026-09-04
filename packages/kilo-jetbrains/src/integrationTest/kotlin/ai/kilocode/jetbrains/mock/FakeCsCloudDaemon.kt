@@ -48,6 +48,9 @@ class FakeCsCloudDaemon(
             System.getProperty("kilo.integrationTest.mock.port")?.trim()?.toIntOrNull() ?: DEFAULT_PORT
 
         private const val SSE_RETRY_HINT = "retry: 500\n\n"
+
+        /** M 桥 bind/release surface (`CsCloudMcpBridge.bind`/`clear`). */
+        private val IDE_CAPABILITY_PATH = Regex("/api/v1/conversations/[^/]+/capabilities/ide")
     }
 
     /** Every exchange seen by the daemon, in arrival order. */
@@ -130,6 +133,45 @@ class FakeCsCloudDaemon(
         Thread.sleep(settleMs)
         val found = requests(method, pathPrefix)
         check(found.isEmpty()) { "Expected no $method $pathPrefix but recorded ${found.size}: ${found.firstOrNull()?.path}" }
+    }
+
+    // ------------------------------------------------------------------
+    // M 桥: `…/capabilities/ide` bind (PUT) / release (DELETE) recording
+    // ------------------------------------------------------------------
+
+    /**
+     * Every `PUT` (bind, body = `IdeMcpCapabilitySpec`) / `DELETE` (release, query carries
+     * `generation`) against `/api/v1/conversations/{id}/capabilities/ide`, in arrival order.
+     * Recording happens in [record] like every other exchange; pass [method] to filter.
+     */
+    fun ideCapabilityRequests(method: String? = null): List<RecordedRequest> =
+        requests.filter {
+            it.path.matches(IDE_CAPABILITY_PATH) && (method == null || it.method == method)
+        }
+
+    /** Poll until the [beforeCount]-th-next [method] capability request arrives. */
+    fun awaitIdeCapabilityRequest(method: String, beforeCount: Int, timeoutMs: Long): RecordedRequest {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (true) {
+            val matching = ideCapabilityRequests(method)
+            if (matching.size > beforeCount) return matching[beforeCount]
+            if (System.currentTimeMillis() >= deadline) {
+                throw AssertionError(
+                    "Expected $method …/capabilities/ide (after $beforeCount prior hits) within ${timeoutMs}ms; " +
+                        "capability records: " + ideCapabilityRequests().joinToString { "${it.method} ${it.path}" },
+                )
+            }
+            Thread.sleep(50)
+        }
+    }
+
+    /** M-1 gate: after [settleMs] there must be no [method] capability request at all. */
+    fun awaitNoIdeCapabilityRequest(method: String = "PUT", settleMs: Long = 2_000) {
+        Thread.sleep(settleMs)
+        val found = ideCapabilityRequests(method)
+        check(found.isEmpty()) {
+            "Expected no $method …/capabilities/ide but recorded ${found.size}: ${found.firstOrNull()?.body?.take(200)}"
+        }
     }
 
     /**
@@ -215,6 +257,10 @@ class FakeCsCloudDaemon(
                     serveFavoriteAction(exchange, recorded, load = false)
                 path == "/api/v1/conversations" && recorded.method == "POST" -> serveConversationCreate(exchange, recorded)
                 path == "/api/v1/conversations" && recorded.method == "GET" -> serveConversationList(exchange)
+                // M 桥 bind/release: recorded in record(); always 200 so a scripted bind succeeds
+                // (the bridge treats non-2xx as bind failure and degrades to "unsupported").
+                path.matches(IDE_CAPABILITY_PATH) && recorded.method == "PUT" -> respond(exchange, MockResponse.ok("{}"))
+                path.matches(IDE_CAPABILITY_PATH) && recorded.method == "DELETE" -> respond(exchange, MockResponse.ok("{}"))
                 path.startsWith("/api/v1/conversations/") -> serveConversationDetail(exchange, recorded)
                 path.startsWith("/api/v1/permissions") -> serveListOrReceipt(exchange, recorded)
                 path.startsWith("/api/v1/questions") -> serveListOrReceipt(exchange, recorded)
