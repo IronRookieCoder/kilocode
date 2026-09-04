@@ -1,5 +1,6 @@
 package ai.kilocode.client.session.model
 
+import ai.kilocode.client.plugin.KiloBundle
 import ai.kilocode.client.util.edtWait
 import ai.kilocode.rpc.dto.DiffFileDto
 import ai.kilocode.rpc.dto.KiloAppStateDto
@@ -988,7 +989,7 @@ class SessionModelTest : BasePlatformTestCase() {
 
     fun `test header snapshot hidden with no messages`() {
         assertFalse(model.header.visible)
-        assertEquals("New Session", model.header.title)
+        assertEquals(KiloBundle.message("session.tab.new"), model.header.title)
         assertFalse(model.header.canCompact)
     }
 
@@ -1052,7 +1053,7 @@ class SessionModelTest : BasePlatformTestCase() {
         assertEquals(2000L, item.durationMs)
         assertTrue(item.active)
         assertTrue(step.part is StepFinish)
-        assertEquals("Step finish", step.title)
+        assertEquals(KiloBundle.message("session.timeline.stepFinish"), step.title)
         assertEquals(10, step.weight)
         assertFalse(step.active)
     }
@@ -1070,7 +1071,7 @@ class SessionModelTest : BasePlatformTestCase() {
 
         model.loadHistory(emptyList())
         assertFalse(model.header.visible)
-        assertEquals("New Session", model.header.title)
+        assertEquals(KiloBundle.message("session.tab.new"), model.header.title)
 
         model.upsertMessage(msg("a2", "assistant", cost = 1.0))
         model.clear()

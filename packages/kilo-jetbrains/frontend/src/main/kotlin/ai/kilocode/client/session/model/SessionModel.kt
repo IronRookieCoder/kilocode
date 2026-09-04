@@ -17,6 +17,7 @@ import ai.kilocode.rpc.dto.SessionDto
 import ai.kilocode.rpc.dto.SessionRevertDto
 import ai.kilocode.rpc.dto.TodoDto
 import ai.kilocode.rpc.dto.ToolApprovalDto
+import ai.kilocode.client.plugin.KiloBundle
 import ai.kilocode.rpc.dto.TokensDto
 import com.intellij.openapi.Disposable
 import com.intellij.openapi.util.Disposer
@@ -647,7 +648,7 @@ class SessionModel {
         val done = todos.count { it.status == "completed" }
         return SessionHeaderSnapshot(
             visible = items.isNotEmpty(),
-            title = session?.title?.takeIf { it.isNotBlank() } ?: "New Session",
+            title = session?.title?.takeIf { it.isNotBlank() } ?: KiloBundle.message("session.tab.new"),
             cost = cost,
             context = context,
             tokens = tokens,
@@ -782,7 +783,7 @@ data class ModelItem(
 
 private fun emptyHeader() = SessionHeaderSnapshot(
     visible = false,
-    title = "New Session",
+    title = KiloBundle.message("session.tab.new"),
     cost = null,
     context = null,
     tokens = null,
@@ -808,19 +809,19 @@ private fun parseModelKey(value: String): Pair<String, String>? {
 }
 
 private fun Content.timelineTitle(): String = when (this) {
-    is Text -> "Text"
-    is Reasoning -> "Reasoning"
-    is FileAttachment -> filename?.takeIf { it.isNotBlank() } ?: "File"
+    is Text -> KiloBundle.message("session.timeline.text")
+    is Reasoning -> KiloBundle.message("session.timeline.reasoning")
+    is FileAttachment -> filename?.takeIf { it.isNotBlank() } ?: KiloBundle.message("session.timeline.file")
     is Tool -> fileActionTitle() ?: title?.takeIf { it.isNotBlank() } ?: name
-    is Compaction -> "Compaction"
-    is StepFinish -> "Step finish"
+    is Compaction -> KiloBundle.message("session.timeline.compaction")
+    is StepFinish -> KiloBundle.message("session.timeline.stepFinish")
     is Generic -> type
 }
 
 private fun Tool.fileActionTitle(): String? {
     val verb = when (kind) {
-        ToolKind.READ -> "Read"
-        ToolKind.WRITE -> "Write"
+        ToolKind.READ -> KiloBundle.message("session.timeline.read")
+        ToolKind.WRITE -> KiloBundle.message("session.timeline.write")
         ToolKind.GENERIC -> return null
     }
     val path = listOf("filePath", "path", "file")

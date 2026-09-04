@@ -2,6 +2,7 @@
 
 package ai.kilocode.client.agentManager.worktree
 
+import ai.kilocode.client.plugin.KiloBundle
 import ai.kilocode.log.KiloLog
 import ai.kilocode.rpc.KiloWorktreeRpcApi
 import ai.kilocode.rpc.dto.CreateWorktreeRequestDto
@@ -104,27 +105,27 @@ class KiloWorktreeService internal constructor(
         call { importPr(directory, url) }
     } catch (e: Exception) {
         LOG.warn("worktree PR import failed for $url", e)
-        CreateWorktreeResultDto(error = e.message ?: "worktree PR import failed")
+        CreateWorktreeResultDto(error = e.message ?: KiloBundle.message("worktree.import.failed"))
     }
 
     suspend fun remove(directory: String, path: String, branch: String?, force: Boolean = false): RemoveWorktreeResultDto = try {
         call { remove(directory, path, branch, force) }
     } catch (e: Exception) {
         LOG.warn("worktree remove failed for $path", e)
-        RemoveWorktreeResultDto(error = e.message ?: "worktree remove failed")
+        RemoveWorktreeResultDto(error = e.message ?: KiloBundle.message("worktree.remove.failed"))
     }
 
     suspend fun rename(directory: String, path: String, name: String): RenameWorktreeResultDto = try {
         call { rename(directory, path, name) }
     } catch (e: Exception) {
         LOG.warn("worktree rename failed for $path", e)
-        RenameWorktreeResultDto(error = e.message ?: "worktree rename failed")
+        RenameWorktreeResultDto(error = e.message ?: KiloBundle.message("worktree.rename.failed"))
     }
 
     suspend fun adopt(directory: String, path: String, name: String): RenameWorktreeResultDto = try {
         call { adopt(directory, path, name) }
     } catch (e: Exception) {
         LOG.warn("worktree adopt failed for $path", e)
-        RenameWorktreeResultDto(error = e.message ?: "worktree adopt failed")
+        RenameWorktreeResultDto(error = e.message ?: KiloBundle.message("worktree.adopt.failed"))
     }
 }

@@ -128,7 +128,7 @@ internal class AutoApproveContent(
 
     private fun groupedRow(draft: PermissionDraft) = PermissionListRow(
         key = GROUP_KEY,
-        title = "Todoread / Todowrite",
+        title = KiloBundle.message("settings.autoApprove.tool.todoreadwrite.title"),
         description = KiloBundle.message("settings.autoApprove.tool.todoreadwrite"),
         level = mostRestrictive(GROUPED_IDS.map { effectiveLevel(draft, it) }),
         inherited = GROUPED_IDS.all { inheritedWildcard(draft.rules[it]) },

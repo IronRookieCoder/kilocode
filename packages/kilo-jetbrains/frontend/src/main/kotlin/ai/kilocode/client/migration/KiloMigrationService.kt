@@ -4,6 +4,7 @@ package ai.kilocode.client.migration
 
 import ai.kilocode.client.app.KiloAppService
 import ai.kilocode.client.autocomplete.KiloAutocompleteSettingsService
+import ai.kilocode.client.plugin.KiloBundle
 import ai.kilocode.client.telemetry.Telemetry
 import ai.kilocode.log.KiloLog
 import ai.kilocode.rpc.KiloMigrationRpcApi
@@ -136,7 +137,7 @@ class KiloMigrationService internal constructor(
                 } catch (e: Exception) {
                     telemetry("Migration Failed", mapOf("itemCount" to initialProgress.size.toString(), "errorCount" to "1", "stage" to "start"))
                     LOG.warn("migration start failed", e)
-                    finishWithError(e.message ?: "Migration failed")
+                    finishWithError(e.message ?: KiloBundle.message("migration.error.failed"))
                     return@launch
                 }
                 flow.collect { event -> handleEvent(event) }
@@ -159,7 +160,7 @@ class KiloMigrationService internal constructor(
                 call { skip() }
             } catch (e: Exception) {
                 LOG.warn("migration skip failed", e)
-                finishWithError(e.message ?: "Migration skip failed")
+                finishWithError(e.message ?: KiloBundle.message("migration.error.skipFailed"))
                 return@launch
             }
             hide("skip", current?.detection)
@@ -179,7 +180,7 @@ class KiloMigrationService internal constructor(
                 call { resume() }
             } catch (e: Exception) {
                 LOG.warn("migration resume failed", e)
-                finishWithError(e.message ?: "Migration resume failed")
+                finishWithError(e.message ?: KiloBundle.message("migration.error.resumeFailed"))
                 return@launch
             }
             hide("later", current?.detection)

@@ -54,7 +54,7 @@ class SessionHeaderPanelTest : SessionControllerTestBase() {
         val panel = SessionHeaderPanel(c, parent)
 
         assertFalse(panel.isVisible)
-        assertEquals("New Session", panel.titleText())
+        assertEquals(KiloBundle.message("session.tab.new"), panel.titleText())
     }
 
     fun `test shows populated session header`() {
@@ -370,7 +370,7 @@ class SessionHeaderPanelTest : SessionControllerTestBase() {
             0,
             false,
         ))
-        assertEquals("Step finish", panel.timelineToolTip())
+        assertEquals(KiloBundle.message("session.timeline.stepFinish"), panel.timelineToolTip())
         assertEquals(3, panel.timelineHover())
         timeline.dispatchEvent(MouseEvent(
             timeline,

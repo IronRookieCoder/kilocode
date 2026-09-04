@@ -1,5 +1,6 @@
 package ai.kilocode.client.session.views.base
 
+import ai.kilocode.client.plugin.KiloBundle
 import ai.kilocode.client.session.model.Content
 import ai.kilocode.client.session.model.Generic
 import ai.kilocode.client.session.ui.style.SessionEditorStyle
@@ -19,7 +20,7 @@ class GenericView private constructor(
     private val label: JBLabel,
 ) : AbstractSessionPartView(label, JBLabel()) {
 
-    constructor(content: Generic) : this(content, JBLabel("[${content.type}]"))
+    constructor(content: Generic) : this(content, JBLabel(KiloBundle.message("session.part.generic.title", content.type)))
 
     override val contentId: String = content.id
 

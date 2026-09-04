@@ -198,7 +198,7 @@ internal class ProvidersSettingsUi(
                 if (!active(id)) return@withContext null
                 ready.url?.let(BrowserUtil::browse)
                 if (ready.method == "code") {
-                    val input = Messages.showInputDialog(this@ProvidersSettingsUi, ready.instructions ?: "Enter OAuth code", provider.name, null)
+                    val input = Messages.showInputDialog(this@ProvidersSettingsUi, ready.instructions ?: KiloBundle.message("settings.providers.oauth.code.prompt"), provider.name, null)
                     if (input.isNullOrBlank()) {
                         cancelOAuth(id)
                         return@withContext null

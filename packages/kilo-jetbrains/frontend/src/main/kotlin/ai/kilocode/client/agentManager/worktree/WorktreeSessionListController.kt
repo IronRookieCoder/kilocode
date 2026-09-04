@@ -1,6 +1,7 @@
 package ai.kilocode.client.agentManager.worktree
 
 import ai.kilocode.client.app.KiloSessionService
+import ai.kilocode.client.plugin.KiloBundle
 import ai.kilocode.client.telemetry.Telemetry
 import ai.kilocode.client.util.edt
 import ai.kilocode.log.KiloLog
@@ -62,7 +63,7 @@ class WorktreeSessionListController(
     }
 
     fun delete(id: String, done: (Boolean, String?) -> Unit) {
-        if (id.isBlank()) return edt { done(false, "Missing session id") }
+        if (id.isBlank()) return edt { done(false, KiloBundle.message("worktree.session.error.missingId")) }
         cs.launch {
             val result = runCatching { service.deleteSession(id, dir) }
             if (result.isSuccess) {
@@ -86,12 +87,12 @@ class WorktreeSessionListController(
     @RequiresEdt
     fun rename(id: String, title: String, done: (Boolean, String?) -> Unit) {
         val name = title.trim()
-        if (id.isBlank()) return edt { done(false, "Missing session id") }
-        if (name.isBlank()) return edt { done(false, "Missing session title") }
+        if (id.isBlank()) return edt { done(false, KiloBundle.message("worktree.session.error.missingId")) }
+        if (name.isBlank()) return edt { done(false, KiloBundle.message("worktree.session.error.missingTitle")) }
         val prior = (0 until model.size)
             .map { model.getElementAt(it) }
             .firstOrNull { it.id == id }
-            ?: return edt { done(false, "Session not found") }
+            ?: return edt { done(false, KiloBundle.message("worktree.session.error.notFound")) }
         val optimistic = prior.copy(title = name)
         edt {
             index(id).takeIf { it >= 0 }?.let { model.setElementAt(optimistic, it) }
