@@ -79,6 +79,26 @@ class KiloSessionRpcApiImplTest {
         }
     }
 
+    @Test
+    fun `every capability unavailable reason leaves prompts unblocked`() = runBlocking {
+        // Reason strings produced by CsCloudMcpBridge (cs-cloud module): the ensure()-time
+        // codes plus the bind-failure codes from capabilityBindReason(). The bridge is not a
+        // backend dependency, so the codes are pinned here as literals on purpose.
+        val reasons = listOf(
+            "project_not_open",
+            "ide_capability_unsupported",
+            "mcp_plugin_unavailable",
+            "tools_disabled",
+            "ide_capability_bind_failed",
+            "mcp_listener_failed",
+        )
+        for (reason in reasons) {
+            // Completing without throwing is the assertion: prompt() runs chat.prompt() right
+            // after ensureCapability(), so any non-cancellation outcome means the prompt is sent.
+            ensureCapability(capability { CapabilityResult.Unavailable(reason) }, "ses_test", "/test", TestLog())
+        }
+    }
+
     private fun capability(block: suspend () -> CapabilityResult) = object : KiloSessionCapabilities {
         override suspend fun ensure(id: String, directory: String) = block()
         override suspend fun release(id: String, reason: CapabilityReleaseReason) = Unit

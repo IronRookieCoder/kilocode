@@ -53,9 +53,9 @@ import java.nio.file.Files
  * Delegates directly to the app-level [KiloBackendAppService] —
  * no project resolution needed since all operations are app-scoped.
  */
-class KiloAppRpcApiImpl : KiloAppRpcApi {
+class KiloAppRpcApiImpl(private val appOverride: KiloBackendAppService? = null) : KiloAppRpcApi {
 
-    private val app: KiloBackendAppService get() = service()
+    private val app: KiloBackendAppService get() = appOverride ?: service()
 
     override suspend fun connect() = app.connect()
 

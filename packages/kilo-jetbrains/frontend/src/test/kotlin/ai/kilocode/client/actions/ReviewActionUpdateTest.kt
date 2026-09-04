@@ -1,5 +1,6 @@
 package ai.kilocode.client.actions
 
+import ai.kilocode.client.app.KiloChatAccess
 import ai.kilocode.client.plugin.KiloBundle
 import ai.kilocode.client.session.SessionManager
 import ai.kilocode.client.session.SessionRef
@@ -10,6 +11,9 @@ import com.intellij.openapi.actionSystem.DataContext
 import com.intellij.openapi.actionSystem.Presentation
 import com.intellij.openapi.actionSystem.ex.ActionUtil
 import com.intellij.openapi.application.ApplicationManager
+import com.intellij.openapi.components.service
+import com.intellij.openapi.editor.Editor
+import com.intellij.openapi.editor.EditorFactory
 import com.intellij.testFramework.fixtures.BasePlatformTestCase
 
 /**
@@ -47,11 +51,47 @@ class ReviewActionUpdateTest : BasePlatformTestCase() {
         }
     }
 
+    fun `test review actions enable from the tool window chat access fallback`() {
+        val access = project.service<KiloChatAccess>()
+        access.manager = FakeSessionManager()
+        try {
+            for (action in listOf(ReviewChangesAction(), ReviewEditorAction(), ReviewDirectoryAction())) {
+                val event = event(action, manager = null)
+
+                update(action, event)
+
+                assertTrue(action.javaClass.simpleName + " should be enabled via KiloChatAccess", event.presentation.isEnabled)
+            }
+        } finally {
+            access.manager = null
+        }
+    }
+
+    fun `test review editor action is disabled without a session`() {
+        val event = event(ReviewEditorAction(), manager = null)
+
+        update(ReviewEditorAction(), event)
+
+        assertFalse(event.presentation.isEnabled)
+        assertEquals(KiloBundle.message("codereview.disabled.tooltip"), event.presentation.description)
+    }
+
     fun `test review editor action switches text between file and selection`() {
         val action = ReviewEditorAction()
         val fileEvent = event(action, manager = FakeSessionManager())
         update(action, fileEvent)
         assertEquals(KiloBundle.message("action.Kilo.CodeReview.File.text"), fileEvent.presentation.text)
+
+        val editor = editorWithSelection()
+        try {
+            val selectionEvent = event(action, manager = FakeSessionManager(), editor = editor)
+            // Editor models may only be read on the EDT — matching the action's real
+            // BACKWARD update thread — so this one update runs there instead of pooled.
+            update(action, selectionEvent, onEdt = true)
+            assertEquals(KiloBundle.message("action.Kilo.CodeReview.Selection.text"), selectionEvent.presentation.text)
+        } finally {
+            onEdt(Runnable { EditorFactory.getInstance().releaseEditor(editor) })
+        }
     }
 
     fun `test toolbar entry sends review command with empty args for current changes`() {
@@ -79,24 +119,45 @@ class ReviewActionUpdateTest : BasePlatformTestCase() {
     // Harness (same pattern as KiloRecoveryActionsTest)
     // ------------------------------------------------------------------
 
-    private fun event(action: AnAction, manager: SessionManager?): AnActionEvent {
+    private fun event(action: AnAction, manager: SessionManager?, editor: Editor? = null): AnActionEvent {
         val presentation = Presentation().apply { copyFrom(action.templatePresentation) }
         presentation.isEnabled = false
-        return AnActionEvent.createFromDataContext("", presentation, context(manager))
+        return AnActionEvent.createFromDataContext("", presentation, context(manager, editor))
     }
 
-    private fun update(action: AnAction, event: AnActionEvent) {
-        ApplicationManager.getApplication().executeOnPooledThread {
-            ActionUtil.updateAction(action, event)
-        }.get()
+    private fun update(action: AnAction, event: AnActionEvent, onEdt: Boolean = false) {
+        if (onEdt) {
+            onEdt(Runnable { ActionUtil.updateAction(action, event) })
+        } else {
+            ApplicationManager.getApplication().executeOnPooledThread {
+                ActionUtil.updateAction(action, event)
+            }.get()
+        }
     }
 
-    private fun context(manager: SessionManager?): DataContext = DataContext { id ->
+    private fun context(manager: SessionManager?, editor: Editor? = null): DataContext = DataContext { id ->
         when (id) {
             SessionManager.KEY.name -> manager
             CommonDataKeys.PROJECT.name -> project
+            CommonDataKeys.EDITOR.name -> editor
             else -> null
         }
+    }
+
+    /** Real editor (never mocked — the selection model drives production `customize()`). */
+    private fun editorWithSelection(): Editor {
+        val factory = EditorFactory.getInstance()
+        lateinit var editor: Editor
+        onEdt(Runnable {
+            editor = factory.createEditor(factory.createDocument("review target text\nsecond line\n"), project)
+            editor.selectionModel.setSelection(0, 6)
+        })
+        return editor
+    }
+
+    /** Explicit `Runnable` SAM keeps the `invokeAndWait(Runnable/Computable)` overloads unambiguous. */
+    private fun onEdt(block: Runnable) {
+        ApplicationManager.getApplication().invokeAndWait(block)
     }
 
     /** Records `/review`-style commands; every other SessionManager surface is a no-op. */
