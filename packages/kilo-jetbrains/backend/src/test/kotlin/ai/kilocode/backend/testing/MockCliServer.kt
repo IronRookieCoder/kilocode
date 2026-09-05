@@ -141,6 +141,10 @@ class MockCliServer : AutoCloseable {
     @Volatile var enhanceStatus = 200
     @Volatile var lastEnhancePath: String? = null
     @Volatile var lastEnhanceBody: String? = null
+    @Volatile var commitMessage = """{"message":"feat: add feature"}"""
+    @Volatile var commitMessageStatus = 200
+    @Volatile var lastCommitMessagePath: String? = null
+    @Volatile var lastCommitMessageBody: String? = null
     @Volatile var sessionRenameStatus = 200
     @Volatile var sessionRenameResponse = """{"id":"ses_test","slug":"test","projectID":"prj_test","directory":"/test","title":"Renamed","version":"1.0.0","time":{"created":1000,"updated":2000}}"""
     @Volatile var lastSessionRenamePath: String? = null
@@ -474,6 +478,11 @@ class MockCliServer : AutoCloseable {
                     lastEnhancePath = path
                     lastEnhanceBody = body
                     respond(output, enhanceStatus, enhanced)
+                }
+                bare == "/commit-message" && method == "POST" -> {
+                    lastCommitMessagePath = path
+                    lastCommitMessageBody = body
+                    respond(output, commitMessageStatus, commitMessage)
                 }
                 else -> respond(output, 404, """{"error":"Not found"}""")
             }

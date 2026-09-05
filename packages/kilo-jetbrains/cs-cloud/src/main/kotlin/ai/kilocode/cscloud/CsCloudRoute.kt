@@ -206,6 +206,7 @@ object CsCloudRoute {
         path == "/skill" -> "/api/v1/agents/commands"
         path == "/path" -> "/api/v1/runtime/path"
         path == "/find/file" -> "/api/v1/runtime/find/file"
+        path == "/commit-message" -> "/api/v1/commit-message"
         else -> path
     }
 

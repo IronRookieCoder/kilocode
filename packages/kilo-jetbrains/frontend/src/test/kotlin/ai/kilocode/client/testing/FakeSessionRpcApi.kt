@@ -4,6 +4,8 @@ import ai.kilocode.rpc.KiloSessionRpcApi
 import ai.kilocode.rpc.dto.ChatEventDto
 import ai.kilocode.rpc.dto.CloudSessionDto
 import ai.kilocode.rpc.dto.CloudSessionListDto
+import ai.kilocode.rpc.dto.CommitMessageRequestDto
+import ai.kilocode.rpc.dto.CommitMessageResultDto
 import ai.kilocode.rpc.dto.ConfigUpdateDto
 import ai.kilocode.rpc.dto.DiffFileDto
 import ai.kilocode.rpc.dto.MessageWithPartsDto
@@ -221,6 +223,14 @@ class FakeSessionRpcApi : KiloSessionRpcApi {
         enhanceGate?.await()
         enhanceThrows?.let { throw it }
         return enhanced
+    }
+
+    /** The result returned by [generateCommitMessage]. */
+    var commitMessage = CommitMessageResultDto(message = "feat: generated commit message")
+
+    override suspend fun generateCommitMessage(input: CommitMessageRequestDto): CommitMessageResultDto {
+        assertNotEdt("generateCommitMessage")
+        return commitMessage
     }
 
     override suspend fun prompt(id: String, directory: String, prompt: PromptDto) {

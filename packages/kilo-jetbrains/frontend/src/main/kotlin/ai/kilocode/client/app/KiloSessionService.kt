@@ -7,6 +7,8 @@ import ai.kilocode.rpc.KiloSessionRpcApi
 import ai.kilocode.client.session.SessionActivityKind
 import ai.kilocode.rpc.dto.ChatEventDto
 import ai.kilocode.rpc.dto.CloudSessionListDto
+import ai.kilocode.rpc.dto.CommitMessageRequestDto
+import ai.kilocode.rpc.dto.CommitMessageResultDto
 import ai.kilocode.rpc.dto.ConfigUpdateDto
 import ai.kilocode.rpc.dto.DiffFileDto
 import ai.kilocode.rpc.dto.MessageWithPartsDto
@@ -181,6 +183,9 @@ class KiloSessionService internal constructor(
 
     suspend fun enhancePrompt(dir: String, text: String): String =
         call { enhancePrompt(dir, text) }
+
+    suspend fun generateCommitMessage(input: CommitMessageRequestDto): CommitMessageResultDto =
+        call { generateCommitMessage(input) }
 
     /** Send a prompt to a session. */
     suspend fun prompt(id: String, dir: String, dto: PromptDto) {
