@@ -773,6 +773,14 @@ class SessionUi(
             scroll.followBottom(follow)
             return
         }
+        // A pending question keeps the session busy on the backend, so a plain prompt would be
+        // rejected with 409 CONFLICT. Route pure-text input into the question card instead — it
+        // becomes the custom answer of the question currently on screen. Slash commands and
+        // attachment sends keep their own paths (they cannot be expressed as an answer).
+        if (files.isEmpty() && controller.model.state is SessionState.AwaitingQuestion && question.answerWithText(text)) {
+            scroll.followBottom(follow)
+            return
+        }
         // Only the prompt path uses editor context; gather after the command branches so slash
         // commands and client actions don't pay the editor-context cost or hit its failure modes.
         val editor = EditorContextGatherer.gather(project, workspace.directory)

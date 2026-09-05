@@ -98,6 +98,7 @@ class FakeSessionRpcApi : KiloSessionRpcApi {
     var unrevertThrows: Exception? = null
     var commandThrows: Exception? = null
     val prompts = mutableListOf<Triple<String, String, PromptDto>>()
+    var promptThrows: Exception? = null
     val commands = mutableListOf<CommandCall>()
     val attachmentParts = mutableListOf<AttachmentCall>()
     val aborts = mutableListOf<Pair<String, String>>()
@@ -224,6 +225,7 @@ class FakeSessionRpcApi : KiloSessionRpcApi {
 
     override suspend fun prompt(id: String, directory: String, prompt: PromptDto) {
         assertNotEdt("prompt")
+        promptThrows?.let { throw it }
         prompts.add(Triple(id, directory, prompt))
     }
 

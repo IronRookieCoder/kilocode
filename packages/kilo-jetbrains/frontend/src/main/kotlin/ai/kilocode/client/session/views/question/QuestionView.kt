@@ -834,6 +834,45 @@ class QuestionView(
         scroll(follow())
     }
 
+    /**
+     * Turns free text typed in the prompt editor into the answer of the question flow — the
+     * programmatic equivalent of filling the custom row and pressing the primary button. The
+     * text is recorded as the custom answer of the question currently on screen and the flow
+     * then advances exactly like that button (submit / review / next page). While the review
+     * page is shown there is no current question, so the text replaces the last item's answer
+     * and submits — the input is never silently dropped, and a new prompt is never started
+     * (the backend would reject it with 409 CONFLICT while the question is pending).
+     *
+     * Returns false when nothing is pending so the caller can fall back to a normal prompt.
+     */
+    @RequiresEdt
+    fun answerWithText(text: String): Boolean {
+        val q = question ?: return false
+        val trimmed = text.trim()
+        if (trimmed.isEmpty()) return false
+        if (review(q)) {
+            idx = q.items.size - 1
+            applyCustomAnswer(idx, trimmed)
+            doReply()
+            return true
+        }
+        applyCustomAnswer(idx, trimmed)
+        when {
+            direct(q) -> doReply()
+            else -> goForward()
+        }
+        return true
+    }
+
+    /** Records [text] as the custom answer of item [i]; single-select drops any chosen option first. */
+    @RequiresEdt
+    private fun applyCustomAnswer(i: Int, text: String) {
+        val multiple = question?.items?.getOrNull(i)?.multiple == true
+        if (!multiple) selections.getOrNull(i)?.clear()
+        customOpen = customOpen.toMutableList().also { it[i] = true }
+        customTexts = customTexts.toMutableList().also { it[i] = text }
+    }
+
     @RequiresEdt
     private fun setFont(area: JBTextArea, bold: Boolean): Boolean {
         val font = if (bold) style.boldFont else style.regularFont

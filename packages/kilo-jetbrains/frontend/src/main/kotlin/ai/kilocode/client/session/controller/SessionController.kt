@@ -321,7 +321,9 @@ class SessionController(
             "textLength" to bucket(data.text),
         ) + props)
         showSession()
-        if (echo && data.kind == "prompt" && data.text.isNotBlank()) echoPrompt(data.text)
+        // Optimistic bubble for this dispatch — removed again when the send fails, so a
+        // rejected prompt leaves no phantom user message in the transcript.
+        val echoId = if (echo && data.kind == "prompt" && data.text.isNotBlank()) echoPrompt(data.text) else null
         val pending = sid?.let { CompletableDeferred(it) } ?: session()
         cs.launch {
             try {
@@ -334,6 +336,7 @@ class SessionController(
                 LOG.warn("${ChatLogSummary.sid(sid ?: ref?.key ?: data.start)} kind=${data.kind} dir=${ChatLogSummary.dir(directory)} failed message=${e.message}", e)
                 edt {
                     if (disposed) return@edt
+                    echoId?.let(::rollbackEcho)
                     val msg = e.message ?: KiloBundle.message("session.error.prompt")
                     updateModel {
                         model.setState(SessionState.Error(msg))
@@ -348,7 +351,7 @@ class SessionController(
      * message events. Backends that echo user messages replace the bubble via [echoed]; backends
      * that never echo (e.g. cs-cloud) keep it as the only visible copy of the user's input.
      */
-    private fun echoPrompt(text: String) {
+    private fun echoPrompt(text: String): String {
         assertEdt()
         val seq = ++echoSeq
         val id = "msg_pending_$seq"
@@ -366,6 +369,14 @@ class SessionController(
             model.updateContent(id, PartDto(id = part, sessionID = session, messageID = id, type = "text", text = text))
             echoes.addLast(id)
         }
+        return id
+    }
+
+    /** Drops an optimistic prompt bubble whose send failed — the backend never echoed it. */
+    @RequiresEdt
+    private fun rollbackEcho(id: String) {
+        echoes.remove(id)
+        updateModel { model.removeMessage(id) }
     }
 
     /**

@@ -201,4 +201,23 @@ class PromptEchoTest : SessionControllerTestBase() {
 
         assertTrue(m.model.isEmpty())
     }
+
+    fun `test failed prompt send rolls back optimistic bubble`() {
+        appRpc.state.value = ai.kilocode.rpc.dto.KiloAppStateDto(
+            ai.kilocode.rpc.dto.KiloAppStatusDto.READY,
+            config = ai.kilocode.rpc.dto.ConfigDto(model = "kilo/gpt-5"),
+        )
+        projectRpc.state.value = workspaceReady()
+        rpc.promptThrows = IllegalStateException("prompt_async failed: HTTP 409: session is already processing a prompt")
+        val m = controller(echo = true)
+        flush()
+
+        edt { m.prompt("go") }
+        flush()
+
+        // The backend rejected the send, so the optimistic bubble must not linger as if the
+        // message had been delivered.
+        assertTrue(m.model.isEmpty())
+        assertTrue(m.model.state is ai.kilocode.client.session.model.SessionState.Error)
+    }
 }
