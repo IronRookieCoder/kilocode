@@ -3,21 +3,16 @@ package ai.kilocode.client.settings.base
 import ai.kilocode.client.KiloNotifications
 import ai.kilocode.client.app.KiloAppService
 import ai.kilocode.client.app.KiloWorkspaceService
-import ai.kilocode.client.settings.profile.UserProfileConfigurable
+import ai.kilocode.client.ui.CostrictLinks
 import ai.kilocode.rpc.dto.KiloAppStateDto
 import ai.kilocode.rpc.dto.KiloAppStatusDto
 import ai.kilocode.rpc.dto.ModelStateDto
-import com.intellij.ide.DataManager
+import com.intellij.ide.BrowserUtil
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.application.EDT
 import com.intellij.openapi.application.ModalityState
 import com.intellij.openapi.application.asContextElement
 import com.intellij.openapi.components.service
-import com.intellij.openapi.options.Configurable
-import com.intellij.openapi.options.ConfigurableWithId
-import com.intellij.openapi.options.ShowSettingsUtil
-import com.intellij.openapi.options.ex.Settings
-import com.intellij.openapi.project.ProjectManager
 import com.intellij.util.concurrency.annotations.RequiresBackgroundThread
 import com.intellij.util.concurrency.annotations.RequiresEdt
 import kotlinx.coroutines.CoroutineScope
@@ -26,8 +21,6 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.util.function.Predicate
-import javax.swing.JComponent
 
 internal abstract class BaseSettingsUi<C : BaseContentPanel, D, P, R, W>(
     protected val scope: CoroutineScope,
@@ -206,7 +199,7 @@ internal abstract class BaseSettingsUi<C : BaseContentPanel, D, P, R, W>(
     protected fun syncLoginBanner(login: Boolean, fallback: () -> Unit) {
         checkEdt()
         if (loginBanner && login) {
-            top.showNotLoggedIn { openProfile(it) }
+            top.showNotLoggedIn { openProfile() }
             return
         }
         fallback()
@@ -273,24 +266,8 @@ internal abstract class BaseSettingsUi<C : BaseContentPanel, D, P, R, W>(
     @RequiresEdt
     protected open fun clearWorkspaceError() = Unit
 
-    private fun openProfile(src: JComponent) {
-        val settings = Settings.KEY.getData(DataManager.getInstance().getDataContext(src))
-        if (settings != null) {
-            val cfg = settings.find(UserProfileConfigurable.ID)
-            if (cfg != null) {
-                settings.select(cfg)
-                return
-            }
-        }
-
-        val project = ProjectManager.getInstance().openProjects.firstOrNull { !it.isDefault }
-        ShowSettingsUtil.getInstance().showSettingsDialog(
-            project,
-            Predicate { cfg: Configurable ->
-                cfg is ConfigurableWithId && cfg.getId() == UserProfileConfigurable.ID
-            },
-            { cfg: Configurable -> cfg.focusOn(UserProfileConfigurable.FOCUS_ACCOUNT_COMBO) },
-        )
+    private fun openProfile() {
+        BrowserUtil.browse(CostrictLinks.CREDIT_MANAGER)
     }
 
     private companion object {

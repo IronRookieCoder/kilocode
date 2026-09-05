@@ -64,7 +64,6 @@ import ai.kilocode.client.session.views.SessionOutcomeView
 import ai.kilocode.client.session.views.permission.PermissionView
 import ai.kilocode.client.session.views.question.QuestionView
 import ai.kilocode.client.settings.KiloSettingsConfigurable
-import ai.kilocode.client.settings.profile.UserProfileConfigurable
 import ai.kilocode.client.telemetry.Telemetry
 import ai.kilocode.client.util.UiTimerSource
 import ai.kilocode.client.util.UiTimers
@@ -1092,13 +1091,7 @@ class SessionUi(
     }
 
     private fun openProfileSettings() {
-        ShowSettingsUtil.getInstance().showSettingsDialog(
-            project,
-            Predicate { cfg: Configurable ->
-                cfg is ConfigurableWithId && cfg.getId() == UserProfileConfigurable.ID
-            },
-            { cfg: Configurable -> cfg.focusOn(UserProfileConfigurable.FOCUS_ACCOUNT_COMBO) },
-        )
+        BrowserUtil.browse(CostrictLinks.CREDIT_MANAGER)
     }
 
     private fun openKiloSettings() {

@@ -8,9 +8,11 @@ import ai.kilocode.client.settings.context.ContextConfigurable
 import ai.kilocode.client.settings.models.ModelsConfigurable
 import ai.kilocode.client.settings.providers.ProvidersConfigurable
 import ai.kilocode.client.settings.profile.UserProfileConfigurable
+import ai.kilocode.client.ui.CostrictLinks
 import ai.kilocode.client.ui.UiStyle
 import ai.kilocode.client.ui.layout.Stack
 import ai.kilocode.rpc.dto.KiloAppStatusDto
+import com.intellij.ide.BrowserUtil
 import com.intellij.ide.DataManager
 import com.intellij.openapi.options.SearchableConfigurable
 import com.intellij.openapi.options.ex.Settings
@@ -62,13 +64,11 @@ class KiloSettingsConfigurable : SearchableConfigurable {
         desc.border = JBUI.Borders.emptyBottom(UiStyle.Gap.pad())
         panel.next(desc)
 
-        val link = ActionLink(KiloBundle.message("settings.profile.displayName")) { e ->
-            val src = e.source as? JComponent ?: return@ActionLink
-            val settings = Settings.KEY.getData(DataManager.getInstance().getDataContext(src)) ?: return@ActionLink
-            open(settings, UserProfileConfigurable.ID)
+        val link = ActionLink(KiloBundle.message("settings.profile.displayName")) {
+            // A1: User Profile entry is hidden; if restored it opens the web profile console.
+            BrowserUtil.browse(CostrictLinks.CREDIT_MANAGER)
         }
         link.border = JBUI.Borders.emptyBottom(UiStyle.Gap.sm())
-        // A1: User Profile entry is hidden — keep the link construction and its key, drop the mount only.
 
         val models = ActionLink(KiloBundle.message("settings.models.displayName")) { e ->
             val src = e.source as? JComponent ?: return@ActionLink
