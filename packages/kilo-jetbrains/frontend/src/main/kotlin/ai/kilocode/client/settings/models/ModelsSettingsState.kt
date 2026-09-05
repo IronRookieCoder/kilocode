@@ -79,7 +79,8 @@ internal fun modelsStatus(
     return ModelsStatus.READY
 }
 
-internal fun modelsLoginBannerVisible(ready: Boolean, authenticated: Boolean): Boolean = ready && !authenticated
+internal fun modelsLoginBannerVisible(ready: Boolean, csCloud: Boolean, authenticated: Boolean): Boolean =
+    ready && !csCloud && !authenticated
 
 internal fun savedMatches(base: ModelsDraft, draft: ModelsDraft): Boolean {
     if (base.model != draft.model) return false

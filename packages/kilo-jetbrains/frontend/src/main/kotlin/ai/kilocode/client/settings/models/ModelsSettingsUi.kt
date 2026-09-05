@@ -125,6 +125,7 @@ internal class ModelsSettingsUi(
         val editable = !saving && (ready || state == ModelsStatus.LOADING)
         val bannerVisible = modelsLoginBannerVisible(
             ready = appState.status == KiloAppStatusDto.READY,
+            csCloud = appState.providerId == "cs-cloud",
             authenticated = appState.profile != null,
         )
         syncModelBanner(state, bannerVisible)

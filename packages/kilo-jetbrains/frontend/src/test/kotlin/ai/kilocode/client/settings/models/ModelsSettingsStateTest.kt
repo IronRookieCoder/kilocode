@@ -129,9 +129,15 @@ class ModelsSettingsStateTest {
 
     @Test
     fun `login banner shows only when ready and unauthenticated`() {
-        assertTrue(modelsLoginBannerVisible(ready = true, authenticated = false))
-        assertFalse(modelsLoginBannerVisible(ready = true, authenticated = true))
-        assertFalse(modelsLoginBannerVisible(ready = false, authenticated = false))
+        assertTrue(modelsLoginBannerVisible(ready = true, csCloud = false, authenticated = false))
+        assertFalse(modelsLoginBannerVisible(ready = true, csCloud = false, authenticated = true))
+        assertFalse(modelsLoginBannerVisible(ready = false, csCloud = false, authenticated = false))
+    }
+
+    @Test
+    fun `login banner hides when cs-cloud connected`() {
+        assertFalse(modelsLoginBannerVisible(ready = true, csCloud = true, authenticated = false))
+        assertFalse(modelsLoginBannerVisible(ready = true, csCloud = true, authenticated = true))
     }
 
     @Test
