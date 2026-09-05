@@ -2,6 +2,8 @@ package ai.kilocode.rpc
 
 import ai.kilocode.rpc.dto.ChatEventDto
 import ai.kilocode.rpc.dto.CloudSessionListDto
+import ai.kilocode.rpc.dto.CommitMessageRequestDto
+import ai.kilocode.rpc.dto.CommitMessageResultDto
 import ai.kilocode.rpc.dto.ConfigUpdateDto
 import ai.kilocode.rpc.dto.DiffFileDto
 import ai.kilocode.rpc.dto.MessageWithPartsDto
@@ -79,6 +81,9 @@ interface KiloSessionRpcApi : RemoteApi<Unit> {
 
     /** Rewrite a draft prompt using the configured small model. */
     suspend fun enhancePrompt(directory: String, text: String): String
+
+    /** Generate a commit message from the repository's staged/pending changes. */
+    suspend fun generateCommitMessage(input: CommitMessageRequestDto): CommitMessageResultDto
 
     /** Send a prompt to a session (fire-and-forget). */
     suspend fun prompt(id: String, directory: String, prompt: PromptDto)

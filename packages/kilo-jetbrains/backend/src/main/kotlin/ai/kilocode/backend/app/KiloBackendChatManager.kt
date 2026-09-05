@@ -4,6 +4,8 @@ import ai.kilocode.backend.cli.KiloCliDataParser
 import ai.kilocode.log.ChatLogSummary
 import ai.kilocode.log.KiloLog
 import ai.kilocode.rpc.dto.ChatEventDto
+import ai.kilocode.rpc.dto.CommitMessageRequestDto
+import ai.kilocode.rpc.dto.CommitMessageResultDto
 import ai.kilocode.rpc.dto.ConfigUpdateDto
 import ai.kilocode.rpc.dto.MessageWithPartsDto
 import ai.kilocode.rpc.dto.ModelSelectionDto
@@ -16,12 +18,15 @@ import ai.kilocode.rpc.dto.QuestionReplyDto
 import ai.kilocode.rpc.dto.QuestionRequestDto
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withContext
 import okhttp3.Call
 import okhttp3.Callback
 import okhttp3.MediaType.Companion.toMediaType
@@ -31,6 +36,7 @@ import okhttp3.Response
 import okhttp3.RequestBody.Companion.toRequestBody
 import java.io.IOException
 import java.util.concurrent.TimeUnit
+import kotlin.coroutines.coroutineContext
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 
@@ -51,6 +57,10 @@ class KiloBackendChatManager(
         private val JSON_TYPE = "application/json".toMediaType()
         private const val ENHANCE_TIMEOUT_MINUTES = 2L
         private const val REVERT_TIMEOUT_SECONDS = 35L
+        private const val COMMIT_TIMEOUT_SECONDS = 35L
+
+        /** Error detail the CLI returns with 422 when the repository has no changes. */
+        private const val NO_CHANGES = "No changes found to generate a commit message for"
 
         private val CHAT_EVENTS = setOf(
             "message.updated",
@@ -165,6 +175,58 @@ class KiloBackendChatManager(
                 throw RuntimeException("Enhance prompt failed: HTTP ${response.code}")
             }
             KiloCliDataParser.parseEnhancedPrompt(raw)
+        }
+    }
+
+    /**
+     * Generate a commit message for the repository at input.directory via POST /commit-message.
+     *
+     * Never throws for request failures — HTTP errors, connection errors, and transport
+     * exceptions (e.g. cs-cloud request errors) all map to [CommitMessageResultDto.error]
+     * so the frontend can show them as a clean notification.
+     */
+    suspend fun commitMessage(input: CommitMessageRequestDto): CommitMessageResultDto {
+        try {
+            val http = requireClient()
+            val url = requireBase()
+            val body = KiloCliDataParser.buildCommitMessageJson(
+                path = input.directory,
+                previousMessage = input.previousMessage?.takeIf { it.isNotBlank() },
+                providerID = input.providerID,
+                modelID = input.modelID ?: "",
+            )
+            val request = Request.Builder()
+                .url("$url/commit-message?directory=${encode(input.directory)}")
+                .post(body.toRequestBody(JSON_TYPE))
+                .build()
+            val call = http.newCall(request)
+            // Server aborts generation after 30s; give it 35s to deliver the error.
+            call.timeout().timeout(COMMIT_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+            // Sync execute: connection interceptors throw runtime exceptions for non-2xx, which
+            // OkHttp drops as uncaught thread exceptions on async calls — execute propagates
+            // them here so they map to a clean error instead of hanging the coroutine.
+            val cancel = coroutineContext.job.invokeOnCompletion { call.cancel() }
+            try {
+                return withContext(Dispatchers.IO) {
+                    call.execute().use { response ->
+                        val raw = response.body?.string().orEmpty()
+                        if (response.isSuccessful) {
+                            return@withContext CommitMessageResultDto(message = KiloCliDataParser.parseCommitMessage(raw))
+                        }
+                        log.warn("commit message failed: HTTP ${response.code}")
+                        raw.takeIf { it.isNotBlank() }?.let { log.debug { "kind=commitMessage error=${ChatLogSummary.body(it)}" } }
+                        val detail = KiloCliDataParser.errorMessage(raw) ?: "HTTP ${response.code}"
+                        CommitMessageResultDto(error = detail, noChanges = detail == NO_CHANGES)
+                    }
+                }
+            } finally {
+                cancel.dispose()
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            log.warn("commit message request failed message=${e.message}", e)
+            return CommitMessageResultDto(error = e.message ?: e::class.java.simpleName)
         }
     }
 

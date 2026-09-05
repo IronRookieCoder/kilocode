@@ -1,5 +1,6 @@
 package ai.kilocode.client.settings.models
 
+import ai.kilocode.client.app.CommitModelStore
 import ai.kilocode.client.app.KiloAppService
 import ai.kilocode.client.app.KiloWorkspaceService
 import ai.kilocode.client.plugin.KiloBundle
@@ -23,6 +24,7 @@ import ai.kilocode.rpc.dto.LoadErrorDto
 import ai.kilocode.rpc.dto.ModelStateDto
 import ai.kilocode.rpc.dto.ModelsWorkspaceDto
 import ai.kilocode.rpc.dto.ProvidersDto
+import com.intellij.ide.util.PropertiesComponent
 import com.intellij.openapi.components.service
 import com.intellij.util.concurrency.annotations.RequiresEdt
 import kotlinx.coroutines.CoroutineScope
@@ -47,6 +49,7 @@ internal class ModelsSettingsUi(
     private val defaults get() = form.defaults
     private val small get() = form.small
     private val subagent get() = form.subagent
+    private val commit get() = form.commit
     private val variant get() = form.variant
     private val variantRow get() = form.variantRow
     private val pickers get() = form.pickers
@@ -57,7 +60,7 @@ internal class ModelsSettingsUi(
     private var allItems: List<ModelPicker.Item> = emptyList()
 
     init {
-        startSettings(ModelsSettingsContent(app, { updateDraft(it) }, ::selectSubagent))
+        startSettings(ModelsSettingsContent(app, { updateDraft(it) }, ::selectSubagent, ::pickCommit))
     }
 
     override fun change(from: ModelsDraft, to: ModelsDraft): ConfigPatchDto? = patch(from, to).takeIf {
@@ -143,7 +146,8 @@ internal class ModelsSettingsUi(
         defaults.setItems(allItems, draft.model)
         small.setItems(smallItems, draft.small)
         subagent.setItems(allItems, draft.subagent)
-        listOf(defaults, small, subagent).forEach { it.isEnabled = editable }
+        commit.setItems(smallItems, commitKey())
+        listOf(defaults, small, subagent, commit).forEach { it.isEnabled = editable }
         layout = syncVariant(editable) || layout
         layout = syncModes(editable) || layout
         if (layout) {
@@ -223,6 +227,17 @@ internal class ModelsSettingsUi(
         val variant = if (draft.subagent == item.key && draft.variant in item.variants) draft.variant else item.variants.firstOrNull()
         updateDraft { copy(subagent = item.key, variant = variant) }
     }
+
+    /** Commit-message model applies immediately — it is IDE-local, not backend config. */
+    private fun pickCommit(selection: String?) {
+        val parsed = parseSelection(selection)
+        CommitModelStore.store(PropertiesComponent.getInstance(), parsed?.first, parsed?.second)
+    }
+
+    private fun commitKey(): String? {
+        val selection = CommitModelStore.selection() ?: return null
+        return key(selection.first, selection.second)
+    }
 }
 
 private fun summary(patch: ConfigPatchDto): String {
@@ -234,10 +249,12 @@ internal class ModelsSettingsContent(
     app: KiloAppService,
     update: (ModelsDraft.() -> ModelsDraft) -> Unit,
     select: (ModelPicker.Item) -> Unit,
+    pickCommit: (String?) -> Unit,
 ) : BaseContentPanel() {
     val defaults = ModelSettingPicker()
     val small = ModelSettingPicker()
     val subagent = ModelSettingPicker()
+    val commit = ModelSettingPicker()
     val variant = ReasoningPicker()
     val variantRow = SettingsRow(
         KiloBundle.message("settings.models.subagentVariant.title"),
@@ -255,6 +272,9 @@ internal class ModelsSettingsContent(
         small.picker.includeSmall = true
         subagent.picker.onSelect = { item -> select(item) }
         subagent.picker.onClear = { update { copy(subagent = null, variant = null) } }
+        commit.picker.includeSmall = true
+        commit.picker.onSelect = { item -> pickCommit(item.key) }
+        commit.picker.onClear = { pickCommit(null) }
         variant.onSelect = { item -> update { copy(variant = item.id) } }
         listOf(defaults, small, subagent).forEach { picker ->
             picker.picker.favorites = { app.favorites.value }
@@ -274,6 +294,11 @@ internal class ModelsSettingsContent(
             subagent,
         ))
         rows.row(variantRow)
+        rows.row(SettingsRow(
+            KiloBundle.message("settings.models.commitModel.title"),
+            KiloBundle.message("settings.models.commitModel.description"),
+            commit,
+        ))
         modes = section(
             KiloBundle.message("settings.models.modeModels.title"),
             KiloBundle.message("settings.models.modeModels.description"),

@@ -809,6 +809,30 @@ object KiloCliDataParser {
         """{"text":${escape(text)}}"""
 
     /**
+     * Build the JSON body for POST /commit-message. Optional fields are omitted
+     * when blank; providerID and modelID are only sent together as a pair.
+     */
+    fun buildCommitMessageJson(path: String, previousMessage: String?, providerID: String?, modelID: String): String {
+        val fields = LinkedHashMap<String, String>()
+        fields["path"] = path
+        previousMessage?.takeIf { it.isNotBlank() }?.let { fields["previousMessage"] = it }
+        if (!providerID.isNullOrBlank() && !modelID.isBlank()) {
+            fields["providerID"] = providerID
+            fields["modelID"] = modelID
+        }
+        return JsonObject(fields.mapValues { JsonPrimitive(it.value) }).toString()
+    }
+
+    /** Message text from a 200 /commit-message response. */
+    fun parseCommitMessage(raw: String): String =
+        tryParseObject(raw)?.str("message")
+            ?: throw IllegalArgumentException("Commit message response is missing message")
+
+    /** Best-effort error detail from a failed JSON error body. */
+    fun errorMessage(raw: String): String? =
+        tryParseObject(raw)?.str("message")
+
+    /**
      * Build the JSON body for `POST /session/{id}/prompt_async`.
      */
     fun buildPromptJson(prompt: PromptDto): String {

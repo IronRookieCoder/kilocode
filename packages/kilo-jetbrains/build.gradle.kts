@@ -262,7 +262,10 @@ val integrationTest by intellijPlatformTesting.testIdeUi.registering {
 }
 
 intellijPlatform {
-    splitMode = true
+    // Dev knob: runIde defaults to split mode; pass -Pkilo.dev.splitMode=false for a monolithic
+    // sandbox (needed when testing UI registered into backend-only platform groups, e.g. the
+    // commit-dialog toolbar actions, which do not exist in the thin-client frontend process).
+    splitMode = providers.gradleProperty("kilo.dev.splitMode").map(String::toBoolean).orElse(true)
     pluginInstallationTarget = PluginInstallationTarget.BOTH
 
     pluginConfiguration {

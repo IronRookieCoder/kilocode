@@ -1,6 +1,7 @@
 package ai.kilocode.client.settings.models
 
 import ai.kilocode.client.util.edtWait
+import ai.kilocode.client.app.CommitModelStore
 import ai.kilocode.client.app.KiloAppService
 import ai.kilocode.client.app.KiloWorkspaceService
 import ai.kilocode.client.plugin.KiloBundle
@@ -19,6 +20,7 @@ import ai.kilocode.rpc.dto.ProvidersDto
 import com.intellij.notification.Notification
 import com.intellij.notification.NotificationType
 import com.intellij.notification.Notifications
+import com.intellij.ide.util.PropertiesComponent
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.testFramework.fixtures.BasePlatformTestCase
 import com.intellij.ui.InlineBanner
@@ -337,6 +339,23 @@ class ModelsSettingsUiTest : BasePlatformTestCase() {
     fun `test small model row is hidden`() {
         val smallModelTitle = KiloBundle.message("settings.models.smallModel.title")
         assertFalse(text(requireUi()).contains(smallModelTitle))
+    }
+
+    fun `test commit model row applies selection immediately`() {
+        val panel = requireUi()
+        val props = PropertiesComponent.getInstance()
+        props.unsetValue("costrict.commitMessage.model")
+
+        assertTrue(text(panel).contains(KiloBundle.message("settings.models.commitModel.title")))
+        val commit = pickers(panel).elementAt(2)
+
+        edt {
+            commit.onSelect(ModelPicker.Item("claude", "Claude", "kilo", "Kilo"))
+        }
+        assertEquals("kilo" to "claude", CommitModelStore.selection(props))
+
+        edt { commit.onClear() }
+        assertEquals(null, CommitModelStore.selection(props))
     }
 
     private fun providers(): ProvidersDto = ProvidersDto(

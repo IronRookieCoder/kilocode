@@ -229,6 +229,11 @@
         <action id="Kilo.CodeReview.Changes"
                 class="ai.kilocode.client.actions.ReviewChangesAction"/>
 
+        <action id="Kilo.GenerateCommitMessage"
+                class="ai.kilocode.client.actions.GenerateCommitMessageAction">
+            <add-to-group group-id="Vcs.MessageActionGroup" anchor="first"/>
+        </action>
+
         <!-- Declarative toolbar group for the Kilo tool window title bar -->
         <!-- NOTE: keep every <action> declared above any <group> that references it —
              the platform registers actions in document order, so a <reference> to a
