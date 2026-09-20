@@ -274,4 +274,75 @@ class KiloToolWindowFactoryTest : BasePlatformTestCase() {
             assertEquals(1, endFacts(fixture, "plugin.readiness").size)
         }
     }
+
+    fun `test reactivation after blocked creates a new readiness denominator`() {
+        Fixture().use { fixture ->
+            val app = MutableStateFlow(KiloAppStateDto(KiloAppStatusDto.LOADING))
+            val workspace = MutableStateFlow(KiloWorkspaceStateDto(KiloWorkspaceStatusDto.PENDING))
+            val watch = ReadinessWatch(
+                operations = fixture.operations,
+                scope = CoroutineScope(Dispatchers.Unconfined),
+                app = app,
+                workspace = workspace,
+                inputProvider = { true },
+            )
+            watch.activate()
+            // 凭据缺失→blocked结算（READY但无profile）。
+            app.value = KiloAppStateDto(KiloAppStatusDto.READY)
+            pumpEdt()
+            fixture.flush()
+            assertEquals(1, startFacts(fixture, "plugin.readiness").size)
+            val blockedEnds = endFacts(fixture, "plugin.readiness")
+            assertEquals(1, blockedEnds.size)
+            assertEquals("blocked", blockedEnds.single().data["result"]?.jsonPrimitive?.content)
+            assertEquals("credentials_missing", blockedEnds.single().data["reason"]?.jsonPrimitive?.content)
+
+            // 就地恢复（登录完成→READY）：更新落在已结算分母上被丢弃，不新建分母。
+            app.value = KiloAppStateDto(KiloAppStatusDto.READY, profile = ProfileDto(email = "user@example.com"))
+            workspace.value = KiloWorkspaceStateDto(KiloWorkspaceStatusDto.READY)
+            pumpEdt()
+            fixture.flush()
+            assertEquals(1, startFacts(fixture, "plugin.readiness").size)
+            assertEquals(1, endFacts(fixture, "plugin.readiness").size)
+
+            // 真实重激活（工具窗再次激活）：上一分母已结算→新建分母，新激活下结算success。
+            watch.activate()
+            pumpEdt()
+            fixture.flush()
+
+            assertEquals(2, startFacts(fixture, "plugin.readiness").size)
+            val ends = endFacts(fixture, "plugin.readiness")
+            assertEquals(2, ends.size)
+            assertEquals("success", ends.last().data["result"]?.jsonPrimitive?.content)
+        }
+    }
+
+    fun `test in-place recovery after blocked does not create a new denominator`() {
+        Fixture().use { fixture ->
+            val app = MutableStateFlow(KiloAppStateDto(KiloAppStatusDto.LOADING))
+            val workspace = MutableStateFlow(KiloWorkspaceStateDto(KiloWorkspaceStatusDto.PENDING))
+            val watch = ReadinessWatch(
+                operations = fixture.operations,
+                scope = CoroutineScope(Dispatchers.Unconfined),
+                app = app,
+                workspace = workspace,
+                inputProvider = { true },
+            )
+            watch.activate()
+            // 凭据缺失→blocked结算。
+            app.value = KiloAppStateDto(KiloAppStatusDto.READY)
+            pumpEdt()
+            fixture.flush()
+            assertEquals(1, endFacts(fixture, "plugin.readiness").size)
+
+            // 同一激活内自动恢复（登录完成→READY）：不重激活，不新建分母，无第二条终态。
+            app.value = KiloAppStateDto(KiloAppStatusDto.READY, profile = ProfileDto(email = "user@example.com"))
+            workspace.value = KiloWorkspaceStateDto(KiloWorkspaceStatusDto.READY)
+            pumpEdt()
+            fixture.flush()
+
+            assertEquals(1, startFacts(fixture, "plugin.readiness").size)
+            assertEquals(1, endFacts(fixture, "plugin.readiness").size)
+        }
+    }
 }

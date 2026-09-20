@@ -34,6 +34,13 @@ class Readiness(operations: Operations, context: Map<String, String>) {
 
     private val operation = operations.begin(READINESS_NAME, READINESS_DEADLINE_MS, context = context)
 
+    /** 是否已产生终态（本类经end结算；end返回false同样视为已结算——如deadline先到）。 */
+    @Volatile
+    private var ended = false
+
+    /** 分母是否已结算：Watch判断真实重激活是否需要新建分母的依据。 */
+    val settled: Boolean get() = ended
+
     /** 五项条件 + blocked是brief规定的接口形态（逐字签名），抑制参数个数与组合条件告警。 */
     @Suppress("LongParameterList", "ComplexCondition")
     fun update(
@@ -45,12 +52,14 @@ class Readiness(operations: Operations, context: Map<String, String>) {
         blocked: String? = null,
     ) {
         if (blocked != null) {
+            ended = true
             operation.end("blocked", READINESS_STAGE, "environment", fields = buildJsonObject {
                 put("reason", blocked)
             })
             return
         }
         if (view && app && workspace && subscription && input) {
+            ended = true
             operation.end("success", READINESS_STAGE, fields = buildJsonObject {
                 put("reason", "none")
             })
@@ -59,9 +68,9 @@ class Readiness(operations: Operations, context: Map<String, String>) {
 }
 
 /**
- * M03激活级装配（brief Step 5）：工具窗首次激活（setup成功、根视图已安装）创建
- * **一个**[Readiness]；AppService/Workspace的现有状态流变更经EDT驱动五项条件，
- * 自动状态重复绝不新建分母。激活前的状态变更只累计条件，不创建分母。
+ * M03激活级装配（brief Step 5）：每次真实激活（工具窗创建/setup成功）经[activate]
+ * 提供**一个**[Readiness]分母；AppService/Workspace的现有状态流变更经EDT驱动五项
+ * 条件，自动状态重复绝不新建分母。激活前的状态变更只累计条件，不创建分母。
  *
  * 五项条件的B1级真实来源（全部在EDT判定）：
  * - view：根视图安装完成（KiloToolWindowSetupService.setup成功后调用[activate]）。
@@ -76,7 +85,8 @@ class Readiness(operations: Operations, context: Map<String, String>) {
  * blocked：MIGRATION_REQUIRED→[READINESS_BLOCKED_MIGRATION]；READY但无profile
  * （凭据缺失/未登录）→[READINESS_BLOCKED_CREDENTIALS]。连接中/加载中的暂时无凭据
  * 不算blocked，只是不满足条件；blocked一出现即end，同激活内后续重复blocked不再
- * 二次结算。用户重试（新的工具窗激活）由调用方新建本类实例，产生新分母。
+ * 二次结算，就地恢复（登录/迁移完成→READY）的更新落在已结算分母上被丢弃。
+ * 真实重激活（工具窗再次创建/setup成功）经[activate]在上一分母已结算时创建新分母。
  *
  * 线程纪律：状态读写只在真实EDT（状态流回调经[invokeLater]投递）；record路径
  * 非阻塞，不新增阻塞RPC。
@@ -100,12 +110,18 @@ internal class ReadinessWatch(
         scope.launch { workspace.collect { state -> post { onWorkspace(state) } } }
     }
 
-    /** 首次激活（根视图已安装）调用；幂等——重复激活不新建分母。必须在EDT。
-     * 激活前已观察到的blocked状态（如迁移已在进行）在此一并结算。 */
+    /**
+     * 真实激活事件（工具窗创建/setup成功/用户重开工具窗）调用，必须在EDT。
+     * 分母规则：上一分母仍在途（未结算）→保持同激活上下文，不新建分母；上一分母
+     * 已结算（blocked或success）→本次真实重激活创建**新**Readiness（新分母）。
+     * 自动状态流变更从不调用本方法，因此绝不新建分母（"自动状态重复不新建分母"）。
+     */
     @RequiresEdt
     fun activate() {
-        if (view) return
+        val current = readiness
+        if (current != null && !current.settled) return
         view = true
+        readiness = Readiness(operations, emptyMap())
         refresh()
     }
 

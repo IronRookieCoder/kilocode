@@ -167,17 +167,20 @@ internal class KiloToolWindowSetupService internal constructor(
         faults?.report(error, FAULT_COMPONENT_FRONTEND, handled = true)
     }
 
-    /** 一次激活一个Watch（幂等）：setup失败后未激活，下一次create重试产生新激活分母。 */
+    /**
+     * setup成功即一次真实激活：Watch内部对在途分母保持同激活上下文，对已结算分母
+     * （blocked或success）创建新的Readiness（brief Step 5"用户重试创建新激活操作"）。
+     */
     private fun activateReadiness(manager: SessionSidePanelManager, workspace: Workspace) {
-        if (readiness != null) return
         val setupOperations = operations ?: return
-        readiness = ReadinessWatch(
+        val watch = readiness ?: ReadinessWatch(
             operations = setupOperations,
             scope = cs,
             app = service<KiloAppService>().state,
             workspace = workspace.state,
             inputProvider = { manager.defaultFocusedComponent != null },
-        ).also { it.activate() }
+        ).also { readiness = it }
+        watch.activate()
     }
 
     private fun setup(
