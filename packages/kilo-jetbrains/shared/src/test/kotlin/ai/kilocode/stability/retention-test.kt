@@ -242,6 +242,41 @@ class RetentionTest {
         }
     }
 
+    @Test
+    fun `undeletable candidate bounds the eviction loop instead of hanging`() {
+        val base = Files.createTempDirectory("retention-stuck")
+        try {
+            val clock = SweepClock()
+            val root = base.resolve("v1").resolve("pr-self")
+            val oldDiagnostic = paddedSegment(root, "diagnostic", "run-a-0.ready", 2000)
+            val newDiagnostic = paddedSegment(root, "diagnostic", "run-a-1.ready", 2000)
+            val critical = paddedSegment(root, "critical", "run-a-2.ready", 2000)
+            val open = paddedSegment(root, "diagnostic", "run-a-3.open", 2000)
+            age(oldDiagnostic, clock, 2 * HOUR_MS)
+            age(newDiagnostic, clock, HOUR_MS)
+            age(critical, clock, HOUR_MS)
+            // Windows上RandomAccessFile打开（java.io无FILE_SHARE_DELETE）=delete静默失败：
+            // 最旧diagnostic删不掉，循环必须按连续失败上限放弃而非持exchange锁自旋。
+            // （POSIX语义下打开句柄不阻止删除：首轮即完成淘汰，走first分支。）
+            val holder = java.io.RandomAccessFile(oldDiagnostic.toFile(), "rw")
+            val started = System.nanoTime()
+            val first = sweep(base, clock, maxBytes = 6000).sweepOwnSource()
+            val elapsedMs = (System.nanoTime() - started) / 1_000_000
+            assertTrue(elapsedMs < 10_000, "eviction must terminate quickly, took ${elapsedMs}ms")
+            holder.close()
+            if (first) {
+                assertFalse(Files.exists(oldDiagnostic))
+            } else {
+                assertTrue(Files.exists(oldDiagnostic), "blocked candidate is retried on the next sweep")
+                sweep(base, clock, maxBytes = 6000).sweepOwnSource()
+                assertFalse(Files.exists(oldDiagnostic), "released candidate is evicted on the next sweep")
+            }
+            assertTrue(Files.exists(open), ".open is still never evicted")
+        } finally {
+            base.toFile().deleteRecursively()
+        }
+    }
+
     // --- 夹具：旧producer布局与真实锁文件 -----------------------------------------------
 
     private class OldLayout(

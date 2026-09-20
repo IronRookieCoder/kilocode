@@ -30,6 +30,9 @@ private const val LOCK_RANGE_SIZE = 1L
 private const val DEFAULT_MAX_BYTES = 10L * 1024 * 1024
 private const val DEFAULT_MAX_AGE_MS = 24L * 60 * 60 * 1000
 
+/** 淘汰循环连续删除失败上限：超过即放弃本轮（Windows句柄占用等），下轮扫描重试。 */
+private const val MAX_CONSECUTIVE_DELETE_FAILURES = 3
+
 /**
  * 残留清理（设计7.4）：活跃源10MiB/24小时预算与旧producer残留的独立扫描。
  *
@@ -83,12 +86,18 @@ class Retention(
         return tryAcquireLock(root.resolve(EXCHANGE_LOCK_NAME))
     }
 
-    /** 删除到期文件后按预算逐个淘汰，返回剩余未交接量是否回到预算内。 */
+    /** 删除到期文件后按预算逐个淘汰，返回剩余未交接量是否回到预算内。
+     * 连续删除失败（Windows句柄占用/权限等，deleteIfExists静默失败）达
+     * [MAX_CONSECUTIVE_DELETE_FAILURES]次即放弃本轮——否则同一候选被反复选中，
+     * 持exchange.lock自旋会饿死consumer并卡死retentionLoop；下一轮每小时扫描再试。 */
     private fun evictOverQuotaAndMeasure(writerActive: Boolean): Boolean {
         deleteExpired(root, includeOpen = !writerActive)
+        var consecutiveFailures = 0
         while (totalSize(dataFiles(root)) > maxBytes) {
-            val candidate = evictionCandidate() ?: break
-            runCatching { Files.deleteIfExists(candidate) }
+            val candidate = evictionCandidate()
+            val deleted = candidate != null && runCatching { Files.deleteIfExists(candidate) }.getOrDefault(false)
+            consecutiveFailures = if (deleted) 0 else consecutiveFailures + 1
+            if (candidate == null || consecutiveFailures >= MAX_CONSECUTIVE_DELETE_FAILURES) break
         }
         return totalSize(dataFiles(root)) <= maxBytes
     }

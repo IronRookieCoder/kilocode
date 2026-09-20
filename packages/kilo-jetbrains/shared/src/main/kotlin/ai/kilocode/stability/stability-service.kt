@@ -53,6 +53,19 @@ private fun defaultTelemetryHome(): Path =
     Path.of(System.getProperty("user.home"), ".costrict", "telemetry")
 
 /**
+ * writer启动等待（默认实现）：有界轮询CREATED→ACTIVE/DISABLED。经构造参数注入（测试用它
+ * 停在"writer已创建、run未提交"的窗口内，覆盖stop vs activateRun竞态）。
+ */
+internal fun defaultAwaitActive(writer: Writer): Boolean {
+    var waited = 0L
+    while (writer.state == WriterState.CREATED && waited < WRITER_STARTUP_TIMEOUT_MS) {
+        Thread.sleep(WRITER_STARTUP_POLL_MS)
+        waited += WRITER_STARTUP_POLL_MS
+    }
+    return writer.state == WriterState.ACTIVE
+}
+
+/**
  * 安全公开状态（接口表）：mode/side/profile/两用途开关/原因。只含常量与布尔值，
  * 绝不携带JWT、路径或账户内容；profile在v1恒为default（见[StabilityService] KDoc）。
  */
@@ -100,6 +113,7 @@ class StabilityService private constructor(
     private val deviceStore: DeviceIdStore,
     private val clock: Clock,
     private val pollIntervalMs: Long,
+    private val awaitActiveHook: (Writer) -> Boolean,
 ) {
 
     /** 平台注入入口：light service按CoroutineScope构造（KiloBackendAppService同型）。 */
@@ -111,6 +125,7 @@ class StabilityService private constructor(
         platformDeviceIdStore(),
         SystemClock,
         POLICY_POLL_MS,
+        { writer -> defaultAwaitActive(writer) },
     )
 
     private val startedOnce = AtomicBoolean()
@@ -218,7 +233,9 @@ class StabilityService private constructor(
 
     /** 一次许可裁决：首次获许可建run；公共撤销即结束run（不伪造退出）；随后发布安全状态。
      * reason按状态机取值：run内=ok/outbox_full；run外=writer_disabled（启动失败粘滞，重试自愈）
-     * 优先于no_policy——存储不可验证是比"无策略"更可行动的故障。 */
+     * 优先于no_policy——存储不可验证是比"无策略"更可行动的故障。
+     * activateRun可能在等待窗口内被stop跨越，返回后若已裁决stop则不得再发布状态
+     * （stopped_*由stop协程独占发布，status与实际运行态保持一致）。 */
     private fun stepActivation() {
         if (stoppedOnce.get()) return
         val permitted = permitted()
@@ -227,6 +244,7 @@ class StabilityService private constructor(
             !permitted && runActive -> deactivateRun()
             else -> Unit
         }
+        if (stoppedOnce.get()) return
         setStatus(currentIdleReason())
     }
 
@@ -237,8 +255,12 @@ class StabilityService private constructor(
     }
 
     /** 新采集run：新run_id→新recorder/operations→writer持锁→（每实例一次）登记→plugin.started一次。
-     * 启动失败（存储不可验证/锁被占）时关闭准入并保持禁采，下一个watch周期自动重试。 */
+     * 启动失败（存储不可验证/锁被占）时关闭准入并保持禁采，下一个watch周期自动重试。
+     * stop竞态：入口与等待返回后都复查stoppedOnce——stop裁决后绝不提交run，也不记started，
+     * 未提交的writer/recorder就地关闭（writer.close有界），status交由stop协程发布。 */
+    @Suppress("ReturnCount")
     private fun activateRun() {
+        if (stoppedOnce.get()) return
         val base = ensureCore()
         val store = policies ?: return
         val identity = base.copy(runId = RUN_PREFIX + randomId(), mode = runMode.mode, side = runMode.side)
@@ -250,7 +272,14 @@ class StabilityService private constructor(
         val writer = Writer(root, identity, recorder, store, clock, storage = storage)
         writer.onDisabled = { setStatus(REASON_WRITER_DISABLED) }
         writer.start()
-        if (!awaitActive(writer)) {
+        // 等待轮询不可经取消打断（Thread.sleep），stop可能恰好落在此窗口内。
+        val active = awaitActiveHook(writer)
+        if (stoppedOnce.get()) {
+            writer.close()
+            recorder.close()
+            return
+        }
+        if (!active) {
             // 保留已关闭的recorder在getter上：禁采期间record恒DISABLED，不经standby重新开口。
             recorder.close()
             runFailure = REASON_WRITER_DISABLED
@@ -275,15 +304,7 @@ class StabilityService private constructor(
         outboxFull = false
     }
 
-    /** writer启动在自有IO线程完成；有界等待CREATED→ACTIVE/DISABLED。 */
-    private fun awaitActive(writer: Writer): Boolean {
-        var waited = 0L
-        while (writer.state == WriterState.CREATED && waited < WRITER_STARTUP_TIMEOUT_MS) {
-            Thread.sleep(WRITER_STARTUP_POLL_MS)
-            waited += WRITER_STARTUP_POLL_MS
-        }
-        return writer.state == WriterState.ACTIVE
-    }
+    /** writer启动在自有IO线程完成；等待逻辑见[defaultAwaitActive]（可注入）。 */
 
     /** producer.json与登记文件只在首个成功run写一次（pid/process_start描述本JVM实例）。 */
     private fun writeMetadataOnce(storage: Storage, root: Path) {
@@ -396,6 +417,7 @@ class StabilityService private constructor(
             deviceStore: DeviceIdStore,
             clock: Clock,
             pollIntervalMs: Long,
+            awaitActiveHook: (Writer) -> Boolean = ::defaultAwaitActive,
         ) = StabilityService(
             scope,
             modeSource,
@@ -404,6 +426,7 @@ class StabilityService private constructor(
             deviceStore,
             clock,
             pollIntervalMs,
+            awaitActiveHook,
         )
     }
 }

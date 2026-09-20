@@ -34,6 +34,7 @@ private class Harness(
     val clock: SweepClock = SweepClock(),
     mode: RunMode = RunMode("monolith", "monolith"),
     deviceStore: DeviceIdStore = MemoryDeviceStore("device-fixed"),
+    awaitActiveHook: (Writer) -> Boolean = ::defaultAwaitActive,
 ) : AutoCloseable {
 
     val telemetryHome = base.resolve("home").resolve(".costrict").resolve("telemetry")
@@ -51,6 +52,7 @@ private class Harness(
         deviceStore = deviceStore,
         clock = clock,
         pollIntervalMs = SERVICE_POLL_MS,
+        awaitActiveHook = awaitActiveHook,
     )
 
     fun writeControl(json: String) {
@@ -335,6 +337,53 @@ class ProducerTest {
         assertTrue(first != other, "distinct projects map to distinct random ids")
         ids.forget("project-a")
         assertTrue(first != ids.idFor("project-a"), "after the lifecycle ends a fresh random id is drawn")
+    }
+
+    @Test
+    fun `stop landing inside activation aborts the run without a started fact`() {
+        val enteredActivation = java.util.concurrent.CountDownLatch(1)
+        val releaseActivation = java.util.concurrent.CountDownLatch(1)
+        val hook = { writer: Writer ->
+            // 先等writer完成启动（根目录/锁文件已就位），再停在"已启动、run未提交"的窗口。
+            val active = defaultAwaitActive(writer)
+            enteredActivation.countDown()
+            releaseActivation.await(30, java.util.concurrent.TimeUnit.SECONDS)
+            active
+        }
+        Harness(awaitActiveHook = hook).use { harness ->
+            harness.writeControl(validControl())
+            harness.service.start("monolith")
+            assertTrue(enteredActivation.await(15, java.util.concurrent.TimeUnit.SECONDS), "hook entered the window")
+            // 竞态窗口内裁决stop：run尚未提交（runActive=false），stop协程只发stopped状态。
+            harness.service.stop("app_close")
+            harness.awaitReason("stopped_app_close")
+            // 放行activateRun：等待返回后必须复查stoppedOnce并放弃提交。
+            releaseActivation.countDown()
+            // writer被就地关闭=writer.lock可被第三方获取（同步点兼断言）。
+            val root = harness.producerRoot()
+            val lock = root.resolve("writer.lock")
+            var acquired = false
+            var waited = 0L
+            while (waited < 15_000 && !acquired) {
+                java.nio.channels.FileChannel.open(lock, java.nio.file.StandardOpenOption.READ, java.nio.file.StandardOpenOption.WRITE).use { channel ->
+                    acquired = channel.tryLock(0, 1, false) != null
+                }
+                if (!acquired) {
+                    Thread.sleep(50)
+                    waited += 50
+                }
+            }
+            assertTrue(acquired, "uncommitted writer is closed so the lock is free")
+            assertTrue(harness.facts().none { it.name == "plugin.started" }, "no started fact after the stop decision")
+            assertTrue(
+                harness.service.status.value.reason.startsWith("stopped"),
+                "status stays stopped, got ${harness.service.status.value.reason}",
+            )
+            val admission = harness.service.recorder.record(
+                Draft("plugin.started", "lifecycle", "critical", JsonObject(emptyMap())),
+            )
+            assertEquals(Admission.DISABLED, admission, "admission stays closed after the aborted run")
+        }
     }
 
     private fun Harness.producerDirCount(): Int =
