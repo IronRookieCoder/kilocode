@@ -126,6 +126,7 @@ class StabilityService private constructor(
     @Volatile private var runActive = false
     @Volatile private var metadataWritten = false
     @Volatile private var outboxFull = false
+    @Volatile private var runFailure: String? = null
     @Volatile private var connectionProviderHint = PROVIDER_UNKNOWN
     @Volatile private var runMode: RunMode = RunMode("unknown", "unknown")
     private var activationJob: Job? = null
@@ -215,7 +216,9 @@ class StabilityService private constructor(
         }
     }
 
-    /** 一次许可裁决：首次获许可建run；公共撤销即结束run（不伪造退出）；随后发布安全状态。 */
+    /** 一次许可裁决：首次获许可建run；公共撤销即结束run（不伪造退出）；随后发布安全状态。
+     * reason按状态机取值：run内=ok/outbox_full；run外=writer_disabled（启动失败粘滞，重试自愈）
+     * 优先于no_policy——存储不可验证是比"无策略"更可行动的故障。 */
     private fun stepActivation() {
         if (stoppedOnce.get()) return
         val permitted = permitted()
@@ -224,10 +227,17 @@ class StabilityService private constructor(
             !permitted && runActive -> deactivateRun()
             else -> Unit
         }
-        setStatus(if (runActive) currentRunReason() else REASON_NO_POLICY)
+        setStatus(currentIdleReason())
     }
 
-    /** 新采集run：新run_id→新recorder/operations→writer持锁→（每实例一次）登记→plugin.started一次。 */
+    private fun currentIdleReason(): String = when {
+        runActive -> currentRunReason()
+        runFailure != null -> runFailure!!
+        else -> REASON_NO_POLICY
+    }
+
+    /** 新采集run：新run_id→新recorder/operations→writer持锁→（每实例一次）登记→plugin.started一次。
+     * 启动失败（存储不可验证/锁被占）时关闭准入并保持禁采，下一个watch周期自动重试。 */
     private fun activateRun() {
         val base = ensureCore()
         val store = policies ?: return
@@ -241,12 +251,13 @@ class StabilityService private constructor(
         writer.onDisabled = { setStatus(REASON_WRITER_DISABLED) }
         writer.start()
         if (!awaitActive(writer)) {
+            // 保留已关闭的recorder在getter上：禁采期间record恒DISABLED，不经standby重新开口。
             recorder.close()
-            activeRecorder = null
-            activeOperations = null
+            runFailure = REASON_WRITER_DISABLED
             setStatus(REASON_WRITER_DISABLED)
             return
         }
+        runFailure = null
         activeWriter = writer
         runActive = true
         outboxFull = false

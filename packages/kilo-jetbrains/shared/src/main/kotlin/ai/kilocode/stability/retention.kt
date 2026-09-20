@@ -305,9 +305,6 @@ class Retention(
     } catch (_: IOException) {
         null
     }
-
-    private fun defaultRegistrationsDir(): Path =
-        Path.of(System.getProperty("user.home"), ".costrict", "telemetry", "registrations")
 }
 
 /** 登记目录的默认约定路径（设计5.2）：`~/.costrict/telemetry/registrations`。 */
