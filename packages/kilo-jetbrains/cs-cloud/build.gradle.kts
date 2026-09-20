@@ -27,6 +27,7 @@ dependencies {
     testImplementation(kotlin("test"))
     testImplementation(libs.junit)
     testImplementation(libs.okhttp.mockwebserver)
+    testImplementation(testFixtures(project(":shared")))
     // `@TestApplication` (test-framework-junit5) requires JUnit Jupiter >= 5.13,
     // while kotlin-test-junit5 pins the test classpath to 5.10.1.
     testImplementation("org.junit.jupiter:junit-jupiter:5.13.4")

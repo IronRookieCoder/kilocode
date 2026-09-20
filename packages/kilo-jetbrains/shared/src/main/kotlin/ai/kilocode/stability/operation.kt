@@ -135,6 +135,13 @@ class Operations(
         )
         return operation
     }
+
+    /**
+     * transition/sample事件的统一准入（P0结构约定）：业务侧经同一[Operations]入口把
+     * [Draft]转发到其同一[Recorder]，避免测试读到另一全局recorder实例。准入仍由
+     * recorder把守（禁采/DISABLED语义与直接record一致），本方法不记录operation相位。
+     */
+    fun record(draft: Draft): Admission = recorder.record(draft)
 }
 
 /** 一次逻辑操作的句柄：终态唯一，progress永不终结；采集被禁不影响业务推进。 */

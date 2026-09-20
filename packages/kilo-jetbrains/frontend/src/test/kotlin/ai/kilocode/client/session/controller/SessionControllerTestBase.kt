@@ -37,6 +37,7 @@ import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.util.Disposer
 import com.intellij.testFramework.fixtures.BasePlatformTestCase
 import ai.kilocode.client.testing.pumpEdt
+import ai.kilocode.stability.Fixture
 import java.awt.event.HierarchyEvent
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.delay
@@ -99,6 +100,9 @@ abstract class SessionControllerTestBase : BasePlatformTestCase() {
     protected lateinit var workspace: Workspace
     protected lateinit var timers: TestUiTimers
 
+    /** 共享稳定性夹具：controller的operations注入其同一recorder（P0结构约定）。 */
+    private lateinit var fixture: Fixture
+
     private lateinit var coroutines: TestCoroutines
     protected lateinit var scope: CoroutineScope
     protected lateinit var parent: Disposable
@@ -109,6 +113,7 @@ abstract class SessionControllerTestBase : BasePlatformTestCase() {
         appRpc = FakeAppRpcApi()
         projectRpc = FakeWorkspaceRpcApi()
         timers = TestUiTimers()
+        fixture = Fixture()
 
         coroutines = TestCoroutines()
         scope = coroutines.scope
@@ -124,6 +129,8 @@ abstract class SessionControllerTestBase : BasePlatformTestCase() {
         try {
             Disposer.dispose(parent)
             coroutines.close()
+            // 先dispose controller再关闭fixture，保证controller对同一recorder的访问先于close。
+            if (this::fixture.isInitialized) fixture.close()
         } finally {
             super.tearDown()
         }
@@ -186,6 +193,7 @@ abstract class SessionControllerTestBase : BasePlatformTestCase() {
             timers = timers,
             log = log ?: KiloLog.create(SessionController::class.java),
             echo = echo,
+            operations = fixture.operations,
         )
         controllers.add(m)
         roots[m] = root

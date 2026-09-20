@@ -1,12 +1,15 @@
 package ai.kilocode.client
 
 import ai.kilocode.client.app.KiloWorkspaceService
+import ai.kilocode.client.app.KiloAppService
 import ai.kilocode.client.app.Workspace
 import ai.kilocode.client.app.KiloSessionService
 import ai.kilocode.client.app.KiloChatAccess
 import ai.kilocode.client.session.SessionManager
 import ai.kilocode.client.session.SessionSidePanelManager
-import ai.kilocode.client.telemetry.Telemetry
+import ai.kilocode.client.stability.ReadinessWatch
+import ai.kilocode.stability.Faults
+import ai.kilocode.stability.Operations
 import ai.kilocode.client.agentManager.worktree.KiloWorktreeService
 import ai.kilocode.client.agentManager.SidePanelKeys
 import ai.kilocode.client.agentManager.SidePanelMode
@@ -14,6 +17,7 @@ import ai.kilocode.client.agentManager.applySidePanelMode
 import ai.kilocode.client.agentManager.worktree.WorktreeController
 import ai.kilocode.client.agentManager.AgentManagerPanel
 import ai.kilocode.client.plugin.KiloBundle
+import ai.kilocode.stability.Operation
 import ai.kilocode.stability.StabilityService
 import ai.kilocode.log.KiloLog
 import com.intellij.icons.AllIcons
@@ -33,6 +37,7 @@ import com.intellij.ui.content.Content
 import com.intellij.ui.content.ContentManagerEvent
 import com.intellij.ui.content.ContentManagerListener
 import com.intellij.ui.content.ContentFactory
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -58,49 +63,129 @@ class KiloToolWindowFactory : ToolWindowFactory, DumbAware {
     }
 }
 
-private val LOG = KiloLog.create(KiloToolWindowFactory::class.java)
-
 // Agent Manager（Beta）入口当前隐藏：只关闭工具窗 Tab 的注册，面板及其代码全部保留。
 // 置 true 可恢复 Tab；工具栏 + 按钮的可见性绑定 AGENT_MANAGER 数据键，会随之自动恢复。
 private const val AGENT_MANAGER_TAB_ENABLED = false
 
+/** M01工具窗setup的观测deadline与name（brief Step 3：界面初始化30秒）。 */
+private const val SETUP_OPERATION_NAME = "toolwindow.setup"
+private const val SETUP_OPERATION_DEADLINE_MS = 30_000L
+private const val FAULT_COMPONENT_FRONTEND = "frontend"
+
+/** 服务定位失败（测试环境/采集禁用）返回null，绝不阻碍工具窗业务。 */
+private fun resolveWorkspaces(): KiloWorkspaceService = service<KiloWorkspaceService>()
+
+private fun resolveOperations(): Operations? = runCatching {
+    service<StabilityService>().operations
+}.getOrNull()
+
+private fun resolveFaults(): Faults? = runCatching {
+    service<StabilityService>().faults
+}.getOrNull()
+
 @Service(Service.Level.PROJECT)
-internal class KiloToolWindowSetupService(
+@Suppress("LongParameterList")
+internal class KiloToolWindowSetupService internal constructor(
     private val project: Project,
     private val cs: CoroutineScope,
+    private val workspaces: KiloWorkspaceService,
+    private val log: KiloLog,
+    /** 采集入口（构造时定位；采集禁用/服务不可用时为null，绝不阻碍业务）。 */
+    private val operations: Operations?,
+    private val faults: Faults?,
+    /** 面板构建 seam（null=生产真实SessionSidePanelManager；测试注入失败路径）。 */
+    private val panel: ((Workspace) -> SessionSidePanelManager)? = null,
 ) {
+    /** Platform constructor — resolves collaborators from the service container. */
+    constructor(project: Project, cs: CoroutineScope) : this(
+        project,
+        cs,
+        resolveWorkspaces(),
+        KiloLog.create(KiloToolWindowSetupService::class.java),
+        resolveOperations(),
+        resolveFaults(),
+    )
+
+    private var readiness: ReadinessWatch? = null
+
+    /** cancelled重抛属于正常取消语义（LinkageError记录后重抛按brief要求）。 */
+    @Suppress("ThrowsCount")
     fun create(toolWindow: ToolWindow) {
-        val start = System.currentTimeMillis()
+        val operation = beginSetupOperation()
+        val hint = project.basePath ?: ""
         try {
-            val workspaces = service<KiloWorkspaceService>()
-            val hint = project.basePath ?: ""
             // Experimental IntelliJ ProjectId API keeps multi-window and split-mode routing exact.
             val pid = project.projectIdOrNull()
 
             cs.launch {
-                val dir = workspaces.resolveProjectDirectory(pid, hint)
-                val workspace = workspaces.workspace(dir)
-                withContext(Dispatchers.Main) {
-                    setup(project, toolWindow, workspace)
+                try {
+                    val dir = workspaces.resolveProjectDirectory(pid, hint)
+                    val workspace = workspaces.workspace(dir)
+                    withContext(Dispatchers.Main) {
+                        val manager = setup(project, toolWindow, workspace)
+                        // M03：首次激活（根视图已安装 + 基础控制器已订阅）创建唯一Readiness。
+                        activateReadiness(manager, workspace)
+                    }
+                    operation?.end("success", "setup")
+                } catch (e: CancellationException) {
+                    operation?.end("cancelled", "setup", "user")
+                    throw e
+                } catch (e: LinkageError) {
+                    operation?.end("failure", "setup", "plugin", "linkage")
+                    reportFault(e)
+                    log.error("Failed to create Kilo tool window content", e)
+                    throw e
+                } catch (e: Exception) {
+                    operation?.end("failure", "setup", "plugin", "other")
+                    reportFault(e)
+                    log.error("Failed to create Kilo tool window content", e)
                 }
-                Telemetry.send("Tool Window Opened", mapOf(
-                    "projectResolved" to dir.isNotBlank().toString(),
-                    "durationMs" to (System.currentTimeMillis() - start).toString(),
-                ))
             }
+        } catch (e: CancellationException) {
+            operation?.end("cancelled", "create", "user")
+            throw e
+        } catch (e: LinkageError) {
+            operation?.end("failure", "create", "plugin", "linkage")
+            reportFault(e)
+            log.error("Failed to create Kilo tool window content", e)
+            throw e
         } catch (e: Exception) {
-            Telemetry.send("Tool Window Setup Failed", mapOf("stage" to "create", "errorClass" to e::class.java.name))
-            LOG.error("Failed to create Kilo tool window content", e)
+            operation?.end("failure", "create", "plugin", "other")
+            reportFault(e)
+            log.error("Failed to create Kilo tool window content", e)
         }
+    }
+
+    /** begin在采集入口存在时创建30秒operation；null时业务照常（无观测分母）。 */
+    private fun beginSetupOperation(): Operation? = operations?.begin(
+        SETUP_OPERATION_NAME,
+        SETUP_OPERATION_DEADLINE_MS,
+    )
+
+    /** 同一自有边界的安全故障上报；致命错误按A6契约原样重抛。 */
+    private fun reportFault(error: Throwable) {
+        faults?.report(error, FAULT_COMPONENT_FRONTEND, handled = true)
+    }
+
+    /** 一次激活一个Watch（幂等）：setup失败后未激活，下一次create重试产生新激活分母。 */
+    private fun activateReadiness(manager: SessionSidePanelManager, workspace: Workspace) {
+        if (readiness != null) return
+        val setupOperations = operations ?: return
+        readiness = ReadinessWatch(
+            operations = setupOperations,
+            scope = cs,
+            app = service<KiloAppService>().state,
+            workspace = workspace.state,
+            inputProvider = { manager.defaultFocusedComponent != null },
+        ).also { it.activate() }
     }
 
     private fun setup(
         project: Project,
         toolWindow: ToolWindow,
         workspace: Workspace,
-    ) {
-        try {
-            val manager = SessionSidePanelManager(project, workspace)
+    ): SessionSidePanelManager {
+        val manager = panel?.invoke(workspace) ?: SessionSidePanelManager(project, workspace)
 
             val chat = object : JPanel(BorderLayout()), DataProvider {
                 override fun getData(dataId: String): Any? {
@@ -181,10 +266,8 @@ internal class KiloToolWindowSetupService(
             (ActionManager.getInstance().getAction("Kilo.SettingsGroup") as? ActionGroup)?.let {
                 toolWindow.setAdditionalGearActions(it)
             }
-        } catch (e: Exception) {
-            Telemetry.send("Tool Window Setup Failed", mapOf("stage" to "setup", "errorClass" to e::class.java.name))
-            LOG.error("Failed to set up Kilo tool window content", e)
-        }
+        // setup不吞异常：向协程内的唯一记录边界传播，失败与Opened绝不并存（brief Step 3）。
+        return manager
     }
 }
 

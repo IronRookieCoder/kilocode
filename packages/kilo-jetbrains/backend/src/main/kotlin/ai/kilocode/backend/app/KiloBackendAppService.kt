@@ -11,6 +11,7 @@ import ai.kilocode.backend.migration.LegacyMigrationStatus
 import ai.kilocode.backend.telemetry.KiloBackendTelemetry
 import ai.kilocode.log.KiloLog
 import ai.kilocode.backend.workspace.KiloBackendWorkspaceManager
+import ai.kilocode.stability.Operation
 import ai.kilocode.stability.StabilityService
 import ai.kilocode.jetbrains.api.client.DefaultApi
 import ai.kilocode.jetbrains.api.infrastructure.ClientError
@@ -62,6 +63,8 @@ import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -158,6 +161,10 @@ class KiloBackendAppService private constructor(
     private var watcher: Job? = null
     private var eventWatcher: Job? = null
     private var loader: Job? = null
+
+    /** M02当前load逻辑操作句柄（brief Step 4）：被替换/取消时结算cancelled，迟到完成不二次end。 */
+    @Volatile
+    private var loadOperation: Operation? = null
     private var closed = false
     private var migrationOffered = false
     private var migrationSuppressed = false
@@ -487,6 +494,10 @@ class KiloBackendAppService private constructor(
     private fun load(recover: Boolean = false) {
         synchronized(loadLock) {
             loader?.cancel()
+            // 被替换的load协程：其逻辑操作结算cancelled（已终态则CAS丢弃，不二次end）。
+            loadOperation?.end("cancelled", LOAD_STAGE, "user")
+            loadOperation = beginLoadOperation(recover)
+            val operation = loadOperation
             loader = cs.launch {
                 val start = System.currentTimeMillis()
                 log.info("Application starting — loading config, profile, notifications")
@@ -495,6 +506,9 @@ class KiloBackendAppService private constructor(
 
                 val migration = detectMigration()
                 if (migration != null) {
+                    operation?.end("blocked", LOAD_STAGE, "environment", fields = buildJsonObject {
+                        put("reason", LOAD_REASON_MIGRATION)
+                    })
                     captureLoad("Backend Migration Required", start, mapOf("migrationRequired" to "true"))
                     stopRuntime()
                     profile = null
@@ -574,6 +588,8 @@ class KiloBackendAppService private constructor(
                         runCatching { sessions.recover(chat) }
                             .onFailure { log.warn("Session recovery failed after reconnect", it) }
                     }
+                    // M02终点：profile/config/notifications加载与恢复全部完成后结算唯一success。
+                    operation?.end("success", LOAD_STAGE)
                     startWatchingGlobalSseEvents()
                     setTelemetry(true)
                     captureBackend("Backend Connected", mapOf("portKnown" to "true"))
@@ -596,6 +612,9 @@ class KiloBackendAppService private constructor(
                     )
                     log.info("Application started — config, profile, notifications loaded")
                 } catch (e: TimeoutCancellationException) {
+                    operation?.end("timeout", LOAD_STAGE, "environment", fields = buildJsonObject {
+                        put("reason", LOAD_REASON_TIMEOUT)
+                    })
                     val err = LoadError(
                         resource = "app",
                         detail = "Timed out loading app data after ${loadTimeoutMs}ms",
@@ -611,10 +630,14 @@ class KiloBackendAppService private constructor(
                         errors = errors.toList() + err,
                     )
                 } catch (e: CancellationException) {
+                    operation?.end("cancelled", LOAD_STAGE, "user")
                     throw e
                 } catch (e: Exception) {
                     ensureActive()
                     log.warn("Application start failed: ${e.message}")
+                    operation?.end("failure", LOAD_STAGE, "plugin", "other", fields = buildJsonObject {
+                        put("reason", loadFailureReason(errors))
+                    })
                     captureLoad("Backend Load Failed", start, mapOf(
                         "errorCount" to errors.size.toString(),
                         "resources" to errors.map { it.resource }.distinct().joinToString(","),
@@ -628,6 +651,19 @@ class KiloBackendAppService private constructor(
             }
         }
     }
+
+    /**
+     * M02 begin（brief Step 4）：30秒（与业务withTimeout同一[loadTimeoutMs]上界），
+     * begin的name专属fields携带trigger=initial/recovery。begin失败（采集禁用）绝不
+     * 阻碍业务加载；观察deadline到点不取消业务本身（Operation定时器独立于load协程）。
+     */
+    private fun beginLoadOperation(recover: Boolean): Operation? = runCatching {
+        service<StabilityService>().operations.begin(
+            LOAD_OPERATION_NAME,
+            loadTimeoutMs,
+            fields = buildJsonObject { put("trigger", loadTrigger(recover)) },
+        )
+    }.getOrNull()
 
     private fun captureLoad(event: String, start: Long, props: Map<String, String>) {
         val http = connection.apiClient
@@ -1242,3 +1278,31 @@ internal fun migrationGate(
 internal fun preservesMigration(appState: KiloAppState, next: ConnectionState): Boolean =
     appState is KiloAppState.MigrationRequired &&
         (next == ConnectionState.Discovering || next == ConnectionState.Connecting || next is ConnectionState.Connected || next is ConnectionState.Error) // kilocode_change
+
+/** M02 backend.load的end公共stage值（≤32字节；begin携带trigger，end的fields携带reason）。 */
+private const val LOAD_STAGE = "load"
+private const val LOAD_OPERATION_NAME = "backend.load"
+
+/** blocked reason安全常量token（G0登记闭集；绝不透传服务端message）。 */
+private const val LOAD_REASON_MIGRATION = "migration_required"
+private const val LOAD_REASON_TIMEOUT = "timeout"
+
+/** 失败reason安全闭集（brief Step 4）：按首个加载失败资源归因，其余归other。 */
+internal const val LOAD_REASON_PROFILE = "profile_error"
+internal const val LOAD_REASON_CONFIG = "config_error"
+internal const val LOAD_REASON_NOTIFICATIONS = "notifications_error"
+internal const val LOAD_REASON_OTHER = "other"
+
+/** M02 trigger闭集：initial=连接后首次加载，recovery=重连后的恢复加载。 */
+internal fun loadTrigger(recover: Boolean): String = if (recover) "recovery" else "initial"
+
+/**
+ * 失败reason映射（brief Step 4）：timeout单独结算（TimeoutCancellationException分支），
+ * 这里只映射业务加载失败。errors为空（如连接目标不可用等非fetch失败）归other。
+ */
+internal fun loadFailureReason(errors: List<LoadError>): String = when (errors.firstOrNull()?.resource) {
+    "profile" -> LOAD_REASON_PROFILE
+    "config" -> LOAD_REASON_CONFIG
+    "notifications" -> LOAD_REASON_NOTIFICATIONS
+    else -> LOAD_REASON_OTHER
+}

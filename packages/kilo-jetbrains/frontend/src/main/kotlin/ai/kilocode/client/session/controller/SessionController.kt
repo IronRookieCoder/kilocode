@@ -65,6 +65,9 @@ import com.intellij.openapi.actionSystem.ActionManager
 import com.intellij.openapi.actionSystem.ActionPlaces
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.actionSystem.IdeActions
+import com.intellij.openapi.components.service
+import ai.kilocode.stability.Operations
+import ai.kilocode.stability.StabilityService
 import ai.kilocode.log.ChatLogSummary
 import ai.kilocode.log.KiloLog
 import com.intellij.openapi.util.Disposer
@@ -113,6 +116,10 @@ class SessionController(
   private val telemetry: (String, Map<String, String>) -> Unit = { event, props -> Telemetry.send(event, props) },
   private val timers: UiTimerSource = UiTimers,
   private val log: KiloLog = LOG,
+  // 实际操作观测依赖（P0结构约定）：B3-B5在该依赖下接精确终点调用与transition/sample
+  // 事件；B1先接入口，全部真实构造点沿用默认值，测试基座经fixture注入同一recorder。
+  @Suppress("UnusedPrivateMember")
+  private val operations: Operations = service<StabilityService>().operations,
 ) : Disposable {
 
     private data class OrganizationTarget(val org: String?)
