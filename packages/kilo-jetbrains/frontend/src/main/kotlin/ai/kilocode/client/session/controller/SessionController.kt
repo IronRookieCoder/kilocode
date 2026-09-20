@@ -66,6 +66,7 @@ import com.intellij.openapi.actionSystem.ActionPlaces
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.actionSystem.IdeActions
 import com.intellij.openapi.components.service
+import ai.kilocode.stability.Operation
 import ai.kilocode.stability.Operations
 import ai.kilocode.stability.StabilityService
 import ai.kilocode.log.ChatLogSummary
@@ -78,7 +79,10 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.drop
+import kotlinx.coroutines.flow.onStart
 import kotlinx.coroutines.launch
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 import java.awt.Component
 import java.nio.file.Path
 import java.util.concurrent.CopyOnWriteArrayList
@@ -126,6 +130,26 @@ class SessionController(
     private data class Followup(val dir: String, val time: Long)
     private data class Pref(val agent: String?, val model: String?, val variants: List<String>, val variant: String?, val reset: Boolean)
     private data class RevertOp(val key: Long)
+
+    /**
+     * M11恢复观测的token绑定（B3）：[token]是begin时的[SessionLoadState.Loading]令牌，全部
+     * end只允许经与当前[restoring]的token比对后结算，旧token的迟到结果一律忽略；[stage]
+     * 按已完成阶段给出取消时的诊断定位（词表history/pending/ui/subscription）。
+     */
+    private class RestoreObservation(
+        val token: SessionLoadState.Loading,
+        val op: Operation,
+    ) {
+        var historyDone = false
+        var uiApplied = false
+
+        /** 取消结算时恢复所处的阶段：history未应用→history；UI未应用→pending；等待订阅→subscription。 */
+        fun stage(): String = when {
+            !historyDone -> STAGE_HISTORY
+            !uiApplied -> STAGE_PENDING
+            else -> STAGE_SUBSCRIPTION
+        }
+    }
     private data class Dispatch(
         val kind: String,
         val source: String,
@@ -143,6 +167,23 @@ class SessionController(
         internal const val REVERT_TIMEOUT_MS = 30_000L
         private const val FOLLOWUP_TTL_MS = 30_000L
         private const val FOLLOWUP_NEW_SESSION = "Start new session"
+
+        // M11（metrics 2.3）：恢复和普通交互30秒观测截止；stage/result/cause为采集词表受控值。
+        private const val SESSION_OPEN = "session.open"
+        private const val SESSION_RESTORE = "session.restore"
+        private const val RESTORE_DEADLINE_MS = 30_000L
+        private const val RESULT_SUCCESS = "success"
+        private const val RESULT_FAILURE = "failure"
+        private const val RESULT_CANCELLED = "cancelled"
+        private const val STAGE_HISTORY = "history"
+        private const val STAGE_SUBSCRIPTION = "subscription"
+        private const val STAGE_PENDING = "pending"
+        private const val STAGE_UI = "ui"
+        private const val STAGE_CREATE = "create"
+        private const val CAUSE_USER = "user"
+        private const val MODE_CREATE = "create"
+        private const val MODE_OPEN = "open"
+        private const val MODE_RECONNECT = "reconnect"
     }
 
     init {
@@ -189,6 +230,15 @@ class SessionController(
     private val childIds: MutableSet<String> = mutableSetOf()
     private val childParts: MutableMap<PartKey, String> = mutableMapOf()
     private var sessionLoadState: SessionLoadState = SessionLoadState.Idle
+    // M11观测（B3）：新建分母直到服务端ID、订阅已建立与UI都建立；恢复分母要求history、订阅、
+    // pending与UI全部完成。restoring只挂当前SessionLoadState.Loading token——切换即cancelled，
+    // 旧token的迟到结果（holder token不匹配）绝不结算新token的操作；超时定时器不取消业务。
+    @Volatile private var opening: Operation? = null
+    private var openReady = false
+    private var restoring: RestoreObservation? = null
+
+    /** 订阅已建立信号：events采集器真正进入collect后置位，流错误即撤销；EDT上读写。 */
+    private var subscriptionUp = false
     private var recentsState: RecentsState = RecentsState.Idle
     private var recentsSnapshot: List<SessionDto> = emptyList()
     private var viewState: SessionControllerEvent.ViewChanged? = null
@@ -420,24 +470,44 @@ class SessionController(
     }
 
     private suspend fun createSession(): String? {
-        val session = sessions.create(directory)
-        runEdt {
-            if (disposed) return@runEdt
-            ref = SessionRef.Local(session)
-            setRecentSessionsState(RecentsState.Idle)
-            updateModel {
-                model.setSession(session)
+        // M11新建分母（B3）：入口即begin，直到服务端ID、订阅已建立与UI都建立才success；
+        // 新建成功与prompt发送成功相互独立。
+        val open = operations.begin(SESSION_OPEN, RESTORE_DEADLINE_MS, buildJsonObject {
+            put("session_mode", MODE_CREATE)
+        })
+        opening = open
+        try {
+            val session = sessions.create(directory)
+            runEdt {
+                if (disposed) {
+                    settleOpeningCancelled()
+                    return@runEdt
+                }
+                ref = SessionRef.Local(session)
+                setRecentSessionsState(RecentsState.Idle)
+                updateModel {
+                    model.setSession(session)
+                }
+                openReady = true
+                settleOpening()
             }
+            if (disposed) return null
+            val meta = if (LOG.isDebugEnabled) ChatLogSummary.dir(directory) else "kind=session"
+            LOG.info("${ChatLogSummary.sid(session.id)} kind=session $meta created=true")
+            capture("Task Created", sessionProps(session.id) + mapOf("source" to "jetbrains"))
+            runEdt {
+                if (disposed) return@runEdt
+                subscribeEvents()
+            }
+            return session.id
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            // CAS保证同一operation仅一个end；句柄直end不依赖当前opening字段（可能已被替换）。
+            if (!open.isSettled) open.end(RESULT_FAILURE, STAGE_CREATE, code = e::class.java.simpleName)
+            edt { if (opening === open) opening = null }
+            throw e
         }
-        if (disposed) return null
-        val meta = if (LOG.isDebugEnabled) ChatLogSummary.dir(directory) else "kind=session"
-        LOG.info("${ChatLogSummary.sid(session.id)} kind=session $meta created=true")
-        capture("Task Created", sessionProps(session.id) + mapOf("source" to "jetbrains"))
-        runEdt {
-            if (disposed) return@runEdt
-            subscribeEvents()
-        }
-        return session.id
     }
 
     fun abort() {
@@ -1020,11 +1090,13 @@ class SessionController(
             is SessionRef.Cloud -> {
                 val token = SessionLoadState.Loading()
                 startSessionLoading(token)
+                beginRestoring(token, MODE_OPEN)
                 importCloud(item.id, token)
             }
             is SessionRef.Local -> {
                 val token = SessionLoadState.Loading()
                 startSessionLoading(token)
+                beginRestoring(token, MODE_OPEN)
                 loadSession(token)
                 subscribeEvents()
             }
@@ -1048,6 +1120,7 @@ class SessionController(
                             if (disposed) return@edt
                             val token = SessionLoadState.Loading()
                             startSessionLoading(token)
+                            beginRestoring(token, MODE_RECONNECT)
                             loadSession(token)
                         }
                     }
@@ -1158,6 +1231,7 @@ class SessionController(
                 runEdt {
                     if (disposed) return@runEdt
                     if (sid != id) return@runEdt
+                    restoreHistoryDone(token)
                     updateModel {
                         snapshots.clear()
                         echoes.clear()
@@ -1168,24 +1242,21 @@ class SessionController(
                         if (session != null) this@SessionController.model.setSession(session)
                     }
                 }
-                recoverPending(id)
+                // recoverPending必须返回可判定结果：内部降级吞错→恢复操作failure=pending，
+                // 不允许吞错后仍success；业务流程照常继续（仅观测结算）。
+                settlePendingOutcome(token, recoverPending(id))
                 seedRevertDiff(id)
                 runEdt {
                     if (disposed) return@runEdt
                     if (sid != id) return@runEdt
-                    for (child in discovered.values.toSet()) trackChild(child)
-                    if (model.isEmpty() && model.state is SessionState.Idle) {
-                        setControllerViewState(SessionControllerEvent.ViewChanged.ShowEmpty)
-                    } else {
-                        showSession()
-                    }
-                    loaded(!model.isEmpty())
+                    finishSessionLoad(token, discovered.values.toSet())
                 }
             } catch (e: Exception) {
                 LOG.warn("${ChatLogSummary.sid(id)} kind=history dir=${ChatLogSummary.dir(directory)} failed message=${e.message}", e)
                 edt {
                     if (disposed) return@edt
                     if (sid != id) return@edt
+                    restoreFailed(token, STAGE_HISTORY, e)
                     updateModel {
                         model.setState(SessionState.Error(e.message ?: KiloBundle.message("history.error.local")))
                     }
@@ -1204,6 +1275,20 @@ class SessionController(
         }
     }
 
+    /** history应用后的收尾EDT分支：track子会话、视图切换、loaded回调，并结算M11恢复UI就绪。 */
+    @RequiresEdt
+    private fun finishSessionLoad(token: SessionLoadState.Loading, discovered: Set<String>) {
+        assertEdt()
+        for (child in discovered) trackChild(child)
+        if (model.isEmpty() && model.state is SessionState.Idle) {
+            setControllerViewState(SessionControllerEvent.ViewChanged.ShowEmpty)
+        } else {
+            showSession()
+        }
+        loaded(!model.isEmpty())
+        restoreUiDone(token)
+    }
+
     private fun importCloud(id: String, token: SessionLoadState.Loading) {
         cs.launch {
             try {
@@ -1215,6 +1300,7 @@ class SessionController(
                     if (disposed) return@runEdt
                     ref = SessionRef.Local(session)
                     setRecentSessionsState(RecentsState.Idle)
+                    restoreHistoryDone(token)
                     updateModel {
                         snapshots.clear()
                         echoes.clear()
@@ -1223,7 +1309,8 @@ class SessionController(
                         this@SessionController.model.setSession(session)
                     }
                 }
-                recoverPending(session.id)
+                // 可判定结果（B3）：吞错的降级分支→failure=pending，业务照常。
+                settlePendingOutcome(token, recoverPending(session.id))
                 seedRevertDiff(session.id)
                 runEdt {
                     if (disposed) return@runEdt
@@ -1237,11 +1324,13 @@ class SessionController(
                         showSession()
                     }
                     loaded(!model.isEmpty())
+                    restoreUiDone(token)
                 }
             } catch (e: Exception) {
                 LOG.warn("${ChatLogSummary.sid(id)} kind=cloud-import dir=${ChatLogSummary.dir(directory)} failed message=${e.message}", e)
                 edt {
                     if (disposed) return@edt
+                    restoreFailed(token, STAGE_HISTORY, e)
                     updateModel {
                         model.setState(SessionState.Error(e.message ?: KiloBundle.message("history.error.cloud")))
                     }
@@ -1286,25 +1375,149 @@ class SessionController(
         if (!model.showSession) setControllerViewState(SessionControllerEvent.ViewChanged.ShowProgress)
     }
 
+    // ------ M11 session.restore / session.open observation (B3) ------
+
+    /**
+     * 新token成为当前恢复：先结算在途旧操作cancelled（会话切换语义），再为新token开新分母。
+     * session_mode区分open/reconnect；此后只有holder token匹配的调用才允许触碰该操作。
+     */
+    private fun beginRestoring(token: SessionLoadState.Loading, mode: String) {
+        assertEdt()
+        restoring?.let { previous ->
+            if (!previous.op.isSettled) previous.op.end(RESULT_CANCELLED, previous.stage(), CAUSE_USER)
+        }
+        restoring = RestoreObservation(
+            token,
+            operations.begin(SESSION_RESTORE, RESTORE_DEADLINE_MS, buildJsonObject {
+                put("session_mode", mode)
+            }),
+        )
+    }
+
+    /** history已应用（token匹配才记）；阶段推进不触碰终态。 */
+    private fun restoreHistoryDone(token: SessionLoadState.Loading) {
+        assertEdt()
+        restoring?.takeIf { it.token === token }?.historyDone = true
+    }
+
+    /** UI已应用：恢复的全部业务条件就绪，能否success只差订阅已建立信号。 */
+    private fun restoreUiDone(token: SessionLoadState.Loading) {
+        assertEdt()
+        val restore = restoring?.takeIf { it.token === token } ?: return
+        restore.uiApplied = true
+        settleRestoring()
+    }
+
+    /** recoverPending可判定结果落地（B3）：内部降级吞错→恢复操作failure=pending；业务不受影响。 */
+    private fun settlePendingOutcome(token: SessionLoadState.Loading, recovered: Boolean) {
+        if (recovered) return
+        runEdt {
+            if (disposed) return@runEdt
+            restoreFailed(token, STAGE_PENDING)
+        }
+    }
+
+    /** history加载异常：failure=history（disposed/已切换时操作已被cancelled结算，CAS丢弃重复end）。 */
+    private fun restoreFailed(token: SessionLoadState.Loading, stage: String, cause: Exception? = null) {
+        assertEdt()
+        val restore = restoring?.takeIf { it.token === token } ?: return
+        if (restore.op.isSettled) return
+        restoring = null
+        restore.op.end(RESULT_FAILURE, stage, code = cause?.let { it::class.java.simpleName } ?: "none")
+    }
+
+    /** 当前token的恢复在完成前订阅流失败：failure=subscription（历史200但无订阅不算成功）。 */
+    private fun subscriptionFailed(cause: Exception) {
+        assertEdt()
+        val restore = restoring
+        if (restore != null && !restore.op.isSettled) {
+            restoring = null
+            restore.op.end(RESULT_FAILURE, STAGE_SUBSCRIPTION, code = cause::class.java.simpleName)
+        }
+        val open = opening
+        if (open != null && openReady && !open.isSettled) {
+            opening = null
+            open.end(RESULT_FAILURE, STAGE_SUBSCRIPTION, code = cause::class.java.simpleName)
+        }
+    }
+
+    /**
+     * 恢复唯一success出口（EDT）：history、UI（含recoverPending可判定完成）均就绪、token仍
+     * 当前且订阅已建立——单纯调用subscribeEvents不够。条件不齐则保持未结算，等待
+     * 订阅信号或deadline（超时不取消业务）。
+     */
+    private fun settleRestoring() {
+        assertEdt()
+        val restore = restoring
+        val ready = restore != null && !restore.op.isSettled &&
+            restore.historyDone && restore.uiApplied && subscriptionUp
+        if (restore != null && ready) {
+            restoring = null
+            restore.op.end(RESULT_SUCCESS, STAGE_UI)
+        }
+    }
+
+    /** 新建唯一success出口：服务端ID+UI（openReady）且订阅已建立；否则等待订阅信号。 */
+    private fun settleOpening() {
+        assertEdt()
+        val open = opening
+        when {
+            open == null -> Unit
+            open.isSettled -> opening = null
+            openReady && subscriptionUp -> {
+                opening = null
+                openReady = false
+                open.end(RESULT_SUCCESS, STAGE_UI)
+            }
+            else -> Unit
+        }
+    }
+
+    /** 新建被dispose打断时的cancelled结算。 */
+    private fun settleOpeningCancelled() {
+        assertEdt()
+        val open = opening ?: return
+        if (!open.isSettled) open.end(RESULT_CANCELLED, cause = CAUSE_USER)
+        opening = null
+    }
+
     @RequiresEdt
     private fun subscribeEvents() {
         assertEdt()
         val id = sid ?: return
         LOG.debug { "${ChatLogSummary.sid(id)} kind=subscription subscribe=true" }
         cancelSubscriptions()
+        subscriptionUp = false
         eventJob = cs.launch {
             try {
-                sessions.events(id, directory).collect { event ->
-                    if (!matchesSession(event, id)) {
-                        LOG.debug { "${ChatLogSummary.sid(id)} pass=false ${ChatLogSummary.eventBody(event)}" }
-                        return@collect
+                sessions.events(id, directory)
+                    .onStart {
+                        // 订阅已建立信号（M11）：采集器真正进入collect才置位，不是调用
+                        // subscribeEvents即算；此后open/restore的success才允许结算。
+                        edt {
+                            if (disposed || sid != id) return@edt
+                            subscriptionUp = true
+                            settleOpening()
+                            settleRestoring()
+                        }
                     }
-                    LOG.debug { "${ChatLogSummary.sid(id)} pass=true ${ChatLogSummary.eventBody(event)}" }
-                    updates.enqueue(event)
-                }
+                    .collect { event ->
+                        if (!matchesSession(event, id)) {
+                            LOG.debug { "${ChatLogSummary.sid(id)} pass=false ${ChatLogSummary.eventBody(event)}" }
+                            return@collect
+                        }
+                        LOG.debug { "${ChatLogSummary.sid(id)} pass=true ${ChatLogSummary.eventBody(event)}" }
+                        updates.enqueue(event)
+                    }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
+                edt {
+                    if (disposed || sid != id) return@edt
+                    // 建立后立刻失败：撤销信号；在途的恢复/新建操作以failure=subscription结算。
+                    subscriptionUp = false
+                    subscriptionFailed(e)
+                }
                 log.warn("${ChatLogSummary.sid(id)} kind=subscription route=controller-events failed message=${e.message}", e)
             } finally {
                 LOG.debug { "${ChatLogSummary.sid(id)} kind=subscription subscribe=false" }
@@ -1431,9 +1644,15 @@ class SessionController(
         }
     }
 
-    /** Rehydrate pending permissions/questions and current session status after history load. */
-    private suspend fun recoverPending(id: String) {
-        try {
+    /**
+     * Rehydrate pending permissions/questions and current session status after history load.
+     *
+     * 返回可判定结果（B3）：true=恢复步骤完整走完（含无pending的idle分支）；false=内部降级
+     * 吞错（接口失败/取消）。业务行为不变（仍不向上抛错），仅让M11恢复操作能以failure=pending
+     * 结算，而不是吞错后success。
+     */
+    private suspend fun recoverPending(id: String): Boolean {
+        return try {
             val permissions = sessions.pendingPermissions(directory).filter { it.sessionID == id }
             val questions = sessions.pendingQuestions(directory).filter { it.sessionID == id }
             val status = sessions.statuses.value[id]
@@ -1448,7 +1667,7 @@ class SessionController(
                         if (sid != id) return@runEdt
                         model.setState(SessionState.Busy(KiloBundle.message("session.status.considering")))
                     }
-                    return
+                    return true
                 }
             }
             // After auto-approve only skill-shell permissions still need a human card; queue those.
@@ -1480,8 +1699,10 @@ class SessionController(
                     }
                 }
             }
+            true
         } catch (e: Exception) {
             LOG.warn("${ChatLogSummary.sid(id)} kind=recovery dir=${ChatLogSummary.dir(directory)} failed message=${e.message}", e)
+            false
         }
     }
 
@@ -2649,6 +2870,15 @@ class SessionController(
             disposed = true
             connectionDelay.dispose()
             cancelSubscriptions()
+            // 关闭项目/面板：在途的M11操作结算cancelled（正常取消不进入error计数）。
+            restoring?.let { restore ->
+                if (!restore.op.isSettled) restore.op.end(RESULT_CANCELLED, restore.stage(), CAUSE_USER)
+            }
+            restoring = null
+            opening?.let { open -> if (!open.isSettled) open.end(RESULT_CANCELLED, cause = CAUSE_USER) }
+            opening = null
+            openReady = false
+            subscriptionUp = false
             drainJob?.cancel()
             drainJob = null
             revertWatchdog?.stop()
