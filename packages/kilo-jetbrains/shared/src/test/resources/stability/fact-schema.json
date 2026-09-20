@@ -219,7 +219,7 @@
     },
     "data": {
       "type": "object",
-      "description": "事件专属白名单，禁止任意业务payload；各name的data字段按事件字典（设计第9章）逐项冻结。diagnostic的message安全摘要最大512字节。",
+      "description": "事件专属白名单，禁止任意业务payload；各name的data字段按事件字典（设计第9章）逐项冻结。值允许标量或字符串数组——如diagnostic详情的frames（脱敏插件栈帧摘要，最多5帧，不含原始异常message，设计6.2）。diagnostic的message安全摘要最大512字节。",
       "minProperties": 1,
       "maxProperties": 32,
       "propertyNames": {
@@ -227,7 +227,19 @@
         "pattern": "^[a-z][a-z0-9_]{0,63}$"
       },
       "additionalProperties": {
-        "type": ["string", "integer", "number", "boolean"]
+        "anyOf": [
+          {
+            "type": ["string", "integer", "number", "boolean"]
+          },
+          {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 5,
+            "description": "如diagnostic详情的frames：脱敏插件栈帧摘要，最多5帧（设计6.2）"
+          }
+        ]
       }
     }
   }

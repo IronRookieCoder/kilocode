@@ -5,15 +5,23 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.add
+import kotlinx.serialization.json.addJsonObject
 import kotlinx.serialization.json.boolean
+import kotlinx.serialization.json.buildJsonArray
+import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.int
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.long
+import kotlinx.serialization.json.put
+import kotlinx.serialization.json.putJsonArray
 
 /**
  * G0 交接契约门禁（docs/jetbrains-stability-design.md 6.1/8/9.1）。
@@ -133,6 +141,45 @@ class ContractTest {
     }
 
     @Test
+    fun `diagnostic detail data with frames fits the data shell`() {
+        val data = buildJsonObject {
+            put("message", "操作超时：prompt_submit")
+            put("error_class", "DeadlineExceeded")
+            putJsonArray("frames") {
+                add("ai.kilocode.Foo#bar")
+                add("ai.kilocode.Baz#qux")
+                add("ai.kilocode.Qux#quux")
+                add("ai.kilocode.Corge#grault")
+                add("ai.kilocode.Garply#waldo")
+            }
+            put("fingerprint", "deadline-exceeded-rpc")
+            put("count", 3)
+        }
+        assertEquals(emptyList(), dataShellViolations(data))
+    }
+
+    @Test
+    fun `data shell rejects non string arrays and oversized frames`() {
+        val nestedObjects = buildJsonObject {
+            putJsonArray("frames") {
+                add("ai.kilocode.Foo#bar")
+                addJsonObject { put("class", "Foo") }
+            }
+        }
+        assertTrue(dataShellViolations(nestedObjects).isNotEmpty())
+
+        val sixFrames = buildJsonObject {
+            putJsonArray("frames") {
+                repeat(6) { index -> add("ai.kilocode.${'A' + index}#${'a' + index}") }
+            }
+        }
+        assertTrue(dataShellViolations(sixFrames).isNotEmpty())
+
+        val nullValue = buildJsonObject { put("cause", JsonNull) }
+        assertTrue(dataShellViolations(nullValue).isNotEmpty())
+    }
+
+    @Test
     fun `control schema freezes per purpose switches and allows no jwt`() {
         val schema = loadObject("control-schema.json")
         assertEquals(false, schema.getValue("additionalProperties").jsonPrimitive.boolean)
@@ -192,6 +239,30 @@ class ContractTest {
     private fun contractJson(schemaMajor: Int, flags: Map<String, Boolean>): String {
         val verified = flags.entries.joinToString(",") { "\"${it.key}\": ${it.value}" }
         return "{\"schema_major\": $schemaMajor, $verified}"
+    }
+
+    /** 按 fact-schema.json 冻结的 data 外壳约束校验：键 pattern、值为标量或不超过上限的字符串数组。 */
+    private fun dataShellViolations(data: JsonObject): List<String> {
+        val dataSchema = loadObject("fact-schema.json")
+            .getValue("properties").jsonObject.getValue("data").jsonObject
+        val keyPattern = Regex(dataSchema.getValue("propertyNames").jsonObject.getValue("pattern").jsonPrimitive.content)
+        val arrayBranch = dataSchema.getValue("additionalProperties").jsonObject
+            .getValue("anyOf").jsonArray
+            .map { it.jsonObject }
+            .firstOrNull { branch -> (branch["type"] as? JsonPrimitive)?.content == "array" }
+            ?: error("fact-schema data shell lost the string-array branch")
+        val maxItems = arrayBranch.getValue("maxItems").jsonPrimitive.int
+        return data.mapNotNull { (key, value) ->
+            val keyOk = keyPattern.matches(key)
+            val valueOk = when (value) {
+                is JsonObject -> false
+                is JsonArray ->
+                    value.size <= maxItems &&
+                        value.all { element -> element is JsonPrimitive && element !is JsonNull && element.isString }
+                is JsonPrimitive -> value !is JsonNull
+            }
+            if (keyOk && valueOk) null else "data '$key' violates the frozen shell (keyOk=$keyOk, valueOk=$valueOk)"
+        }
     }
 
     private companion object {
