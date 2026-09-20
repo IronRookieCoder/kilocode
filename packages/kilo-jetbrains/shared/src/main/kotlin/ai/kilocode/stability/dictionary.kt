@@ -40,6 +40,32 @@ private val CHANNELS = setOf("critical", "diagnostic")
 private val PURPOSES = setOf("metrics", "logs")
 private val CONTEXT_KEYS = setOf("operation_id", "attempt_id", "fault_id", "trace_id", "workspace_id")
 
+/** 拒绝消息的内部键（recorder需区分“请求用途为空”与结构性违规：前者走禁采而非丢弃）。 */
+internal const val PURPOSES_EMPTY = "purposes must not be empty"
+
+/** error族两个schema分支的键集（设计第9章）：最小计数形态写critical受指标许可控制，详情形态仅日志许可。 */
+private val ERROR_COUNT_KEYS = setOf("fault_id", "error_class", "handled", "fingerprint", "component")
+private val ERROR_DETAIL_KEYS = setOf("message", "frames", "fingerprint", "count")
+
+/**
+ * 设计11.2/第9章按name划分的可用出口：rpc与render等高频成功形态、区间/样本/迁移计数仅metrics；
+ * 生命周期、关键操作start/end、连接退化/恢复、安装与凭据、协议错误与violation证据、health摘要可含logs。
+ */
+private val METRICS_ONLY_NAMES = setOf(
+    "rpc", "render.apply", "edt.delay", "resource.snapshot",
+    "availability", "migration.required", "session.dispose_risk",
+)
+private val DUAL_PURPOSE_NAMES = setOf(
+    "plugin.started", "plugin.shutdown", "plugin.unclean", "toolwindow.setup", "backend.load",
+    "plugin.readiness", "connection", "connection.attempt", "connection.state_changed", "connection.recovery",
+    "csc.install", "csc.start", "credentials.ready", "cli.download", "session.open", "session.restore",
+    "action", "ide.operation", "telemetry.health", "protocol.error", "edt.violation",
+)
+private val ERROR_NAMES = setOf("error.uncaught", "error.reported")
+private val PURPOSES_METRICS_ONLY = setOf("metrics")
+private val PURPOSES_LOGS_ONLY = setOf("logs")
+private val PURPOSES_DUAL = setOf("metrics", "logs")
+
 private val PHASE_VALUES = setOf("start", "progress", "end")
 
 /** result六种取值与cause受控词表（指标文档1.2/1.3）。 */
@@ -121,6 +147,7 @@ private val PHASE_RULES: Map<String, PhaseRule> = mapOf(
  * data键集必须恰好等于其中一个完整分支——缺键、多键与混用一律拒绝，
  * 也不把详情白名单套到其他diagnostic上。
  */
+@Suppress("TooManyFunctions")
 object Dictionary {
 
     /** 设计第9章登记的全部name，顺序与fact-schema.json的enum一致。 */
@@ -128,6 +155,27 @@ object Dictionary {
         get() = SPEC_TABLE.keys.toList()
 
     fun isRegistered(name: String): Boolean = SPEC_TABLE.containsKey(name)
+
+    /**
+     * 设计11.2/第9章：[name]加[data]形态可选的出口用途集合。
+     *
+     * rpc与render等高频成功形态、区间/样本/迁移/释放风险计数仅metrics（不形成高频日志流）；
+     * error族最小计数分支仅metrics（计数不因详情限频丢失），详情分支仅logs；
+     * 生命周期、关键操作start/end、连接退化/恢复、安装与凭据、协议错误与violation证据、
+     * health摘要可含logs。未登记name或error族键集不匹配任一分支时返回空。
+     * 返回的是设计层可用出口；与Draft自带purposes及Policy.permit的交集由recorder完成，
+     * 禁用一种用途后不得经默认Draft重新加回。
+     */
+    fun purposes(name: String, data: JsonObject): Set<String> = when {
+        name in ERROR_NAMES -> when (data.keys) {
+            ERROR_COUNT_KEYS -> PURPOSES_METRICS_ONLY
+            ERROR_DETAIL_KEYS -> PURPOSES_LOGS_ONLY
+            else -> emptySet()
+        }
+        name in METRICS_ONLY_NAMES -> PURPOSES_METRICS_ONLY
+        name in DUAL_PURPOSE_NAMES -> PURPOSES_DUAL
+        else -> emptySet()
+    }
 
     /** 白名单校验：合法返回true；任何拒绝都不抛异常，由recorder计数。 */
     fun validate(draft: Draft): Boolean = violations(draft).isEmpty()
@@ -137,7 +185,7 @@ object Dictionary {
         val spec = SPEC_TABLE[draft.name] ?: return listOf("unregistered event name '${draft.name}'")
         if (draft.kind != spec.kind) add("kind '${draft.kind}' does not match registered kind '${spec.kind}'")
         if (draft.channel !in CHANNELS) add("channel '${draft.channel}' is outside $CHANNELS")
-        if (draft.purposes.isEmpty()) add("purposes must not be empty")
+        if (draft.purposes.isEmpty()) add(PURPOSES_EMPTY)
         draft.purposes.filterNot { it in PURPOSES }.forEach { add("purpose '$it' is outside $PURPOSES") }
         draft.epoch?.let { epoch ->
             if (!boundedText(epoch, EPOCH_BYTES)) add("account epoch violates the id bounds")
@@ -287,10 +335,7 @@ object Dictionary {
             key("frames", FieldType.STRING_LIST, maxBytes = FRAME_BYTES),
             key("count", FieldType.POSITIVE_INTEGER),
         )
-        val errorBranches = listOf(
-            setOf("fault_id", "error_class", "handled", "fingerprint", "component"),
-            setOf("message", "frames", "fingerprint", "count"),
-        )
+        val errorBranches = listOf(ERROR_COUNT_KEYS, ERROR_DETAIL_KEYS)
 
         spec("plugin.started", "lifecycle")
         spec(
