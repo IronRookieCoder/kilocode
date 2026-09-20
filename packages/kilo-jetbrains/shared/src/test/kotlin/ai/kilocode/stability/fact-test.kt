@@ -162,6 +162,29 @@ class FactTest {
     }
 
     @Test
+    fun `error events with empty data are rejected`() {
+        assertFalse(Dictionary.validate(Draft("error.uncaught", "diagnostic", "critical", buildJsonObject { })))
+        assertFalse(Dictionary.validate(Draft("error.reported", "diagnostic", "diagnostic", buildJsonObject { })))
+    }
+
+    @Test
+    fun `error count alone is not a branch`() {
+        val data = buildJsonObject { put("count", 1) }
+        assertFalse(Dictionary.validate(Draft("error.uncaught", "diagnostic", "critical", data)))
+    }
+
+    @Test
+    fun `incomplete branch keys are rejected`() {
+        val minimal = LinkedHashMap(errorMinimal())
+        minimal.remove("handled")
+        assertFalse(Dictionary.validate(Draft("error.uncaught", "diagnostic", "critical", JsonObject(minimal))))
+
+        val detail = LinkedHashMap(errorDetail())
+        detail.remove("frames")
+        assertFalse(Dictionary.validate(Draft("error.reported", "diagnostic", "diagnostic", JsonObject(detail))))
+    }
+
+    @Test
     fun `diagnostic message limit counts utf-8 bytes not chars`() {
         val exactly512 = detailWithMessage("x".repeat(509) + "中")
         assertTrue(Dictionary.validate(Draft("error.uncaught", "diagnostic", "diagnostic", exactly512)))

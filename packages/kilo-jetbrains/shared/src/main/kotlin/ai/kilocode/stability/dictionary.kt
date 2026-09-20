@@ -28,7 +28,10 @@ private class EventSpec(
     val keys: Map<String, KeyRule>,
     val required: Set<String>,
     val branches: List<Set<String>>,
-)
+) {
+    /** 专属键与必填键皆空、无分支要求的事件（如plugin.started）允许空data；operation必须携带phase。 */
+    val allowsEmptyData: Boolean = required.isEmpty() && branches.isEmpty() && kind != KIND_OPERATION
+}
 
 /** operation公共phase键的规则（设计6.2）：start要求deadline_ms>0，end必须自包含。 */
 private class PhaseRule(val required: Set<String>, val keys: Map<String, KeyRule>)
@@ -80,6 +83,8 @@ private const val MAX_RATE = 1.0
 private const val CONTROL_LIMIT = 0x20
 private const val DEL_CODE = 0x7f
 
+private const val KIND_OPERATION = "operation"
+
 /** operation的phase规则：终态字段只允许出现在end，start只允许deadline_ms。 */
 private val PHASE_RULES: Map<String, PhaseRule> = mapOf(
     "start" to PhaseRule(
@@ -113,7 +118,8 @@ private val PHASE_RULES: Map<String, PhaseRule> = mapOf(
  * 直接拒绝而不是裁掉后放行；对象业务payload、路径、JWT与控制字符均不通过。
  * error族是两个schema分支：critical形状的最小计数（fault_id/error_class/handled/
  * fingerprint/component）与diagnostic形状的固定详情（message/frames/fingerprint/count），
- * 不允许混用，也不把详情白名单套到其他diagnostic上。
+ * data键集必须恰好等于其中一个完整分支——缺键、多键与混用一律拒绝，
+ * 也不把详情白名单套到其他diagnostic上。
  */
 object Dictionary {
 
@@ -149,7 +155,7 @@ object Dictionary {
 
     private fun dataViolations(spec: EventSpec, data: JsonObject): List<String> {
         if (data.isEmpty()) {
-            return if (spec.required.isEmpty() && spec.kind != KIND_OPERATION) {
+            return if (spec.allowsEmptyData) {
                 emptyList()
             } else {
                 listOf("data must not be empty for '${spec.name}'")
@@ -164,7 +170,8 @@ object Dictionary {
             phaseRule?.let { addAll(it.required) }
         }
         val problems = mutableListOf<String>()
-        if (spec.branches.isNotEmpty() && spec.branches.count { branch -> data.keys.all { it in branch } } != 1) {
+        // error族双分支：data键集必须恰好等于一个完整分支（缺键的半条记录与混用同样拒绝）。
+        if (spec.branches.isNotEmpty() && spec.branches.count { branch -> data.keys == branch } != 1) {
             problems += "data keys of '${spec.name}' do not match exactly one schema branch"
         }
         data.forEach { (key, value) ->
@@ -471,6 +478,5 @@ object Dictionary {
         )
     }
 
-    private const val KIND_OPERATION = "operation"
     private const val PHASE_KEY = "phase"
 }
