@@ -1,0 +1,12 @@
+{
+  "schema_major": 1,
+  "identity_verified": false,
+  "metrics_authority_verified": false,
+  "series_key_verified": false,
+  "late_query_verified": false,
+  "output_ids_verified": false,
+  "cross_language_locks_verified": false,
+  "durable_ack_verified": false,
+  "logs_contract_verified": false,
+  "default_profile_verified": false
+}

@@ -13,6 +13,7 @@ dependencies {
         intellijIdea(libs.versions.intellij.platform)
     }
 
+    implementation(libs.kotlinx.serialization.json)
     testImplementation(kotlin("test"))
 }
 

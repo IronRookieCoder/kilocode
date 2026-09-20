@@ -1,0 +1,104 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:costrict:jetbrains-stability:control-schema-v1",
+  "title": "cs-cloud → 插件采集控制文件 v1（wire schema）",
+  "description": "cs-cloud原子写 ~/.costrict/telemetry/control/jetbrains.json，插件后台每30秒检查一般策略（设计第8章）。控制文件按机器生效；无JWT。公共策略缺失、过期或未知schema_major时关闭两种上传用途采集。每项用途的有效截止取自身expires与公共expires_at的较早值；单项允许策略最长有效期建议24小时。时间均为UTC Unix毫秒。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_major",
+    "revision",
+    "enabled",
+    "metrics_enabled",
+    "metrics_expires_at",
+    "logs_enabled",
+    "logs_expires_at",
+    "account_epoch",
+    "account_state",
+    "expires_at",
+    "metrics_allowed_categories",
+    "logs_allowed_categories",
+    "log_detail_rate_limit"
+  ],
+  "properties": {
+    "schema_major": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "未知major按无有效公共策略处理，不推定允许"
+    },
+    "revision": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "策略版本；事件固定采集时的policy_revision，便于重开或策略变更后核对原始用途"
+    },
+    "enabled": {
+      "type": "boolean",
+      "description": "总授权；撤销或false时停采并清理待交接数据，不补报撤销期间数据"
+    },
+    "metrics_enabled": {
+      "type": "boolean",
+      "description": "指标独立开关；false时停新增指标事实，日志仍按独立许可处理"
+    },
+    "metrics_expires_at": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "指标许可截止；某用途缺失或过期仅停止该用途采集"
+    },
+    "logs_enabled": {
+      "type": "boolean",
+      "description": "日志独立开关；false时最迟30秒停止新增上传用诊断"
+    },
+    "logs_expires_at": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "日志许可截止，还受endpoint发现缓存有效期约束"
+    },
+    "account_epoch": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "description": "已验证账户/租户的随机本机代号，与device_id不同"
+    },
+    "account_state": {
+      "enum": ["pending", "ready", "disabled"],
+      "description": "账户未就绪时停止两条链路"
+    },
+    "expires_at": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "公共截止，仅限制账户绑定及总授权"
+    },
+    "metrics_allowed_categories": {
+      "type": "array",
+      "items": {
+        "enum": ["critical", "diagnostic"]
+      },
+      "maxItems": 2,
+      "uniqueItems": true,
+      "description": "指标用途允许采集的事件类别；空数组表示不采集"
+    },
+    "logs_allowed_categories": {
+      "type": "array",
+      "items": {
+        "enum": ["critical", "diagnostic"]
+      },
+      "maxItems": 2,
+      "uniqueItems": true,
+      "description": "日志用途允许采集的事件类别；空数组表示不采集"
+    },
+    "log_detail_rate_limit": {
+      "type": "object",
+      "description": "日志诊断详情限频；异常指标次数不因详情限频改变",
+      "additionalProperties": false,
+      "required": ["per_fingerprint_max_per_minute"],
+      "properties": {
+        "per_fingerprint_max_per_minute": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 60,
+          "description": "同fingerprint每分钟详情份数上限（设计默认3）；0表示不采诊断详情，额外次数汇入摘要"
+        }
+      }
+    }
+  }
+}
