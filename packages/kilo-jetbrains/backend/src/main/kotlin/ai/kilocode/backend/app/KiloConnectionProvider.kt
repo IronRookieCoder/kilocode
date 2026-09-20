@@ -5,6 +5,9 @@ import ai.kilocode.KiloPlugin
 import ai.kilocode.backend.cli.CliServer
 import ai.kilocode.jetbrains.api.client.DefaultApi
 import ai.kilocode.log.KiloLog
+import ai.kilocode.stability.Operations
+import ai.kilocode.stability.StabilityService
+import com.intellij.openapi.components.service
 import com.intellij.openapi.extensions.ExtensionPointName
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.SharedFlow
@@ -89,7 +92,13 @@ class KiloCliConnectionProvider(private val server: CliServer) : KiloConnectionP
         reconnect: () -> Unit,
         log: KiloLog,
         timeout: Long,
-    ): KiloConnection = KiloCliConnection(KiloConnectionService(cs, server, reconnect, log, timeout))
+    ): KiloConnection = KiloCliConnection(
+        // 稳定性采集（B2）：采集不可用绝不妨碍连接业务。
+        KiloConnectionService(cs, server, reconnect, log, timeout, stabilityOperations()),
+    )
+
+    private fun stabilityOperations(): Operations? =
+        runCatching { service<StabilityService>().operations }.getOrNull()
 }
 
 private class KiloCliConnection(private val delegate: KiloConnectionService) : KiloConnection {

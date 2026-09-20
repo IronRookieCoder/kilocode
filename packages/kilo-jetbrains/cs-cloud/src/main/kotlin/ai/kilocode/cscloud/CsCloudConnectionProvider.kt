@@ -3,6 +3,9 @@ package ai.kilocode.cscloud
 import ai.kilocode.backend.app.KiloConnection
 import ai.kilocode.backend.app.KiloConnectionProvider
 import ai.kilocode.log.KiloLog
+import ai.kilocode.stability.Operations
+import ai.kilocode.stability.StabilityService
+import com.intellij.openapi.components.service
 import com.intellij.openapi.project.ProjectManager
 import com.intellij.util.EnvironmentUtil
 import kotlinx.coroutines.CoroutineScope
@@ -33,5 +36,7 @@ class CsCloudConnectionProvider : KiloConnectionProvider {
         starter = { CscCloudStarter(EnvironmentUtil.getEnvironmentMap(), log).start() },
         installer = { CscInstaller(EnvironmentUtil.getEnvironmentMap(), log).install() },
         login = { CscLogin(EnvironmentUtil.getEnvironmentMap(), log).login() },
+        // 稳定性采集（B2）：采集不可用绝不妨碍连接业务，连接以null观测继续。
+        operations = runCatching { service<StabilityService>().operations }.getOrNull(),
     )
 }

@@ -5,6 +5,10 @@ import ai.kilocode.backend.cli.KiloBackendHttpClients
 import ai.kilocode.backend.cli.KiloCliDataParser
 import ai.kilocode.log.ChatLogSummary
 import ai.kilocode.log.KiloLog
+import ai.kilocode.stability.ConnectionObservation
+import ai.kilocode.stability.ConnectionReasons
+import ai.kilocode.stability.ConnectionTriggers
+import ai.kilocode.stability.Operations
 import ai.kilocode.jetbrains.api.client.DefaultApi
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -65,26 +69,32 @@ class KiloConnectionService(
   private val onReconnect: () -> Unit,
   private val log: KiloLog,
   private val appLoadTimeoutMs: Long,
+  /** 稳定性采集入口（B2）：生产由provider传入；null=采集不可用，业务照常。 */
+  operations: Operations? = null,
 ) {
 
     constructor(
       cs: CoroutineScope,
       server: CliServer,
       onReconnect: () -> Unit,
-    ) : this(cs, server, onReconnect, KiloLog.create(KiloConnectionService::class.java), 30_000L)
+    ) : this(cs, server, onReconnect, KiloLog.create(KiloConnectionService::class.java), 30_000L, null)
 
     constructor(
       cs: CoroutineScope,
       server: CliServer,
       onReconnect: () -> Unit,
       log: KiloLog,
-    ) : this(cs, server, onReconnect, log, 30_000L)
+    ) : this(cs, server, onReconnect, log, 30_000L, null)
 
     companion object {
         private const val HEARTBEAT_TIMEOUT_MS = 15_000L
         private const val HEALTH_POLL_INTERVAL_MS = 10_000L
         private const val RECONNECT_DELAY_MS = 250L
         private const val SSE_CONNECT_TIMEOUT_MS = 5_000L
+
+        /** M04 attempt受控stage（本provider：init=resolve、SSE=streams，无预备健康门）。 */
+        private const val STAGE_RESOLVE = "resolve"
+        private const val STAGE_STREAMS = "streams"
     }
 
     private val _state = MutableStateFlow<ConnectionState>(ConnectionState.Disconnected)
@@ -97,6 +107,26 @@ class KiloConnectionService(
     private val eventJob = cs.launch {
         for (event in queue) _events.emit(event)
     }
+
+    /**
+     * M04/M05观测（brief）及其单一串行上下文：SSE回调/心跳/健康/进程监控来自不同线程，
+     * 观测变更全部经[observationQueue]单消费者协程按序执行，绝不直接并发改观测字段；
+     * 声明顺序保证观测任务先于事件泵注册。
+     */
+    private val observation: ConnectionObservation? = operations?.let(::ConnectionObservation)
+    private val observationQueue = Channel<() -> Unit>(Channel.UNLIMITED)
+    private val observationJob = cs.launch {
+        for (task in observationQueue) task()
+    }
+
+    /** 观测任务投递（非阻塞）；dispose后残留任务被丢弃，不产生幽灵记录。 */
+    private fun observe(task: (ConnectionObservation) -> Unit) {
+        val target = observation ?: return
+        observationQueue.trySend { task(target) }
+    }
+
+    /** 自动全量重连标志：scheduleReconnect委托AppService前置，restart据此不加manual trigger。 */
+    @Volatile private var autoFullRestart = false
 
     /** Generated API client — null when disconnected. */
     var api: DefaultApi? = null
@@ -128,18 +158,27 @@ class KiloConnectionService(
     /**
      * Open a connection to the CLI server.
      *
+     * Public user entry (KiloConnection business surface unchanged): trigger=initial.
      * Called under [KiloBackendAppService]'s mutex — no internal guard needed.
      */
     suspend fun connect() {
+        observe { it.request(ConnectionTriggers.INITIAL) }
         open()
     }
 
     /**
      * Kill the CLI process and restart it. Tears down all connections first.
      *
-     * Called under [KiloBackendAppService]'s mutex.
+     * Called under [KiloBackendAppService]'s mutex. The automatic full-reconnect
+     * delegation ([scheduleReconnect] -> onReconnect -> AppService.reconnect) lands
+     * here too and is distinguished by the internal [autoFullRestart] trigger only:
+     * it must not mark the recovery intervention manual nor open a new logical
+     * denominator.
      */
     suspend fun restart() {
+        val manual = !autoFullRestart
+        autoFullRestart = false
+        if (manual) observe { it.request(ConnectionTriggers.MANUAL) }
         log.info("restart: initiated — tearing down current connection")
         teardown()
         log.info("restart: teardown complete — spawning new CLI process")
@@ -150,9 +189,12 @@ class KiloConnectionService(
     /**
      * Kill the CLI process, re-download the binary, and restart.
      *
-     * Called under [KiloBackendAppService]'s mutex.
+     * Called under [KiloBackendAppService]'s mutex. Same internal-trigger rule as [restart].
      */
     suspend fun reinstall() {
+        val manual = !autoFullRestart
+        autoFullRestart = false
+        if (manual) observe { it.request(ConnectionTriggers.MANUAL) }
         log.info("reinstall: initiated — tearing down current connection")
         teardown()
         log.info("reinstall: teardown complete — setting forceExtract flag")
@@ -193,6 +235,8 @@ class KiloConnectionService(
         timeoutJob?.cancel()
 
         setState(ConnectionState.Connecting)
+        // 本轮attempt自resolve（server.init含下载）开始；同轮内stage变化只progress。
+        observe { it.attempt(STAGE_RESOLVE) }
 
         val result = server.init(
             onProgress = { item -> setState(ConnectionState.Downloading(item.percent, item.version, item.platform)) },
@@ -200,6 +244,7 @@ class KiloConnectionService(
         )
 
         if (result is CliServer.State.Error) {
+            observe { it.attempt(STAGE_RESOLVE).end("failure", STAGE_RESOLVE, "environment", "other") }
             setState(ConnectionState.Error(result.message, result.details))
             return
         }
@@ -222,6 +267,7 @@ class KiloConnectionService(
         api = DefaultApi(basePath = target!!.base, client = ac)
         appLoadApi = DefaultApi(basePath = target!!.base, client = lc)
 
+        observe { it.attempt(STAGE_STREAMS) }
         startSse()
         startHeartbeatWatcher()
         healthJob = healthLoop()
@@ -259,6 +305,9 @@ class KiloConnectionService(
             if (source.get() !== src) return@launch
             if (_state.value !is ConnectionState.Connecting) return@launch
             log.warn("SSE: connection timed out - scheduling reconnect")
+            observe {
+                if (it.attemptOpen) it.attempt(STAGE_STREAMS).end("failure", STAGE_STREAMS, "network", "timeout")
+            }
             source.getAndSet(null)?.cancel()
             scheduleReconnect()
         }
@@ -273,6 +322,11 @@ class KiloConnectionService(
             log.info("SSE: connected")
             setState(ConnectionState.Connected(port, password))
             lastEvent.set(System.currentTimeMillis())
+            // 单流provider：流打开即attempt成功+连接成功（双end幂等，brief逐字段语义）。
+            observe {
+                if (it.attemptOpen) it.attempt(STAGE_STREAMS).end("success", STAGE_STREAMS)
+                it.connected()
+            }
         }
 
         override fun onEvent(src: EventSource, id: String?, type: String?, data: String) {
@@ -293,6 +347,11 @@ class KiloConnectionService(
             if (source.get() !== src) return
             timeoutJob?.cancel()
             log.info("SSE: stream closed — scheduling reconnect")
+            // 跨SSE回调只投递：先结算在途attempt，再标断连（ready前/恢复中自动no-op）。
+            observe {
+                if (it.attemptOpen) it.attempt(STAGE_STREAMS).end("failure", STAGE_STREAMS, "network", "sse_failed")
+                it.lost(ConnectionReasons.SSE_CLOSED)
+            }
             scheduleReconnect()
         }
 
@@ -306,6 +365,10 @@ class KiloConnectionService(
                 log.warn("SSE: failure (${t.message}) code=${response?.code} body=${body ?: "none"} — scheduling reconnect", t)
             } else {
                 log.warn("SSE: failure (HTTP ${response?.code}) body=${body ?: "none"} — scheduling reconnect")
+            }
+            observe {
+                if (it.attemptOpen) it.attempt(STAGE_STREAMS).end("failure", STAGE_STREAMS, "network", "sse_failed")
+                it.lost(ConnectionReasons.SSE_CLOSED)
             }
             setState(ConnectionState.Error(t?.message ?: "SSE connection failed (HTTP ${response?.code})", detail))
             scheduleReconnect()
@@ -330,11 +393,15 @@ class KiloConnectionService(
                 log.info("SSE: reconnecting (process alive)")
                 source.getAndSet(null)?.cancel()
                 setState(ConnectionState.Connecting)
+                // 恢复轮的新attempt（streams）：上一轮已由失败回调结算。
+                observe { it.attempt(STAGE_STREAMS) }
                 startSse()
                 return@launch
             }
 
             log.warn("CLI process not running — delegating full reconnect to AppService")
+            // 内部trigger：委托全量重连不得按manual处理（不新增逻辑分母、不改intervention）。
+            autoFullRestart = true
             onReconnect()
         }
     }
@@ -348,6 +415,7 @@ class KiloConnectionService(
                 val elapsed = System.currentTimeMillis() - lastEvent.get()
                 if (elapsed > HEARTBEAT_TIMEOUT_MS) {
                     log.warn("SSE: heartbeat timeout (${elapsed}ms) — forcing reconnect")
+                    observe { it.lost(ConnectionReasons.HEARTBEAT_TIMEOUT) }
                     source.getAndSet(null)?.cancel()
                     scheduleReconnect()
                 }
@@ -362,6 +430,7 @@ class KiloConnectionService(
             val ok = checkHealth()
             if (!ok && _state.value is ConnectionState.Connected) {
                 log.warn("Health check failed — forcing SSE reconnect")
+                observe { it.lost(ConnectionReasons.HEALTH_FAILED) }
                 source.getAndSet(null)?.cancel()
                 scheduleReconnect()
             }
@@ -387,6 +456,11 @@ class KiloConnectionService(
         server.exited(proc)
         val code = proc.exitValue()
         log.warn("CLI process exited with code $code")
+        // 退出码不是daemon实例身份证据：断连reason记process_exit，绝不写daemon_restart。
+        observe {
+            if (it.attemptOpen) it.attempt(STAGE_RESOLVE).end("failure", STAGE_RESOLVE, "network", "daemon_down")
+            it.lost(ConnectionReasons.PROCESS_EXIT)
+        }
         source.getAndSet(null)?.cancel()
         setState(ConnectionState.Error("CLI process exited with code $code"))
         scheduleReconnect()
@@ -411,6 +485,8 @@ class KiloConnectionService(
 
     fun dispose() {
         disposed = true
+        // 正常dispose：先结算在途观测区间为cancelled（无断连事实），再停泵丢弃残留任务。
+        observation?.close()
         source.getAndSet(null)?.cancel()
         heartbeatJob?.cancel()
         healthJob?.cancel()
@@ -419,6 +495,8 @@ class KiloConnectionService(
         timeoutJob?.cancel()
         eventJob.cancel()
         queue.close()
+        observationQueue.close()
+        observationJob.cancel()
         close()
         _state.value = ConnectionState.Disconnected
         log.info("KiloConnectionService disposed")

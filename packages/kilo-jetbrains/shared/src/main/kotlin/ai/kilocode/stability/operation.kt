@@ -33,7 +33,7 @@ private const val DEFAULT_CAUSE = "unknown"
 private const val DEFAULT_CODE = "none"
 
 /** context闭集中的逻辑操作键（设计6.2/第9章）：三个phase记录都自动注入，保证start/end配对。 */
-private const val CONTEXT_OPERATION_ID = "operation_id"
+internal const val CONTEXT_OPERATION_ID = "operation_id"
 
 /**
  * begin的fields不得触碰的键：phase与deadline_ms是start自身的公共字段，epoch是公共身份字段。
@@ -90,7 +90,9 @@ class Operations(
     ): Operation {
         val startMono = clock.mono()
         val snapshot = recorder.beginSnapshot(clock.wall(), name)
-        val operationId = UUID.randomUUID().toString()
+        // 调用方预置的operation_id（如attempt挂在逻辑连接旅程上，设计6.2"同时保留逻辑
+        // operation_id和传输attempt_id"）被保留；否则注入新生ID，三phase记录仍同值配对。
+        val operationId = context[CONTEXT_OPERATION_ID] ?: UUID.randomUUID().toString()
         val operationContext = LinkedHashMap(context).apply { put(CONTEXT_OPERATION_ID, operationId) }
         // begin的fields是该name的专属身份键（如action/api_group/session_mode），字典要求
         // 每个phase都携带；Operation快照它们并合并进progress/end，保证end自包含。
@@ -166,6 +168,9 @@ class Operation internal constructor(
     private val pendingEnd = AtomicReference<EndPayload?>()
 
     @Volatile private var settled = false
+
+    /** 只读终态标志（业务end或deadline先到）：调用方判断是否需要下一轮attempt分母的依据。 */
+    val isSettled: Boolean get() = settled
 
     @Volatile private var timerJob: Job? = null
 
