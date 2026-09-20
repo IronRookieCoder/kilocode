@@ -46,6 +46,7 @@ private const val REASON_STOPPED_PREFIX = "stopped_"
 
 private const val POLICY_POLL_MS = 30_000L
 private const val RETENTION_INTERVAL_MS = 3_600_000L
+private const val HEALTH_POLL_MS = 5_000L
 private const val WRITER_STARTUP_TIMEOUT_MS = 10_000L
 private const val WRITER_STARTUP_POLL_MS = 20L
 
@@ -101,7 +102,8 @@ data class Coverage(
  * 生命周期kind取自平台真实回调（app_close/unload），不靠dispose()猜测。
  *
  * 线程纪律：writer/文件IO只在writer自有IO线程与本服务后台协程；record路径非阻塞可EDT调用。
- * 后台任务：许可watch（每[pollIntervalMs]）、残留清理（启动即扫+每小时，禁采也执行）。
+ * 后台任务：许可watch（每[pollIntervalMs]）、残留清理（启动即扫+每小时，禁采也执行）、
+ * health摘要（run内每[HEALTH_POLL_MS]采样，生成节奏由Health按30秒及损失变化裁决）。
  */
 @Service(Service.Level.APP)
 @Suppress("TooManyFunctions", "LongParameterList")
@@ -135,8 +137,11 @@ class StabilityService private constructor(
     @Volatile private var policies: PolicyStore? = null
     @Volatile private var baseIdentity: ProducerIdentity? = null
     @Volatile private var standby: Pair<Recorder, Operations>? = null
+    @Volatile private var standbyFaults: Faults? = null
     @Volatile private var activeRecorder: Recorder? = null
     @Volatile private var activeOperations: Operations? = null
+    @Volatile private var activeFaults: Faults? = null
+    @Volatile private var activeHealth: Health? = null
     @Volatile private var activeWriter: Writer? = null
     @Volatile private var runActive = false
     @Volatile private var metadataWritten = false
@@ -146,6 +151,7 @@ class StabilityService private constructor(
     @Volatile private var runMode: RunMode = RunMode("unknown", "unknown")
     private var activationJob: Job? = null
     private var retentionJob: Job? = null
+    private var healthJob: Job? = null
 
     private val statusFlow = MutableStateFlow(
         Coverage("unknown", "unknown", PROFILE_DEFAULT, metrics = false, logs = false, reason = REASON_STARTING),
@@ -161,6 +167,13 @@ class StabilityService private constructor(
     /** 当前采集run的操作入口；与[recorder]同源，run切换后旧引用仅产出DISABLED。 */
     val operations: Operations
         get() = activeOperations ?: lazyStandby().second
+
+    /**
+     * 当前采集run的安全异常入口（A6）；run建立前经惰性standby——standby绑定无策略的
+     * fail-closed recorder，report恒DISABLED；stop后与[recorder]同样保留已关闭引用。
+     */
+    val faults: Faults
+        get() = activeFaults ?: lazyStandbyFaults()
 
     /**
      * 幂等启动（立即返回）。 [side]是入口标注（frontend工具窗/backend app初始化），仅用于
@@ -185,6 +198,7 @@ class StabilityService private constructor(
             val endKind = if (kind == END_KIND_APP_CLOSE) END_KIND_APP_CLOSE else END_KIND_UNLOAD
             activationJob?.cancel()
             retentionJob?.cancel()
+            healthJob?.cancel()
             if (runActive) {
                 if (permitted()) activeRecorder?.record(shutdownDraft(endKind))
                 activeRecorder?.close()
@@ -222,6 +236,7 @@ class StabilityService private constructor(
         }
         activationJob = scope.launch { activationLoop() }
         retentionJob = scope.launch { retentionLoop() }
+        healthJob = scope.launch { healthLoop() }
     }
 
     private suspend fun activationLoop() {
@@ -292,6 +307,9 @@ class StabilityService private constructor(
         outboxFull = false
         writeMetadataOnce(storage, root)
         recorder.record(startedDraft())
+        // A6：安全异常入口与health摘要随run创建（去重缓存与计数随run生命周期绑定）。
+        activeFaults = Faults(recorder, clock)
+        activeHealth = Health(recorder, writer, clock)
     }
 
     /** 公共授权撤销：关准入→writer最后排空（失效事实按入盘前重判期丢弃），不记shutdown。
@@ -350,6 +368,14 @@ class StabilityService private constructor(
         }
     }
 
+    /** health摘要后台循环（A6）：只在run活跃时生成；生成节奏与损失触发由Health.poll内部裁决。 */
+    private suspend fun healthLoop() {
+        while (!stoppedOnce.get()) {
+            if (runActive) activeHealth?.let { health -> runCatching { health.poll() } }
+            delay(HEALTH_POLL_MS)
+        }
+    }
+
     private fun sweepOnce() {
         val identity = baseIdentity ?: return
         val root = v1Root().resolve(identity.producerId)
@@ -362,6 +388,8 @@ class StabilityService private constructor(
         )
         val withinQuota = runCatching { retention.sweepOwnSource(writerActive = runActive) }.getOrDefault(true)
         outboxFull = runActive && !withinQuota
+        // R9（设计7.4"仍无空间则拒绝新写入并计数"）：预算不满足即关闸，恢复回到预算内即开闸。
+        activeRecorder?.setStorageFull(outboxFull)
         runCatching { retention.sweepOldSources() }
     }
 
@@ -373,10 +401,11 @@ class StabilityService private constructor(
         val identity = baseIdentity
             ?: ProducerEnvironment.snapshot(runMode, deviceStore.loadOrCreate(), connectionProviderHint)
                 .also { baseIdentity = it }
-        standby
+        val standbyPair = standby
             ?: Recorder(identity, store, clock)
                 .let { recorder -> recorder to Operations(recorder, clock, scope) }
                 .also { standby = it }
+        standbyFaults ?: Faults(standbyPair.first, clock).also { standbyFaults = it }
         identity
     }
 
@@ -386,6 +415,14 @@ class StabilityService private constructor(
         // 与stop竞争的迟到访问：服务已停时返回关闭态recorder，record恒DISABLED。
         if (stoppedOnce.get()) pair.first.close()
         return pair
+    }
+
+    private fun lazyStandbyFaults(): Faults {
+        ensureCore()
+        val faults = standbyFaults ?: error("stability standby faults unavailable")
+        // 与stop竞争的迟到访问：standby recorder随之关闭，report恒DISABLED。
+        if (stoppedOnce.get()) standby?.first?.close()
+        return faults
     }
 
     // ---- 路径与草稿 -------------------------------------------------------------
