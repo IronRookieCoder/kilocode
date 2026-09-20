@@ -229,7 +229,8 @@ class CsCloudConnectionService(
         val opened = CompletableDeferred<Unit>()
         val paths = roots().map { it.toAbsolutePath().normalize() }.distinct().sortedBy(Path::toString)
         if (paths.isEmpty()) {
-            failAttempt(STAGE_STREAMS, "environment", "other")
+            // 终局失败且无重试被调度：M04记result=failure（不被30s timeout吞掉）。
+            observation?.failed(STAGE_STREAMS, "environment", "other")
             return fail(IllegalStateException("active JetBrains project root is unavailable"))
         }
         val count = AtomicInteger()

@@ -438,6 +438,38 @@ class KiloConnectionServiceTest {
         }
     }
 
+    @Test
+    fun `terminal init failure ends the connection as failure`() = runBlocking {
+        val fixture = Fixture()
+        val failing = object : CliServer {
+            override var forceExtract = false
+            override fun process(): Process? = null
+            override suspend fun init(onProgress: (CliDownload) -> Unit, onResolved: () -> Unit) =
+                CliServer.State.Error("binary not found", "stderr line")
+            override fun exited(proc: Process) {}
+            override fun stop() {}
+            override fun dispose() {}
+        }
+        val svc = KiloConnectionService(scope, failing, {}, log, 30_000L, fixture.operations)
+        try {
+            svc.connect()
+            withTimeout(5_000) { svc.state.first { it is ConnectionState.Error } }
+            // 终局失败无重试：逻辑op按failure结算（映射stage/cause/code），而非等到30s timeout。
+            factsUntil(fixture) { facts -> ends(facts, "connection").size == 1 }
+            fixture.flush()
+            val journeyEnd = ends(fixture.facts(), "connection").single()
+            assertEquals("failure", journeyEnd.data["result"]?.jsonPrimitive?.content)
+            assertEquals("resolve", journeyEnd.data["stage"]?.jsonPrimitive?.content)
+            assertEquals("environment", journeyEnd.data["cause"]?.jsonPrimitive?.content)
+            assertEquals("other", journeyEnd.data["error_code"]?.jsonPrimitive?.content)
+            assertEquals("failure", ends(fixture.facts(), "connection.attempt").single().data["result"]?.jsonPrimitive?.content)
+            assertEquals(0, fixture.facts().count { it.name == "connection.recovery" })
+        } finally {
+            svc.dispose()
+            fixture.close()
+        }
+    }
+
     private class BlockingLog : KiloLog {
         val started = CountDownLatch(1)
         val release = CountDownLatch(1)

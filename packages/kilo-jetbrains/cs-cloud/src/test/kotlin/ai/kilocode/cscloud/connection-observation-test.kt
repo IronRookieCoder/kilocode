@@ -182,18 +182,65 @@ class ConnectionObservationTest {
             connection.request("initial")
             connection.attempt("health").end("failure", "health", "network", "health_failed")
             // 真实deadline定时器（250ms）到点结算timeout：轮询等待终态落盘，5秒上界防挂。
-            val deadline = System.currentTimeMillis() + 5_000
-            var timeoutEnd: ai.kilocode.stability.Fact? = null
-            while (timeoutEnd == null && System.currentTimeMillis() < deadline) {
-                fixture.flush()
-                timeoutEnd = ends(fixture.facts(), "connection").singleOrNull()
-                if (timeoutEnd == null) Thread.sleep(50)
-            }
+            val timeoutEnd = awaitConnectionEnd(fixture, expected = 1)
             assertEquals("timeout", timeoutEnd?.data?.get("result")?.jsonPrimitive?.content)
             connection.attempt("streams").end("success", "streams")
             connection.connected()
             fixture.flush()
             assertEquals(1, ends(fixture.facts(), "connection").size)
         }
+    }
+
+    /** 用户的再次发起是新操作（metrics 1.1）：超时后新initial开第二个分母，不吞旅程。 */
+    @Test
+    fun `initial request after timeout opens a new journey`() {
+        Fixture().use { fixture ->
+            val connection = ConnectionObservation(fixture.operations, logicalDeadlineMs = 250L)
+            connection.request("initial")
+            val timeoutEnd = awaitConnectionEnd(fixture, expected = 1)
+            assertEquals("timeout", timeoutEnd?.data?.get("result")?.jsonPrimitive?.content)
+            connection.request("initial")
+            connection.attempt("streams").end("success", "streams")
+            connection.connected()
+            fixture.flush()
+            val facts = fixture.facts()
+            val journeyEnds = ends(facts, "connection")
+            assertEquals(2, starts(facts, "connection").size)
+            assertEquals(2, journeyEnds.size)
+            assertEquals("timeout", journeyEnds[0].data["result"]?.jsonPrimitive?.content)
+            assertEquals("success", journeyEnds[1].data["result"]?.jsonPrimitive?.content)
+        }
+    }
+
+    /** 终局失败（无重试）：M04 result=failure + 映射stage/cause/code，在途attempt一并结算。 */
+    @Test
+    fun `failed ends the journey with failure`() {
+        Fixture().use { fixture ->
+            val connection = ConnectionObservation(fixture.operations)
+            connection.request("initial")
+            connection.attempt("resolve")
+            connection.failed("resolve", "environment", "binary_not_found")
+            fixture.flush()
+            val facts = fixture.facts()
+            val journeyEnd = ends(facts, "connection").single()
+            assertEquals("failure", journeyEnd.data["result"]?.jsonPrimitive?.content)
+            assertEquals("resolve", journeyEnd.data["stage"]?.jsonPrimitive?.content)
+            assertEquals("environment", journeyEnd.data["cause"]?.jsonPrimitive?.content)
+            assertEquals("binary_not_found", journeyEnd.data["error_code"]?.jsonPrimitive?.content)
+            assertEquals("failure", ends(facts, "connection.attempt").single().data["result"]?.jsonPrimitive?.content)
+            assertEquals(0, facts.count { it.name == "connection.recovery" || it.name == "connection.state_changed" })
+        }
+    }
+
+    /** 轮询等待第expected条connection end落盘（真实定时器异步结算），5秒上界防挂。 */
+    private fun awaitConnectionEnd(fixture: Fixture, expected: Int): ai.kilocode.stability.Fact? {
+        val deadline = System.currentTimeMillis() + 5_000
+        var found: ai.kilocode.stability.Fact? = null
+        while (found == null && System.currentTimeMillis() < deadline) {
+            fixture.flush()
+            found = ends(fixture.facts(), "connection").getOrNull(expected - 1)
+            if (found == null) Thread.sleep(50)
+        }
+        return found
     }
 }

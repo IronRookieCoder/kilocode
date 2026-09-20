@@ -47,6 +47,7 @@ private const val INTERVENTION_MANUAL = "manual"
 private const val CAUSE_USER = "user"
 private const val RESULT_CANCELLED = "cancelled"
 private const val RESULT_SUCCESS = "success"
+private const val RESULT_FAILURE = "failure"
 
 private const val CONTEXT_ATTEMPT_ID = "attempt_id"
 private const val CHANNEL = "critical"
@@ -107,7 +108,15 @@ class ConnectionObservation(
                 currentAttempt = null
                 beginLogical(ConnectionTriggers.MANUAL)
             }
-            ConnectionTriggers.INITIAL -> if (logical == null) beginLogical(ConnectionTriggers.INITIAL)
+            ConnectionTriggers.INITIAL -> {
+                // 已终态（如30s deadline先到）的旧分母视同缺席：用户的再次发起是新操作
+                // （metrics 1.1），否则新旅程被吞、其成功end被CAS丢弃。
+                val current = logical
+                if (current == null || current.isSettled) {
+                    logical = null
+                    beginLogical(ConnectionTriggers.INITIAL)
+                }
+            }
             else -> Unit
         }
     }
@@ -155,6 +164,23 @@ class ConnectionObservation(
         currentAttempt?.let { it.end(RESULT_SUCCESS, stage) }
         currentAttempt = null
         ready = true
+    }
+
+    /**
+     * 旅程终败（M04 result=failure）：仅在**无任何重试被调度**的终局失败调用（如
+     * backend init错误、cs-cloud空根目录）——metrics 1.2技术成功率=success/(success+
+     * failure+timeout)，终败按30s timeout上报属于误分类。仍会重试的失败不调用本方法，
+     * 继续在途并按deadline语义结算。结束逻辑操作与在途attempt（failure+映射的
+     * stage/cause/error_code）；已终态的旧逻辑操作由CAS丢弃。M05恢复区间不受影响。
+     */
+    @Synchronized
+    fun failed(stage: String, cause: String, code: String) {
+        if (closed) return
+        this.stage = stage
+        logical?.end(RESULT_FAILURE, stage, cause, code)
+        currentAttempt?.let { it.end(RESULT_FAILURE, stage, cause, code) }
+        currentAttempt = null
+        logical = null
     }
 
     /**

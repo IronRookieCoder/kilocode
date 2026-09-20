@@ -244,7 +244,8 @@ class KiloConnectionService(
         )
 
         if (result is CliServer.State.Error) {
-            observe { it.attempt(STAGE_RESOLVE).end("failure", STAGE_RESOLVE, "environment", "other") }
+            // 终局失败且无重试被调度：M04记result=failure（不被30s timeout吞掉）。
+            observe { it.failed(STAGE_RESOLVE, "environment", "other") }
             setState(ConnectionState.Error(result.message, result.details))
             return
         }

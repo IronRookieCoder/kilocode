@@ -214,7 +214,8 @@ class Operation internal constructor(
     }
 
     internal fun onDeadline() {
-        terminal.finish(RESULT_TIMEOUT, clock.mono())
+        // 定时器路径同样终态：settled须置位，否则调用方无法判定分母已结算（B2 Finding 1）。
+        if (terminal.finish(RESULT_TIMEOUT, clock.mono())) settled = true
     }
 
     /**
