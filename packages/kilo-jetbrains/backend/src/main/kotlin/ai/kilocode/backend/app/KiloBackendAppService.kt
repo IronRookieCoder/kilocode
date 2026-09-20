@@ -11,6 +11,7 @@ import ai.kilocode.backend.migration.LegacyMigrationStatus
 import ai.kilocode.backend.telemetry.KiloBackendTelemetry
 import ai.kilocode.log.KiloLog
 import ai.kilocode.backend.workspace.KiloBackendWorkspaceManager
+import ai.kilocode.stability.StabilityService
 import ai.kilocode.jetbrains.api.client.DefaultApi
 import ai.kilocode.jetbrains.api.infrastructure.ClientError
 import ai.kilocode.jetbrains.api.infrastructure.ClientException
@@ -180,6 +181,16 @@ class KiloBackendAppService private constructor(
     val activity = KiloBackendActivityManager(cs, log)
     val models = KiloBackendModelStateManager(log)
     val workspaces = KiloBackendWorkspaceManager(cs, sessions, log)
+
+    init {
+        // Shared stability collector entry (backend side): idempotent start with the platform
+        // run-mode source as the identity authority; provider id attributed best effort.
+        runCatching {
+            val stability = service<StabilityService>()
+            stability.noteConnectionProvider(connectionProvider.id)
+            stability.start("backend")
+        }.onFailure { log.warn("Stability collector start failed", it) }
+    }
 
     private val _codeReviewReports = MutableSharedFlow<CodeReviewReportDto>(extraBufferCapacity = 32)
     val codeReviewReports: SharedFlow<CodeReviewReportDto> get() = _codeReviewReports.asSharedFlow()

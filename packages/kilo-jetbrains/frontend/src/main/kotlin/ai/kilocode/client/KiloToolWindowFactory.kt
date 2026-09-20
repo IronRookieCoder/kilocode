@@ -14,6 +14,7 @@ import ai.kilocode.client.agentManager.applySidePanelMode
 import ai.kilocode.client.agentManager.worktree.WorktreeController
 import ai.kilocode.client.agentManager.AgentManagerPanel
 import ai.kilocode.client.plugin.KiloBundle
+import ai.kilocode.stability.StabilityService
 import ai.kilocode.log.KiloLog
 import com.intellij.icons.AllIcons
 import com.intellij.openapi.actionSystem.ActionGroup
@@ -50,6 +51,9 @@ import javax.swing.JPanel
  */
 class KiloToolWindowFactory : ToolWindowFactory, DumbAware {
     override fun createToolWindowContent(project: Project, toolWindow: ToolWindow) {
+        // Shared stability collector entry (frontend side): idempotent start, async init,
+        // mode/side always derived from the platform run-mode source (never from this call).
+        runCatching { service<StabilityService>().start("frontend") }
         project.service<KiloToolWindowSetupService>().create(toolWindow)
     }
 }

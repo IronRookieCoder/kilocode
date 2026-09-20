@@ -157,6 +157,8 @@
     <applicationListeners>
         <listener class="ai.kilocode.client.plugin.KiloFrontendDynamicPluginListener"
                   topic="com.intellij.ide.plugins.DynamicPluginListener"/>
+        <listener class="ai.kilocode.client.stability.StabilityLifecycleListener"
+                  topic="com.intellij.ide.AppLifecycleListener"/>
     </applicationListeners>
 
     <actions>
