@@ -12,11 +12,14 @@ import java.nio.file.Path
 import java.nio.file.StandardCopyOption
 import java.nio.file.StandardOpenOption
 import java.nio.file.attribute.AclEntry
+import java.nio.file.attribute.AclEntryFlag
 import java.nio.file.attribute.AclEntryPermission
 import java.nio.file.attribute.AclEntryType
 import java.nio.file.attribute.AclFileAttributeView
 import java.nio.file.attribute.PosixFileAttributeView
 import java.nio.file.attribute.PosixFilePermissions
+import java.nio.file.attribute.UserPrincipal
+import java.util.EnumSet
 
 private const val POSIX = "posix"
 private const val ACL = "acl"
@@ -26,6 +29,9 @@ private const val LOCK_RANGE_OFFSET = 0L
 private const val LOCK_RANGE_SIZE = 1L
 private const val CHANNEL_CRITICAL = "critical"
 private const val CHANNEL_DIAGNOSTIC = "diagnostic"
+
+/** Windows本地系统账户（服务侧），保留其访问以便后台服务消费；查无此名（本地化系统）则省略。 */
+private const val SYSTEM_PRINCIPAL = "SYSTEM"
 
 /** 数据文件与锁文件的POSIX权限（0600）；目录为0700。Windows走ACL校验分支。 */
 private val DIRECTORY_PERMISSIONS = PosixFilePermissions.fromString("rwx------")
@@ -56,13 +62,17 @@ class Storage(private val root: Path) {
 
     /**
      * 校验并按需创建producer根目录：已存在祖先逐一排除symlink/reparse，创建后真实路径必须
-     * 仍落在已核验祖先之内（真实路径范围），根目录所有者与权限核验通过才返回真实路径。
-     * （每类失败点各一个throw，统一包装为不可验证域异常——见checkNoLink前的Suppress说明。）
+     * 仍落在已核验祖先之内（真实路径范围），根目录所有者与权限核验（Windows为配置后核验）
+     * 通过才返回真实路径。
+     * （每类失败点各一个throw，统一包装为不可验证域异常——见verifyNoLinks前的Suppress说明。）
      */
     @Suppress("ThrowsCount")
     fun verifyLayout(): Path {
         val absolute = root.toAbsolutePath().normalize()
-        val anchor = existingAncestor(absolute)
+        var anchor = absolute
+        while (!Files.exists(anchor, LinkOption.NOFOLLOW_LINKS)) {
+            anchor = anchor.parent ?: break
+        }
         verifyNoLinks(anchor, absolute.parent)
         try {
             Files.createDirectories(absolute)
@@ -79,7 +89,8 @@ class Storage(private val root: Path) {
         if (!real.startsWith(anchor.toRealPath())) {
             throw StorageUnverifiedException("producer root escapes the verified ancestor: $real")
         }
-        verifyPermissions(real, isDirectory = true)
+        // 根目录走"配置后核验"（Windows整体替换最小DACL，POSIX置位0700）；子项只核验（继承）。
+        verifyPermissions(real, isDirectory = true, configure = true)
         return real
     }
 
@@ -195,14 +206,8 @@ class Storage(private val root: Path) {
     }
 }
 
-/** 自[root]向上找最近的已存在祖先（至多到文件系统根），作为可信锚点。 */
-private fun existingAncestor(path: Path): Path {
-    var current: Path = path
-    while (!Files.exists(current, LinkOption.NOFOLLOW_LINKS)) {
-        current = current.parent ?: return current
-    }
-    return current
-}
+// 校验代码刻意把每类失败点收敛为一个throw（底层IOException带cause包装为统一的
+// StorageUnverifiedException域异常），白名单式逐项失败比刻意压缩throw数量更可读。
 
 /**
  * 已存在祖先逐一排除symlink；Windows（无POSIX视图）进一步以真实路径等价性侦测
@@ -219,8 +224,6 @@ private fun verifyNoLinks(anchor: Path, bottom: Path?) {
     checkNoLink(anchor, windowsLike)
 }
 
-// 校验代码刻意把每类失败点收敛为一个throw（底层IOException带cause包装为统一的
-// StorageUnverifiedException域异常），白名单式逐项失败比刻意压缩throw数量更可读。
 @Suppress("ThrowsCount")
 private fun checkNoLink(path: Path, windowsLike: Boolean) {
     if (!Files.exists(path, LinkOption.NOFOLLOW_LINKS)) return
@@ -238,15 +241,26 @@ private fun checkNoLink(path: Path, windowsLike: Boolean) {
     }
 }
 
-/** 权限核验入口：POSIX显式0700/0600并回读比对；Windows核验ACL实际授权；其余模型拒绝。 */
-private fun verifyPermissions(path: Path, isDirectory: Boolean) {
+/**
+ * 权限核验入口：POSIX显式0700/0600并回读比对；Windows核验ACL实际授权（[configure]时先
+ * 整体替换为当前用户最小DACL再核验）；其余模型拒绝。所有者必须是当前用户（[verifyOwner]并入）。
+ */
+@Suppress("ThrowsCount")
+private fun verifyPermissions(path: Path, isDirectory: Boolean, configure: Boolean = false) {
     val views = path.fileSystem.supportedFileAttributeViews()
     when {
         POSIX in views -> verifyPosix(path, isDirectory)
-        ACL in views -> verifyAcl(path)
+        ACL in views -> if (configure) configureAcl(path) else verifyAcl(path)
         else -> throw StorageUnverifiedException("no verifiable permission model for $path")
     }
-    verifyOwner(path)
+    val owner = try {
+        Files.getOwner(path).name
+    } catch (exception: IOException) {
+        throw StorageUnverifiedException("owner unavailable for $path: ${exception.message}", exception)
+    }
+    if (!principalMatches(owner, System.getProperty("user.name"))) {
+        throw StorageUnverifiedException("owner '$owner' is not the current user for $path")
+    }
 }
 
 @Suppress("ThrowsCount")
@@ -269,6 +283,10 @@ private fun verifyPosix(path: Path, isDirectory: Boolean) {
  * Windows ACL核验（设计5.2：不能把chmod数值当作Windows权限实现）：所有者必须是当前用户，
  * 且ACL存在对当前用户的ALLOW条目（继承后的实际权限）授予读/写数据。
  */
+/**
+ * Windows ACL核验（设计5.2：不能把chmod数值当作Windows权限实现）：所有者必须是当前用户，
+ * 且ACL存在对当前用户的ALLOW条目（继承后的实际权限）授予读/写数据。
+ */
 @Suppress("ThrowsCount")
 private fun verifyAcl(path: Path) {
     val view = Files.getFileAttributeView(path, AclFileAttributeView::class.java)
@@ -278,27 +296,70 @@ private fun verifyAcl(path: Path) {
     } catch (exception: IOException) {
         throw StorageUnverifiedException("acl unreadable for $path: ${exception.message}", exception)
     }
-    val ownerAllowed = acl.any { entry -> entryForOwner(entry, view) }
+    val ownerAllowed = acl.any { entry ->
+        entry.type() == AclEntryType.ALLOW &&
+            (entry.principal() == view.owner || principalMatches(entry.principal().name, view.owner.name)) &&
+            entry.permissions().containsAll(setOf(AclEntryPermission.READ_DATA, AclEntryPermission.WRITE_DATA))
+    }
     if (!ownerAllowed) {
         throw StorageUnverifiedException("no allow entry for the current user on $path")
     }
 }
 
-/** 所有者条目校验：ALLOW类型 + 当前用户（对象等价或名称互认）+ 实际授予读/写数据权限。 */
-private fun entryForOwner(entry: AclEntry, view: AclFileAttributeView): Boolean =
-    entry.type() == AclEntryType.ALLOW &&
-        (entry.principal() == view.owner || principalMatches(entry.principal().name, view.owner.name)) &&
-        entry.permissions().containsAll(setOf(AclEntryPermission.READ_DATA, AclEntryPermission.WRITE_DATA))
-
-private fun verifyOwner(path: Path) {
-    val owner = try {
-        Files.getOwner(path).name
+/**
+ * Windows根目录ACL"配置后核验"（设计5.2：使用AclFileAttributeView配置当前用户ACL并检查
+ * 继承后的实际权限）：以最小DACL整体替换继承自父目录的授权（当前用户完全控制，SYSTEM尽力
+ * 保留，条目对子目录/文件可继承），随后重读核验生效DACL与所设条目逐条一致——父目录（如
+ * 临时目录）对其他本地主体的宽授权不再生效。配置失败按不可验证禁采。
+ */
+@Suppress("ThrowsCount")
+private fun configureAcl(path: Path) {
+    val view = Files.getFileAttributeView(path, AclFileAttributeView::class.java)
+        ?: throw StorageUnverifiedException("acl view unavailable for $path")
+    val configured = minimalAcl(view, path)
+    try {
+        view.setAcl(configured)
     } catch (exception: IOException) {
-        throw StorageUnverifiedException("owner unavailable for $path: ${exception.message}", exception)
+        throw StorageUnverifiedException("acl cannot be configured for $path: ${exception.message}", exception)
     }
-    if (!principalMatches(owner, System.getProperty("user.name"))) {
-        throw StorageUnverifiedException("owner '$owner' is not the current user for $path")
+    verifyAcl(path)
+    val effective = try {
+        view.acl
+    } catch (exception: IOException) {
+        throw StorageUnverifiedException("acl unreadable for $path: ${exception.message}", exception)
     }
+    if (!aclMatches(effective, configured)) {
+        throw StorageUnverifiedException("effective acl on $path does not match the configured minimal dacl")
+    }
+}
+
+/** 生效DACL与所设条目一致性：条目数一致且每条（主体/类型/标志/权限）都能在所设条目中找到。 */
+private fun aclMatches(effective: List<AclEntry>, configured: List<AclEntry>): Boolean =
+    effective.size == configured.size && effective.all { entry ->
+        configured.any { wanted ->
+            entry.type() == wanted.type() &&
+                entry.principal() == wanted.principal() &&
+                entry.flags() == wanted.flags() &&
+                entry.permissions() == wanted.permissions()
+        }
+    }
+
+/** 最小DACL：当前用户完全控制 + SYSTEM（尽力保留，本地化系统查无此名时省略），条目可被子项继承。 */
+private fun minimalAcl(view: AclFileAttributeView, path: Path): List<AclEntry> {
+    val inheritable = EnumSet.of(AclEntryFlag.DIRECTORY_INHERIT, AclEntryFlag.FILE_INHERIT)
+    val fullControl = EnumSet.allOf(AclEntryPermission::class.java)
+    fun entry(principal: UserPrincipal) = AclEntry.newBuilder()
+        .setPrincipal(principal)
+        .setType(AclEntryType.ALLOW)
+        .setFlags(inheritable)
+        .setPermissions(fullControl)
+        .build()
+
+    val entries = mutableListOf(entry(view.owner))
+    runCatching { path.fileSystem.userPrincipalLookupService.lookupPrincipalByName(SYSTEM_PRINCIPAL) }
+        .getOrNull()
+        ?.let { system -> entries += entry(system) }
+    return entries
 }
 
 /** 域限定名与本地名互认：全名相等或去掉域前缀（\\或/之后）后相等（大小写不敏感）。 */

@@ -2,6 +2,10 @@ package ai.kilocode.stability
 
 import java.nio.file.Files
 import java.nio.file.Path
+import java.nio.file.attribute.AclEntry
+import java.nio.file.attribute.AclEntryFlag
+import java.nio.file.attribute.AclEntryType
+import java.nio.file.attribute.AclFileAttributeView
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -262,6 +266,44 @@ class WriterTest {
             assertNotEquals(null, fixture.writer.disabledReason)
             assertTrue(fixture.facts().isEmpty())
         }
+    }
+
+    // ---------- Windows ACL配置后核验：根DACL为当前用户最小授权，无继承残留 ----------
+
+    @Test
+    fun `producer root acl is reconfigured for the current user on acl filesystems`() {
+        Fixture().use { fixture ->
+            if (!await { fixture.writer.state != WriterState.CREATED }) return  // 等启动结束（根目录已建）
+            if (fixture.writer.state != WriterState.ACTIVE) return  // 存储不可用场景由disable用例覆盖
+            val views = fixture.root.fileSystem.supportedFileAttributeViews()
+            if ("posix" in views) return  // POSIX路径走0700置位回读，本断言仅适用ACL模型
+            val view = Files.getFileAttributeView(fixture.root, AclFileAttributeView::class.java)
+                ?: return
+            val acl = view.acl
+            assertTrue(acl.isNotEmpty(), "配置后的DACL不应为空")
+            val user = System.getProperty("user.name")
+            assertTrue(
+                acl.all { entry -> entryForUser(entry, user) || isSystemPrincipal(entry) },
+                "DACL只应包含当前用户与SYSTEM的条目，实际：${acl.map { it.principal().name }}",
+            )
+            assertTrue(acl.any { entry -> entryForUser(entry, user) }, "应有对当前用户的ALLOW条目")
+            assertTrue(
+                acl.all { entry ->
+                    entry.flags().containsAll(listOf(AclEntryFlag.FILE_INHERIT, AclEntryFlag.DIRECTORY_INHERIT))
+                },
+                "条目应对子目录/文件可继承（子项由根最小DACL覆盖）",
+            )
+        }
+    }
+
+    private fun isSystemPrincipal(entry: AclEntry): Boolean =
+        entry.principal().name.substringAfterLast('\\').equals("SYSTEM", ignoreCase = true)
+
+    private fun entryForUser(entry: AclEntry, user: String): Boolean {
+        if (entry.type() != AclEntryType.ALLOW) return false
+        val name = entry.principal().name
+        return name.equals(user, ignoreCase = true) ||
+            name.substringAfterLast('\\').substringAfterLast('/').equals(user, ignoreCase = true)
     }
 
     // ---------- 夹具与驱动 ----------
