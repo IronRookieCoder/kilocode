@@ -172,7 +172,7 @@ class KiloAppServiceTest : BasePlatformTestCase() {
     fun `test installCscAsync reports a busy install instead of ignoring a second click`() = runBlocking(Dispatchers.Default) {
         var job: Job? = null
         val runner = CsCloudTaskRunner { _, queued -> job = queued }
-        val cancellable = KiloAppService(scope, rpc, runner)
+        val cancellable = KiloAppService(scope, rpc, csCloudTasks = runner)
         rpc.csCloudInstallGate = CompletableDeferred()
         recordNotifications()
         cancellable.installCscAsync()
@@ -195,7 +195,7 @@ class KiloAppServiceTest : BasePlatformTestCase() {
     fun `test installCscAsync releases the lock when the background task is cancelled`() = runBlocking(Dispatchers.Default) {
         var job: Job? = null
         val runner = CsCloudTaskRunner { _, queued -> job = queued }
-        val cancellable = KiloAppService(scope, rpc, runner)
+        val cancellable = KiloAppService(scope, rpc, csCloudTasks = runner)
         rpc.csCloudInstallGate = CompletableDeferred()
         recordNotifications()
 
@@ -215,7 +215,7 @@ class KiloAppServiceTest : BasePlatformTestCase() {
         val paused = PausedDispatcher()
         val frozenScope = CoroutineScope(SupervisorJob() + paused)
         val cancelling = CsCloudTaskRunner { _, job -> job.cancel() }
-        val cancellable = KiloAppService(frozenScope, rpc, cancelling)
+        val cancellable = KiloAppService(frozenScope, rpc, csCloudTasks = cancelling)
         recordNotifications()
 
         cancellable.installCscAsync()
@@ -233,7 +233,7 @@ class KiloAppServiceTest : BasePlatformTestCase() {
     fun `test startCsCloudAsync reports a busy start instead of ignoring a second click`() = runBlocking(Dispatchers.Default) {
         var job: Job? = null
         val runner = CsCloudTaskRunner { _, queued -> job = queued }
-        val cancellable = KiloAppService(scope, rpc, runner)
+        val cancellable = KiloAppService(scope, rpc, csCloudTasks = runner)
         rpc.csCloudStartGate = CompletableDeferred()
         recordNotifications()
         cancellable.startCsCloudAsync()
@@ -256,7 +256,7 @@ class KiloAppServiceTest : BasePlatformTestCase() {
     fun `test startCsCloudAsync releases the lock when the background task is cancelled`() = runBlocking(Dispatchers.Default) {
         var job: Job? = null
         val runner = CsCloudTaskRunner { _, queued -> job = queued }
-        val cancellable = KiloAppService(scope, rpc, runner)
+        val cancellable = KiloAppService(scope, rpc, csCloudTasks = runner)
         rpc.csCloudStartGate = CompletableDeferred()
         recordNotifications()
 

@@ -66,6 +66,7 @@ import com.intellij.openapi.actionSystem.ActionPlaces
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.actionSystem.IdeActions
 import com.intellij.openapi.components.service
+import ai.kilocode.stability.Draft
 import ai.kilocode.stability.Operation
 import ai.kilocode.stability.Operations
 import ai.kilocode.stability.StabilityService
@@ -196,6 +197,12 @@ class SessionController(
         private const val STAGE_RPC = "rpc"
         private const val CAUSE_UNKNOWN = "unknown"
         private const val CODE_OTHER = "other"
+
+        // M18（C2）：session.dispose_risk的固定枚举与去重缓存上界。
+        private const val DISPOSE_RISK = "session.dispose_risk"
+        private const val DISPOSE_SOURCE = "global_disposed"
+        private const val DISPOSE_TRANSITION = "ready_loading"
+        private const val DISPOSE_RISK_CACHE_MAX = 32
     }
 
     init {
@@ -251,6 +258,11 @@ class SessionController(
 
     /** 订阅已建立信号：events采集器真正进入collect后置位，流错误即撤销；EDT上读写。 */
     private var subscriptionUp = false
+
+    // M18（C2）释放风险观测：app状态采集协程串行读写；去重缓存只在dispose（EDT）清理。
+    private var lastAppStatus: KiloAppStatusDto? = null
+    private var appReadyGeneration = 0L
+    private val disposeRiskSeen = LinkedHashMap<String, Unit>()
     private var recentsState: RecentsState = RecentsState.Idle
     private var recentsSnapshot: List<SessionDto> = emptyList()
     private var viewState: SessionControllerEvent.ViewChanged? = null
@@ -1182,6 +1194,7 @@ class SessionController(
             var connected = false
             var recover = false
             app.state.collect { state ->
+                observeDisposeRisk(state.status)
                 if (state.status == KiloAppStatusDto.READY) {
                     app.fetchVersionAsync()
                     if (recover && ref is SessionRef.Local) {
@@ -1552,6 +1565,63 @@ class SessionController(
     }
 
     @RequiresEdt
+    /**
+     * M18（C2）session.dispose_risk（指标"活跃会话是否遇到服务释放"）：前端唯一可观测的
+     * daemon端global.disposed/server_instance_disposed信号是app状态**无中间断连状态**的
+     * READY→LOADING直接转换——backend仅在这两个SSE事件（处于Ready时）直接触发整体reload
+     * （KiloBackendAppService.load，二者处理完全相同"Same effect"），其余load路径（重连
+     * Connected恢复、用户retry/restart、migration恢复）都先经过非READY的连接/断开状态。
+     * 两类disposed事件前端不可区分，统一记global_disposed（app级全局上下文重建语义）。
+     * 只有会话活跃（turn进行中或交互待决）且非本面板正常退出（disposed）才记录；同源事件
+     * 在有限缓存内按"连接代际+来源+状态转换"去重——本代际是本地READY回合计数，绝不证明
+     * daemon重启，也不做payload内容hash；dispose清理缓存。仅critical通道最小计数，
+     * metrics-only出口由Dictionary收窄。
+     */
+    private fun observeDisposeRisk(status: KiloAppStatusDto) {
+        val previous = lastAppStatus
+        lastAppStatus = status
+        if (status == KiloAppStatusDto.READY && previous != KiloAppStatusDto.READY) appReadyGeneration += 1
+        val isDisposeReload = previous == KiloAppStatusDto.READY && status == KiloAppStatusDto.LOADING && !disposed
+        if (!isDisposeReload || !conversationActive() || !markDisposeRiskSeen()) return
+        operations.record(
+            Draft(
+                DISPOSE_RISK,
+                "transition",
+                "critical",
+                buildJsonObject {
+                    put("dispose_source", DISPOSE_SOURCE)
+                    put("conversation_active", true)
+                },
+            ),
+        )
+    }
+
+    /** 有界FIFO去重缓存（brief"有限缓存"）：同代际同来源同转换只记一次。返回false=重复。 */
+    private fun markDisposeRiskSeen(): Boolean = synchronized(disposeRiskSeen) {
+        val key = "$appReadyGeneration|$DISPOSE_SOURCE|$DISPOSE_TRANSITION"
+        val added = !disposeRiskSeen.containsKey(key)
+        if (added) {
+            disposeRiskSeen[key] = Unit
+            val iterator = disposeRiskSeen.keys.iterator()
+            while (disposeRiskSeen.size > DISPOSE_RISK_CACHE_MAX && iterator.hasNext()) {
+                iterator.next()
+                iterator.remove()
+            }
+        }
+        added
+    }
+
+    /** 会话活跃：turn进行中（Busy/Retry/Reverting）或用户交互待决（permission/question卡片）。 */
+    private fun conversationActive(): Boolean = when (model.state) {
+        is SessionState.Busy,
+        is SessionState.Retry,
+        is SessionState.Reverting,
+        is SessionState.AwaitingPermission,
+        is SessionState.AwaitingQuestion,
+        -> true
+        else -> false
+    }
+
     private fun subscribeEvents() {
         assertEdt()
         val id = sid ?: return
@@ -2940,6 +3010,8 @@ class SessionController(
             disposed = true
             connectionDelay.dispose()
             cancelSubscriptions()
+            // M18（C2）：关闭会话清理释放风险去重缓存（正常退出不产事实，缓存不跨生命周期）。
+            synchronized(disposeRiskSeen) { disposeRiskSeen.clear() }
             // 关闭项目/面板：在途的M11操作结算cancelled（正常取消不进入error计数）。
             restoring?.let { restore ->
                 if (!restore.op.isSettled) restore.op.end(RESULT_CANCELLED, restore.stage(), CAUSE_USER)

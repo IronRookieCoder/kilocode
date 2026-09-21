@@ -317,6 +317,8 @@ class CsCloudConnectionService(
                     if (!opened.isCompleted) opened.completeExceptionally(error ?: CsCloudRequestException("sse_failed", "cs-cloud SSE failed (HTTP $status)", status ?: 0))
                     else scheduleReconnect(disconnectReason(paths.size))
                 },
+                // M15（C2）：SSE解码失败/apply违规的protocol.error经同一采集入口上报。
+                operations = operations,
             )
         }
         sse = streams
