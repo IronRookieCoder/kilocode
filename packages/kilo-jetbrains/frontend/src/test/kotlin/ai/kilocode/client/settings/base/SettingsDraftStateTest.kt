@@ -3,6 +3,7 @@ package ai.kilocode.client.settings.base
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class SettingsDraftStateTest {
@@ -174,5 +175,60 @@ class SettingsDraftStateTest {
         assertEquals("new", state.baseline)
         assertEquals("other", state.draft)
         assertTrue(state.modified())
+    }
+
+    // ------ B4/M12 settings_save 观测依赖的状态语义 ------
+
+    @Test
+    fun `unmodified draft starts no save token`() {
+        val state = SettingsDraftState("old")
+
+        assertNull(state.start())
+        assertFalse(state.saving)
+    }
+
+    @Test
+    fun `fallback completion is confirmed by later matching external base`() {
+        // 保存回执不含目标（stale）时complete回退到token.target；operation据此保持等待，
+        // 直到acceptBase收到匹配目标的真实快照才算确认落地。
+        val state = SettingsDraftState("old")
+        state.update { "new" }
+        val token = state.start()!!
+
+        state.complete(token, "old")
+        state.accept("new")
+
+        assertEquals("new", state.baseline)
+        assertEquals("new", state.draft)
+        assertFalse(state.modified())
+    }
+
+    @Test
+    fun `later matching confirmation preserves concurrent edit`() {
+        val state = SettingsDraftState("old")
+        state.update { "new" }
+        val token = state.start()!!
+        state.update { "other" }
+
+        state.complete(token, "old")
+        state.accept("new")
+
+        assertEquals("new", state.baseline)
+        assertEquals("other", state.draft)
+        assertTrue(state.modified())
+    }
+
+    @Test
+    fun `stale snapshot while waiting does not confirm the target`() {
+        val state = SettingsDraftState("old")
+        state.update { "new" }
+        val token = state.start()!!
+
+        state.complete(token, "old")
+        state.accept("old")
+
+        // 基线仍是token.target（等待中的确认依据未变），不是迟到的stale快照。
+        assertEquals("new", state.baseline)
+        assertFalse(state.modified())
     }
 }

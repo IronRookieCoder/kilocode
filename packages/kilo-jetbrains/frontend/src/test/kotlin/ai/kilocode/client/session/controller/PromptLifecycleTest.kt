@@ -32,6 +32,7 @@ import ai.kilocode.rpc.dto.ToolRefDto
 import java.util.concurrent.CopyOnWriteArrayList
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.flow.onCompletion
+import kotlinx.serialization.json.jsonPrimitive
 
 class PromptLifecycleTest : SessionControllerTestBase() {
 
@@ -242,10 +243,15 @@ class PromptLifecycleTest : SessionControllerTestBase() {
 
         edt { m.setAutoApprove(true) }
         emit(ChatEventDto.PermissionAsked("ses_test", permission("perm1")))
+        fixture.flush()
 
         assertEquals(1, rpc.permissionReplies.size)
         assertEquals("perm1", rpc.permissionReplies[0].first)
         assertEquals("once", rpc.permissionReplies[0].third.reply)
+        // M12（B4）：自动批准不是用户permission_reply分母。
+        assertTrue(fixture.facts().none {
+            it.name == "action" && it.data["action"]?.jsonPrimitive?.content == "permission_reply"
+        })
         assertSession(
             """
             [code] [kilo/gpt-5] [busy] [considering next steps]
@@ -321,10 +327,15 @@ class PromptLifecycleTest : SessionControllerTestBase() {
 
         edt { m.setAutoApprove(true) }
         flush()
+        fixture.flush()
 
         assertEquals(1, rpc.permissionReplies.size)
         assertEquals("perm_pending", rpc.permissionReplies[0].first)
         assertEquals("once", rpc.permissionReplies[0].third.reply)
+        // 排队发送/批量自动批准不新增用户permission_reply分母。
+        assertTrue(fixture.facts().none {
+            it.name == "action" && it.data["action"]?.jsonPrimitive?.content == "permission_reply"
+        })
     }
 
     fun `test enabling auto approve surfaces a pending skill shell as a card`() {

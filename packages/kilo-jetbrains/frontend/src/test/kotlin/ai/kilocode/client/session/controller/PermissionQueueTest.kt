@@ -8,11 +8,13 @@ import ai.kilocode.rpc.dto.ConfigDto
 import ai.kilocode.rpc.dto.KiloAppStateDto
 import ai.kilocode.rpc.dto.KiloAppStatusDto
 import ai.kilocode.rpc.dto.PartDto
+import ai.kilocode.rpc.dto.PermissionReplyDto
 import ai.kilocode.rpc.dto.PermissionRequestDto
 import ai.kilocode.rpc.dto.QuestionInfoDto
 import ai.kilocode.rpc.dto.QuestionReplyDto
 import ai.kilocode.rpc.dto.QuestionRequestDto
 import ai.kilocode.rpc.dto.SessionStatusDto
+import kotlinx.serialization.json.jsonPrimitive
 
 class PermissionQueueTest : SessionControllerTestBase() {
 
@@ -244,6 +246,81 @@ class PermissionQueueTest : SessionControllerTestBase() {
         emit(ChatEventDto.SessionStatusChanged("ses_test", SessionStatusDto("idle")))
 
         assertPermission(m, "child_perm1")
+    }
+
+    // ------ M12（B4）permission_reply / question_reply 分母矩阵 ------
+
+    private fun replyEnds() = fixture.facts().filter {
+        it.name == "action" && it.data["phase"]?.jsonPrimitive?.content == "end" &&
+            it.data["action"]?.jsonPrimitive?.content == "permission_reply"
+    }
+
+    private fun questionEnds() = fixture.facts().filter {
+        it.name == "action" && it.data["phase"]?.jsonPrimitive?.content == "end" &&
+            it.data["action"]?.jsonPrimitive?.content == "question_reply"
+    }
+
+    fun `test permission reply server failure settles failure and keeps error card`() {
+        val (m, _, _) = prompted()
+        emit(ChatEventDto.PermissionAsked("ses_test", permission("perm1")))
+        rpc.replyPermissionThrows = RuntimeException("boom")
+
+        edt { m.replyPermission("perm1", PermissionReplyDto("once")) }
+        flush()
+        fixture.flush()
+
+        val state = m.model.state as? SessionState.AwaitingPermission ?: error("Expected error card")
+        assertEquals(PermissionRequestState.ERROR, state.permission.state)
+        val end = replyEnds().single()
+        assertEquals("failure", end.data.getValue("result").jsonPrimitive.content)
+        assertEquals("rpc", end.data.getValue("stage").jsonPrimitive.content)
+    }
+
+    fun `test cancelled permission reply settles cancelled without error card`() {
+        val (m, _, _) = prompted()
+        emit(ChatEventDto.PermissionAsked("ses_test", permission("perm1")))
+        rpc.replyPermissionThrows = kotlinx.coroutines.CancellationException("gone")
+
+        edt { m.replyPermission("perm1", PermissionReplyDto("once")) }
+        flush()
+        fixture.flush()
+
+        val end = replyEnds().single()
+        assertEquals("cancelled", end.data.getValue("result").jsonPrimitive.content)
+        assertEquals("user", end.data.getValue("cause").jsonPrimitive.content)
+        // 取消走rethrow路径：卡片保持RESPONDING，不误报ERROR。
+        val state = m.model.state as? SessionState.AwaitingPermission
+        assertEquals(PermissionRequestState.RESPONDING, state?.permission?.state)
+    }
+
+    fun `test drain auto approve replies without permission reply denominator`() {
+        rpc.pendingPermissionList.add(permission("perm_pending"))
+        val (m, _, _) = prompted()
+
+        edt { m.setAutoApprove(true) }
+        flush()
+        fixture.flush()
+
+        assertEquals(1, rpc.permissionReplies.size)
+        assertTrue(replyEnds().isEmpty())
+        assertTrue(fixture.facts().none {
+            it.name == "action" && it.data["action"]?.jsonPrimitive?.content == "permission_reply"
+        })
+    }
+
+    fun `test question reply server failure settles failure once`() {
+        val (m, _, _) = prompted()
+        emit(ChatEventDto.QuestionAsked("ses_test", question("q1")))
+        rpc.questionReplyThrows = RuntimeException("boom")
+
+        edt { m.replyQuestion("q1", QuestionReplyDto(listOf(listOf("A")))) }
+        flush()
+        fixture.flush()
+
+        assertTrue(rpc.questionReplies.isEmpty())
+        val end = questionEnds().single()
+        assertEquals("failure", end.data.getValue("result").jsonPrimitive.content)
+        assertEquals("rpc", end.data.getValue("stage").jsonPrimitive.content)
     }
 
     private fun taskPart(child: String) = ChatEventDto.PartUpdated(

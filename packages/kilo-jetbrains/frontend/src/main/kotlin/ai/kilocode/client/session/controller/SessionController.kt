@@ -184,6 +184,18 @@ class SessionController(
         private const val MODE_CREATE = "create"
         private const val MODE_OPEN = "open"
         private const val MODE_RECONNECT = "reconnect"
+
+        // M12（metrics 2.3，B4）：关键操作观测——每个已接收的用户意图一个action操作，
+        // 30秒截止；success在请求返回且本地状态更新（EDT）之后结算。
+        private const val ACTION_NAME = "action"
+        private const val ACTION_DEADLINE_MS = 30_000L
+        private const val ACTION_PROMPT_SUBMIT = "prompt_submit"
+        private const val ACTION_STOP = "stop"
+        private const val ACTION_PERMISSION_REPLY = "permission_reply"
+        private const val ACTION_QUESTION_REPLY = "question_reply"
+        private const val STAGE_RPC = "rpc"
+        private const val CAUSE_UNKNOWN = "unknown"
+        private const val CODE_OTHER = "other"
     }
 
     init {
@@ -383,24 +395,50 @@ class SessionController(
         val echoId = if (echo && data.kind == "prompt" && data.text.isNotBlank()) echoPrompt(data.text) else null
         val pending = sid?.let { CompletableDeferred(it) } ?: session()
         cs.launch {
+            // M12（B4）prompt_submit：意图已接收，进入发送协程即begin。begin必须在协程内
+            // 而非EDT：首prompt的open begin（B3）同在执行器先行记录，若在EDT并发begin会
+            // 触发recorder“争用即弃”（设计7.1，绝不阻塞），随机丢失其中一个start分母。
+            val operation = operations.begin(ACTION_NAME, ACTION_DEADLINE_MS, buildJsonObject {
+                put("action", ACTION_PROMPT_SUBMIT)
+            })
             try {
-                val id = pending.await() ?: return@launch
+                val id = pending.await()
+                if (id == null) {
+                    // disposed早退：结算cancelled而非success，分母不留悬空。
+                    operation.end(RESULT_CANCELLED, cause = CAUSE_USER)
+                    return@launch
+                }
                 send(id)
                 capture("Conversation Message", sessionProps(id) + mapOf("source" to data.source, "hasExistingSession" to data.exists.toString()) + props)
                 LOG.debug { "${ChatLogSummary.sid(id)} kind=${data.kind} dispatched=true" }
+                operation.end(RESULT_SUCCESS, STAGE_UI)
+            } catch (e: CancellationException) {
+                operation.end(RESULT_CANCELLED, STAGE_RPC, CAUSE_USER)
+                throw e
             } catch (e: Exception) {
                 capture("Session Error", sessionProps(sid ?: ref?.key ?: data.start) + mapOf("context" to data.kind, "errorClass" to e::class.java.name))
                 LOG.warn("${ChatLogSummary.sid(sid ?: ref?.key ?: data.start)} kind=${data.kind} dir=${ChatLogSummary.dir(directory)} failed message=${e.message}", e)
-                edt {
-                    if (disposed) return@edt
-                    echoId?.let(::rollbackEcho)
-                    val msg = e.message ?: KiloBundle.message("session.error.prompt")
-                    updateModel {
-                        model.setState(SessionState.Error(msg))
-                    }
-                }
+                edt { dispatchSendFailed(echoId, operation, e) }
             }
         }
+    }
+
+    /**
+     * dispatch发送失败恢复（EDT，嵌入既有catch的状态恢复逻辑）：回滚echo气泡并呈现错误状态，
+     * 恢复完成后结算failure；disposed早退结算cancelled而非failure（分母不留悬空错误归因）。
+     */
+    @RequiresEdt
+    private fun dispatchSendFailed(echoId: String?, operation: Operation, e: Exception) {
+        if (disposed) {
+            operation.end(RESULT_CANCELLED, cause = CAUSE_USER)
+            return
+        }
+        echoId?.let(::rollbackEcho)
+        val msg = e.message ?: KiloBundle.message("session.error.prompt")
+        updateModel {
+            model.setState(SessionState.Error(msg))
+        }
+        operation.end(RESULT_FAILURE, STAGE_RPC, CAUSE_UNKNOWN, CODE_OTHER)
     }
 
     /**
@@ -518,6 +556,10 @@ class SessionController(
             return
         }
         val id = sid ?: return
+        // M12（B4）stop：点击停止即begin；success在请求成功且对应状态更新（EDT）后结算。
+        val operation = operations.begin(ACTION_NAME, ACTION_DEADLINE_MS, buildJsonObject {
+            put("action", ACTION_STOP)
+        })
         updateModel { (childIds + id).forEach(::purgePending) }
         capture("Session Stop Clicked", sessionProps(id))
         cs.launch {
@@ -525,22 +567,31 @@ class SessionController(
                 sessions.abort(id, directory)
                 capture("Session Stopped", sessionProps(id))
                 LOG.debug { "${ChatLogSummary.sid(id)} kind=abort ok=true" }
+            } catch (e: CancellationException) {
+                operation.end(RESULT_CANCELLED, STAGE_RPC, CAUSE_USER)
+                throw e
             } catch (e: Exception) {
                 capture("Session Error", sessionProps(id) + mapOf("context" to "abort", "errorClass" to e::class.java.name))
                 LOG.warn("${ChatLogSummary.sid(id)} kind=abort dir=${ChatLogSummary.dir(directory)} failed message=${e.message}", e)
+                operation.end(RESULT_FAILURE, STAGE_RPC, CAUSE_UNKNOWN, CODE_OTHER)
             } finally {
                 // A stop click must always land visually. After a cs-cloud stop/restart the daemon
                 // may have lost the run, so no session.idle/turn.close event will ever arrive and
                 // the spinner would spin forever. If a run really is still streaming server-side,
                 // the next turn.open/part event flips the state back to Busy.
                 edt {
-                    if (disposed || sid != id) return@edt
+                    if (disposed || sid != id) {
+                        // disposed/sid不匹配early return：结算cancelled而非success。
+                        if (!operation.isSettled) operation.end(RESULT_CANCELLED, cause = CAUSE_USER)
+                        return@edt
+                    }
                     updateModel {
                         val state = model.state
                         if (state is SessionState.Busy || state is SessionState.Retry || state is SessionState.Offline) {
                             model.setState(SessionState.Idle)
                         }
                     }
+                    if (!operation.isSettled) operation.end(RESULT_SUCCESS, STAGE_UI)
                 }
             }
         }
@@ -892,6 +943,11 @@ class SessionController(
     fun replyPermission(requestId: String, reply: PermissionReplyDto, rules: PermissionAlwaysRulesDto? = null) {
         assertEdt()
         LOG.debug { "${ChatLogSummary.sid(sid ?: ref?.key ?: "pending")} kind=permission rid=$requestId reply=${reply.reply}" }
+        // M12（B4）permission_reply：提交权限决策即begin（自动批准路径不经此入口，不进分母）。
+        // 等待卡片状态更新已在EDT同步完成，success在回复被接收后结算。
+        val operation = operations.begin(ACTION_NAME, ACTION_DEADLINE_MS, buildJsonObject {
+            put("action", ACTION_PERMISSION_REPLY)
+        })
         val current = model.state as? SessionState.AwaitingPermission
         updatePermission(requestId, PermissionRequestState.RESPONDING)
         cs.launch {
@@ -910,6 +966,10 @@ class SessionController(
                     "diffCount" to (current?.permission?.meta?.fileDiffs?.size ?: 0).toString(),
                 ))
                 LOG.debug { "${ChatLogSummary.sid(sid ?: ref?.key ?: "pending")} kind=permission rid=$requestId ok=true" }
+                runEdt { operation.end(RESULT_SUCCESS, STAGE_UI) }
+            } catch (e: CancellationException) {
+                operation.end(RESULT_CANCELLED, STAGE_RPC, CAUSE_USER)
+                throw e
             } catch (e: Exception) {
                 capture("Session Error", sessionProps() + mapOf("context" to "permission", "errorClass" to e::class.java.name))
                 LOG.warn("${ChatLogSummary.sid(sid ?: ref?.key ?: "pending")} kind=permission rid=$requestId reply=${reply.reply} dir=${ChatLogSummary.dir(directory)} failed message=${e.message}", e)
@@ -919,6 +979,7 @@ class SessionController(
                         PermissionRequestState.ERROR,
                         e.message ?: KiloBundle.message("session.permission.error"),
                     )
+                    operation.end(RESULT_FAILURE, STAGE_RPC, CAUSE_UNKNOWN, CODE_OTHER)
                 }
             }
         }
@@ -1045,6 +1106,10 @@ class SessionController(
     fun replyQuestion(requestId: String, answers: QuestionReplyDto, options: List<List<String>> = answers.answers) {
         assertEdt()
         LOG.debug { "${ChatLogSummary.sid(sid ?: ref?.key ?: "pending")} kind=question rid=$requestId answers=${answers.answers.size}" }
+        // M12（B4）question_reply：提交答案即begin；success在回复被接收后结算。
+        val operation = operations.begin(ACTION_NAME, ACTION_DEADLINE_MS, buildJsonObject {
+            put("action", ACTION_QUESTION_REPLY)
+        })
         val current = model.state
         followup = if (current is SessionState.AwaitingQuestion
             && current.question.id == requestId
@@ -1062,9 +1127,14 @@ class SessionController(
                     "hasFollowupNewSession" to follow.toString(),
                 ))
                 LOG.debug { "${ChatLogSummary.sid(sid ?: ref?.key ?: "pending")} kind=question rid=$requestId ok=true" }
+                runEdt { operation.end(RESULT_SUCCESS, STAGE_UI) }
+            } catch (e: CancellationException) {
+                operation.end(RESULT_CANCELLED, STAGE_RPC, CAUSE_USER)
+                throw e
             } catch (e: Exception) {
                 edt { followup = null }
                 LOG.warn("${ChatLogSummary.sid(sid ?: ref?.key ?: "pending")} kind=question rid=$requestId answers=${answers.answers.size} dir=${ChatLogSummary.dir(directory)} failed message=${e.message}", e)
+                operation.end(RESULT_FAILURE, STAGE_RPC, CAUSE_UNKNOWN, CODE_OTHER)
             }
         }
     }

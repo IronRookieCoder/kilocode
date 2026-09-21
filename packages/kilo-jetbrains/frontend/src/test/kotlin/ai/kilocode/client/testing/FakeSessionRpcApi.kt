@@ -101,6 +101,9 @@ class FakeSessionRpcApi : KiloSessionRpcApi {
     var commandThrows: Exception? = null
     val prompts = mutableListOf<Triple<String, String, PromptDto>>()
     var promptThrows: Exception? = null
+
+    /** When set, [prompt] awaits it before recording, to model an in-flight send. */
+    var promptGate: CompletableDeferred<Unit>? = null
     val commands = mutableListOf<CommandCall>()
     val attachmentParts = mutableListOf<AttachmentCall>()
     val aborts = mutableListOf<Pair<String, String>>()
@@ -235,6 +238,7 @@ class FakeSessionRpcApi : KiloSessionRpcApi {
 
     override suspend fun prompt(id: String, directory: String, prompt: PromptDto) {
         assertNotEdt("prompt")
+        promptGate?.await()
         promptThrows?.let { throw it }
         prompts.add(Triple(id, directory, prompt))
     }
@@ -245,8 +249,15 @@ class FakeSessionRpcApi : KiloSessionRpcApi {
         commands.add(CommandCall(id, directory, command, arguments, prompt))
     }
 
+    var abortThrows: Exception? = null
+
+    /** When set, [abort] awaits it before recording, to model an in-flight stop. */
+    var abortGate: CompletableDeferred<Unit>? = null
+
     override suspend fun abort(id: String, directory: String) {
         assertNotEdt("abort")
+        abortGate?.await()
+        abortThrows?.let { throw it }
         aborts.add(id to directory)
     }
 
@@ -329,8 +340,11 @@ class FakeSessionRpcApi : KiloSessionRpcApi {
         permissionRulesSaved.add(Triple(requestId, directory, rules))
     }
 
+    var questionReplyThrows: Exception? = null
+
     override suspend fun replyQuestion(requestId: String, directory: String, answers: QuestionReplyDto) {
         assertNotEdt("replyQuestion")
+        questionReplyThrows?.let { throw it }
         questionReplies.add(Triple(requestId, directory, answers))
     }
 
