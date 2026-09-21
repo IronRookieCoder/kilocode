@@ -8,6 +8,7 @@ import ai.kilocode.client.app.KiloChatAccess
 import ai.kilocode.client.session.SessionManager
 import ai.kilocode.client.session.SessionSidePanelManager
 import ai.kilocode.client.stability.ReadinessWatch
+import ai.kilocode.client.stability.VisibilityService
 import ai.kilocode.stability.Faults
 import ai.kilocode.stability.Operations
 import ai.kilocode.client.agentManager.worktree.KiloWorktreeService
@@ -59,6 +60,8 @@ class KiloToolWindowFactory : ToolWindowFactory, DumbAware {
         // Shared stability collector entry (frontend side): idempotent start, async init,
         // mode/side always derived from the platform run-mode source (never from this call).
         runCatching { service<StabilityService>().start("frontend") }
+        // M13 availability observation (B5): one project service aggregates all plugin panels.
+        project.service<VisibilityService>().attach(toolWindow)
         project.service<KiloToolWindowSetupService>().create(toolWindow)
     }
 }
