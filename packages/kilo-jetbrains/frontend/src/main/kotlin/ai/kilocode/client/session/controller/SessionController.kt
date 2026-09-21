@@ -1564,7 +1564,6 @@ class SessionController(
         opening = null
     }
 
-    @RequiresEdt
     /**
      * M18（C2）session.dispose_risk（指标"活跃会话是否遇到服务释放"）：前端唯一可观测的
      * daemon端global.disposed/server_instance_disposed信号是app状态**无中间断连状态**的
@@ -1576,6 +1575,8 @@ class SessionController(
      * 在有限缓存内按"连接代际+来源+状态转换"去重——本代际是本地READY回合计数，绝不证明
      * daemon重启，也不做payload内容hash；dispose清理缓存。仅critical通道最小计数，
      * metrics-only出口由Dictionary收窄。
+     *
+     * 线程：在app状态采集协程（cs）上执行，绝不标注@RequiresEdt（与本文件EDT边界无关）。
      */
     private fun observeDisposeRisk(status: KiloAppStatusDto) {
         val previous = lastAppStatus
@@ -1622,6 +1623,7 @@ class SessionController(
         else -> false
     }
 
+    @RequiresEdt
     private fun subscribeEvents() {
         assertEdt()
         val id = sid ?: return
