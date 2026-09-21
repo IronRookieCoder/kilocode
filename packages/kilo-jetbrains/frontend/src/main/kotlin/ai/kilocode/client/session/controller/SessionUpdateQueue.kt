@@ -1,5 +1,7 @@
 package ai.kilocode.client.session.controller
 
+import ai.kilocode.client.stability.RENDER_COMPONENT_FRONTEND
+import ai.kilocode.client.stability.Render
 import ai.kilocode.client.util.edt
 import ai.kilocode.log.ChatLogSummary
 import ai.kilocode.log.KiloLog
@@ -28,6 +30,9 @@ internal class SessionUpdateQueue(
     hold: Boolean,
     private val hidden: (ChatEventDto) -> Boolean = { false },
     private val sid: () -> String,
+    // M21（C4）：合并批次渲染计时只在这一层包住fire（queue XOR controller，一个批次绝不
+    // 重复计时）；null表示不观测（行为与接线前完全一致）。
+    private val render: Render? = null,
 ) : Disposable {
     companion object {
         private val LOG = KiloLog.create(SessionUpdateQueue::class.java)
@@ -120,7 +125,11 @@ internal class SessionUpdateQueue(
         val out = if (condense) condenser.condense(batch) else batch
         last = now
         LOG.debug { "${ChatLogSummary.sid(sid())} flush source=$source forced=$forced pending=$before condensed=${out.size} saved=${before - out.size} types=$types" }
-        fire(out)
+        // M21（C4）：计时恰好包住一次合并批次的真实fire——开始于合并后批次进入模型处理，
+        // 结束于同步模型/组件监听更新完成；150ms批等待发生在进入flushNow之前，不在计时内，
+        // repaint排队也不算像素绘制完成。空批次在上面提前返回，不产出样本。
+        val timing = render
+        if (timing == null) fire(out) else timing.apply(out.size, RENDER_COMPONENT_FRONTEND) { fire(out) }
     }
 
     private fun onVisible(show: Boolean) {

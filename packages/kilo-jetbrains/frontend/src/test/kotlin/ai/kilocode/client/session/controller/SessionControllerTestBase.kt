@@ -3,6 +3,7 @@ package ai.kilocode.client.session.controller
 import ai.kilocode.client.util.edtWait
 import ai.kilocode.client.app.KiloAppService
 import ai.kilocode.client.app.KiloSessionService
+import ai.kilocode.client.stability.Render
 import ai.kilocode.client.session.model.SessionModel
 import ai.kilocode.client.session.model.SessionModelEvent
 import ai.kilocode.client.session.model.SessionState
@@ -197,6 +198,7 @@ abstract class SessionControllerTestBase : BasePlatformTestCase() {
             log = log ?: KiloLog.create(SessionController::class.java),
             echo = echo,
             operations = fixture.operations,
+            render = Render(fixture.clock, fixture.recorder),
         )
         controllers.add(m)
         roots[m] = root

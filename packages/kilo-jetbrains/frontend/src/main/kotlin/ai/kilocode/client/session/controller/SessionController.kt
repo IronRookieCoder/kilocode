@@ -67,6 +67,8 @@ import com.intellij.openapi.actionSystem.ActionPlaces
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.actionSystem.IdeActions
 import com.intellij.openapi.components.service
+import ai.kilocode.client.stability.FrontendClock
+import ai.kilocode.client.stability.Render
 import ai.kilocode.stability.Draft
 import ai.kilocode.stability.Operation
 import ai.kilocode.stability.Operations
@@ -127,6 +129,10 @@ class SessionController(
   // 事件；B1先接入口，全部真实构造点沿用默认值，测试基座经fixture注入同一recorder。
   @Suppress("UnusedPrivateMember")
   private val operations: Operations = service<StabilityService>().operations,
+  // M21（C4）：合并批次渲染耗时采样。Render只在queue层包住fire（一个批次只在一层计时）；
+  // rate默认1.0（受控策略接入前不采样剔除，调整必须保留sample_rate字段）；测试基座经
+  // fixture注入同一recorder。
+  private val render: Render = Render(FrontendClock, service<StabilityService>().recorder),
 ) : Disposable {
 
     private data class OrganizationTarget(val org: String?)
@@ -235,7 +241,9 @@ class SessionController(
       condense,
       ref != null,
       ::handleHidden,
-    ) { sid ?: ref?.key ?: "pending" }
+      { sid ?: ref?.key ?: "pending" },
+      render,
+    )
 
     private var disposed = false
     private var enhancement = 0L
