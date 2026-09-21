@@ -3,6 +3,7 @@ package ai.kilocode.client.session.controller
 import ai.kilocode.client.app.KiloAppService
 import ai.kilocode.client.app.KiloSessionService
 import ai.kilocode.client.app.Workspace
+import ai.kilocode.client.stability.edtViolationDraft
 import ai.kilocode.client.plugin.KiloBundle
 import ai.kilocode.client.session.model.AgentItem
 import ai.kilocode.client.session.model.ModelLimitItem
@@ -87,6 +88,7 @@ import kotlinx.serialization.json.put
 import java.awt.Component
 import java.nio.file.Path
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Session lifecycle orchestrator for a single session.
@@ -132,6 +134,9 @@ class SessionController(
     private data class Pref(val agent: String?, val model: String?, val variants: List<String>, val variant: String?, val reset: Boolean)
     private data class RevertOp(val key: Long)
 
+    /** M20（C3）：assertEdt违规每实例只记录一次（固定token，重复无增量信息）。 */
+    private val edtViolationReported = AtomicBoolean()
+
     /**
      * M11恢复观测的token绑定（B3）：[token]是begin时的[SessionLoadState.Loading]令牌，全部
      * end只允许经与当前[restoring]的token比对后结算，旧token的迟到结果一律忽略；[stage]
@@ -172,6 +177,9 @@ class SessionController(
         // M11（metrics 2.3）：恢复和普通交互30秒观测截止；stage/result/cause为采集词表受控值。
         private const val SESSION_OPEN = "session.open"
         private const val SESSION_RESTORE = "session.restore"
+        // M20（C3）：edt.violation的已登记操作token（字典API_GROUPS的session组，与rpc api_group同词表），
+        // 绝不使用自由文本或由调用栈推导。
+        private const val EDT_VIOLATION_OPERATION = "session"
         private const val RESTORE_DEADLINE_MS = 30_000L
         private const val RESULT_SUCCESS = "success"
         private const val RESULT_FAILURE = "failure"
@@ -2994,7 +3002,14 @@ class SessionController(
     }
 
     private fun assertEdt() {
-        check(ApplicationManager.getApplication().isDispatchThread) { "SessionController state must be accessed on EDT" }
+        val onEdt = ApplicationManager.getApplication().isDispatchThread
+        // M20（C3）：插件自有显式线程断言边界记录edt.violation（唯一接线点；绝不全局替换
+        // 平台线程检查，也绝不由edt.delay时长推断违规）。固定受控token，断言原文不入事实；
+        // check照常抛出绝不吞掉。每实例至多一条——固定token重复记录无增量信息，热路径不刷队列。
+        if (!onEdt && edtViolationReported.compareAndSet(false, true)) {
+            operations.record(edtViolationDraft(EDT_VIOLATION_OPERATION))
+        }
+        check(onEdt) { "SessionController state must be accessed on EDT" }
     }
 
     private fun runEdt(block: () -> Unit) {

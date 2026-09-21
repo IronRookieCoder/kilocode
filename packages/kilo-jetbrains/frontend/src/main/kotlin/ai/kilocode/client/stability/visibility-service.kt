@@ -37,8 +37,8 @@ private const val STATE_ERROR = "error"
 /** 纳秒到毫秒换算（mono时钟口径与shared一致）。 */
 private const val NANOS_PER_MS = 1_000_000L
 
-/** 前端生产时钟（wall=UTC毫秒、mono=单调毫秒）；shared的SystemClock是internal，前端独立定义。 */
-private object FrontendClock : Clock {
+/** 前端生产时钟（wall=UTC毫秒、mono=单调毫秒）；shared的SystemClock是internal，前端独立定义。C3起probe.kt共用。 */
+internal object FrontendClock : Clock {
     override fun wall(): Long = System.currentTimeMillis()
     override fun mono(): Long = System.nanoTime() / NANOS_PER_MS
 }
@@ -77,6 +77,10 @@ private class Event(
  * EDT只读UI快照并入队（trySend非阻塞），由[cs]上**单一**consumer按FIFO顺序apply并
  * record——区间状态只在consumer线程演进，EDT绝不触碰区间。
  *
+ * M20（C3）：本服务同时是[EdtProbeService]（单JVM探针所有者）的项目贡献方——consumer
+ * 把"本项目任一面板可见且IDE前台"的并集快照推给它，项目间并集决定唯一探针的启停；
+ * 失焦/pause/dispose撤除贡献使在途样本作废并更换observation_id。
+ *
  * 前台初值：attach由工具窗创建（用户驱动的UI事件）触发，此刻IDE几乎总在前台，故初始
  * 观察前台=true，并在第一个applicationDeactivated自我纠正（该事件一到达即关闭在途区间）。
  * 每[tickPeriodMs]一次tick：EDT读快照、后台切片（设计6.2"每30秒及切换时记录不重叠区间"）。
@@ -93,6 +97,7 @@ internal class VisibilityService(
     private val stateSource: () -> String,
     private val tickPeriodMs: Long,
     private val workspaceId: String,
+    private val probeHost: EdtProbeService? = null,
 ) : Disposable {
 
     /** Platform constructor — resolves collaborators from the service container. */
@@ -104,6 +109,7 @@ internal class VisibilityService(
         stateSource = ::currentAvailabilityState,
         tickPeriodMs = TICK_PERIOD_MS,
         workspaceId = newWorkspaceId(),
+        probeHost = service<EdtProbeService>(),
     )
 
     private val availability = Availability(clock) { draft -> operations()?.record(draft) }
@@ -114,6 +120,9 @@ internal class VisibilityService(
     private val hierarchyListeners = mutableListOf<Pair<Component, HierarchyListener>>()
 
     @Volatile private var foreground = true
+
+    /** dispose后拒绝迟到的consumer事件重新打开探针贡献（项目关闭后贡献只能撤除）。 */
+    @Volatile private var disposed = false
 
     init {
         project.messageBus.connect(this).subscribe(
@@ -168,8 +177,11 @@ internal class VisibilityService(
     /**
      * 挂起/休眠/调度中断观察起点重建（C3按平台信号接线）：在途区间的真实闭合时刻不可
      * 确认，整段丢弃（不产出事实）；经同一FIFO队列生效，先于任何后续快照。
+     * C3：同时撤除M20探针贡献（本项目暂停即并集可能关闭）——当前pending按unknown作废
+     * 并更换observation_id（平台休眠通知经G1确认前不用suspended，休眠归unknown）。
      */
     fun pause() {
+        probeHost?.setActive(this, false)
         events.trySend(Event(visible = false, foreground = false, state = STATE_CONNECTING, tick = false, pause = true))
     }
 
@@ -194,6 +206,10 @@ internal class VisibilityService(
     }
 
     override fun dispose() {
+        disposed = true
+        // C3：项目关闭即撤除探针贡献；若它曾是最后一个活跃贡献，JVM探针随之关闭
+        // （pending按unknown作废并轮换区间），多项目时任一存活项目保持探针开启。
+        probeHost?.setActive(this, false)
         events.close()
         hierarchyListeners.forEach { (component, listener) -> component.removeHierarchyListener(listener) }
         hierarchyListeners.clear()
@@ -223,6 +239,8 @@ internal class VisibilityService(
             return
         }
         availability.update(workspaceId, event.visible, event.foreground, event.state)
+        // C3：本项目"任一面板可见且IDE前台"作为M20探针贡献推送（JVM级并集见EdtProbeService）。
+        if (!disposed) probeHost?.setActive(this, event.visible && event.foreground)
         if (event.tick) availability.tick()
     }
 }
@@ -238,8 +256,8 @@ private fun currentAvailabilityState(): String {
     }
 }
 
-/** 平台默认采集入口：每次emit时定位，绝不缓存其他service实例（P0结构约定）。 */
-private fun defaultOperations(): Operations? =
+/** 平台默认采集入口：每次emit时定位，绝不缓存其他service实例（P0结构约定）。C3起probe.kt共用。 */
+internal fun defaultOperations(): Operations? =
     runCatching { serviceIfCreated<StabilityService>()?.operations }.getOrNull()
 
 /** 本观察上下文的随机workspace ID（32位hex；绝不携带项目路径）。 */
