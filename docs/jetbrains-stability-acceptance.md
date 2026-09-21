@@ -64,8 +64,8 @@
 | .ready 淘汰与认领竞争 | 未通过 | RetentionTest：最旧 diagnostic→critical 淘汰、锁文件绝不 unlink/recreate、`.claimed`/`.done` 永不触碰；WriterTest：同根第二 writer DISABLED | Go consumer 认领与插件淘汰的真实跨语言竞争（锁内只有一方成功） |
 | writer 淘汰与 consumer 救援并发 | 未通过 | RetentionTest：`own source sweep takes exchange only while the writer lock is already held`（writer→exchange 顺序） | Go consumer 不持 exchange 等 writer 的并发救援实测 |
 | 磁盘满、队列满、异常风暴 | 未通过 | QueueTest 19 条（2000 条/4MiB 先到、critical 预留 400 条/20% 字节、驱逐最老 diagnostic、争用即弃不变量）；R9 存储满准入闸（quota 计数、outbox_full 状态）；RetentionTest 10MiB 淘汰；record() 全路径无阻塞无 I/O | daemon 侧容量预算、真实磁盘满与异常风暴的全链路实测 |
-| 版本升级、账户切换且插件尚未刷新策略 | **PASS（插件范围）** | PolicyTest：epoch 更替永久退役、同账户重登不复活、时钟回跳防护、30s 轮询生效；ProducerTest：撤销结束 run 不伪造 shutdown、重开新 run_id；A5 Coverage reason 闭集 | 服务端归属审计与外部凭据切换 e2e（第 10 节 6、7 项） |
-| daemon 不可用、IDE 多次重启并关闭采集 | 未通过 | RetentionTest：死亡 producer 过期文件清理、身份不明跳过、孤儿登记移除；ProducerTest：`collection stays off without permit` | 真实 daemon 不可用 + 多次 IDE 重启的长周期实测 |
+| 版本升级、账户切换且插件尚未刷新策略 | **PASS（插件范围）** | PolicyTest：epoch 更替永久退役、同账户重登不复活、时钟回跳防护、30s 轮询生效；ProducerTest：`revocation ends the run without faking shutdown and re-enable starts a new run`；A5 Coverage reason 闭集 | 服务端归属审计与外部凭据切换 e2e（第 10 节 6、7 项） |
+| daemon 不可用、IDE 多次重启并关闭采集 | 未通过 | RetentionTest：死亡 producer 过期文件清理、身份不明跳过、孤儿登记移除；ProducerTest：`collection stays off without permit and activates on the first permit` | 真实 daemon 不可用 + 多次 IDE 重启的长周期实测 |
 | Split Mode 前端无消费器 | 未通过 | ProducerTest：mode/side 唯一来源平台 IdeProductMode（split/frontend、split/backend）；B5 设置页覆盖标签闭集（前端未接入/未授权） | Split Mode 真实两机部署验证（前端覆盖缺口不能宣称完整） |
 | 输入含路径/Token/异常消息 | **PASS（插件范围）** | FactTest：路径分隔符/控制字符/UTF-8 字节边界/上下文闭集拒绝；FaultTest：固定模板+受控枚举、frames 白名单、verbatim 限频用例无 "secret"/"alice"；WriterTest：落盘即 UTF-8 无 BOM NDJSON | 上传请求不含机密的出口审计（插件不实现上报，归外部 Sender，第 10 节 3、4 项） |
 | Windows/Linux/macOS | 未通过 | WriterTest（Windows/NTFS 实测）：ACL 配置后逐条比对核验（仅当前用户+SYSTEM）、ATOMIC_MOVE、0700/0600 POSIX 分支同实现 | Linux/macOS 实机矩阵（原子封存、锁、救援、清理、目录越界） |
@@ -130,9 +130,9 @@
 | 约束 | 覆盖测试（本分支，实际运行通过） |
 |---|---|
 | 队列 2000 条且 4MiB 先到者为准；critical 预留 400 条与 20% 字节 | QueueTest：`1600 diagnostics leave room for 400 critical records`、多字节先触字节限、持续 critical 只驱逐 diagnostic、超总容量驱逐后仍拒 |
-| 每 producer 未交接 10MiB、保留 24 小时 | RetentionTest：`own source quota evicts oldest diagnostic ready before critical`、`expired open and ready of a dead producer are swept while fresh files stay`、`expired claimed and done files are never touched` |
+| 每 producer 未交接 10MiB、保留 24 小时 | RetentionTest：`own source quota evicts oldest diagnostic ready before critical`、`expired open and ready of a dead producer are swept while fresh files stay`、`expired claimed and done files are never touched by retention` |
 | 单记录 32KiB、message 摘要 512 字节 | FactTest：UTF-8 字节口径 512/128/32KiB 边界、frames≤5；WriterTest：落盘前真实编码核对（超限丢弃计数） |
-| outbox 满拒绝新写入并计数（7.4） | QueueTest R9 三条（storage-full 闸优先级 closed>full>capacity、quota 计数不入 buffer_full）；ProducerTest outbox_full 状态可观测 |
+| outbox 满拒绝新写入并计数（7.4） | 准入闸行为：QueueTest R9 三条——`storage full gate drops with quota reason and recovers when cleared`、`closed admission wins over the storage full gate`、`storage full gate beats queue capacity`（closed>full>capacity 优先级、quota 计数不入 buffer_full）。状态面：stability-service.kt 状态机（REASON_OUTBOX_FULL：预算不足置 outbox_full、预算恢复复开准入、随状态发布）与 KiloSettingsConfigurableTest 内部 reason token 闭集用例（outbox_full 不得泄漏为对外标签）。注：outbox_full 置位/恢复的状态转换本身无直接测试断言（经预算淘汰与 sweep 接线间接覆盖） |
 | 双出口独立预算（服务端侧 metrics/logs 各自配额） | 未通过——依赖第 10 节 3、4 项 |
 
 ## 9. 灰度状态
