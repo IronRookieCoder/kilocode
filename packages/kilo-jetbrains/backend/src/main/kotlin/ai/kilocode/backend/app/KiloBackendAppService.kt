@@ -1011,11 +1011,13 @@ class KiloBackendAppService private constructor(
     }
 
     private fun refreshWorkspaces(event: SseEvent) {
+        // M23（C5）：采集入口来源（StabilityService；采集不可用时null，业务照常）。
+        val operations = runCatching { service<StabilityService>().operations }.getOrNull()
         ProjectManager.getInstance().openProjects
             .filterNot { it.isDefault }
             .forEach { project ->
                 val root = project.basePath ?: return@forEach
-                KiloBackendWorkspaceRefresh(project, root, log).handle(event)
+                KiloBackendWorkspaceRefresh(project, root, log, operations).handle(event)
             }
     }
 

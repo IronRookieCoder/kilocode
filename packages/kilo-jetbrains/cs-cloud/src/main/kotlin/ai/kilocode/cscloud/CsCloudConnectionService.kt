@@ -92,7 +92,7 @@ class CsCloudConnectionService(
     private val observation: ConnectionObservation? = operations?.let(::ConnectionObservation)
 
     private val bridge: Lazy<CsCloudMcpBridge> = lazy {
-        CsCloudMcpBridge(cs, { endpoint }, { clients?.apiClient }, { connectionEpoch }, IdeMcpSessionFactory.EP.extensionList.singleOrNull(), log)
+        CsCloudMcpBridge(cs, { endpoint }, { clients?.apiClient }, { connectionEpoch }, IdeMcpSessionFactory.EP.extensionList.singleOrNull(), log, operations = operations)
     }
     private val _state = MutableStateFlow<ConnectionState>(ConnectionState.Disconnected)
     private val _events = MutableSharedFlow<SseEvent>(extraBufferCapacity = 128)

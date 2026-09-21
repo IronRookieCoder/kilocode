@@ -72,6 +72,7 @@ import ai.kilocode.client.stability.Render
 import ai.kilocode.stability.Draft
 import ai.kilocode.stability.Operation
 import ai.kilocode.stability.Operations
+import ai.kilocode.stability.Resources
 import ai.kilocode.stability.StabilityService
 import ai.kilocode.log.ChatLogSummary
 import ai.kilocode.log.KiloLog
@@ -133,6 +134,10 @@ class SessionController(
   // rate默认1.0（受控策略接入前不采样剔除，调整必须保留sample_rate字段）；测试基座经
   // fixture注入同一recorder。
   private val render: Render = Render(FrontendClock, service<StabilityService>().recorder),
+  // M24（C5）：资源token绑定在真实所有者——controller构造acquire、dispose释放；订阅token在
+  // 每个真正启动的订阅流onStart acquire、finally close（取消订阅后新建用新token）。
+  // 测试基座经fixture注入同一实例。
+  private val resources: Resources = service<StabilityService>().resources,
 ) : Disposable {
 
     private data class OrganizationTarget(val org: String?)
@@ -142,6 +147,13 @@ class SessionController(
 
     /** M20（C3）：assertEdt违规每实例只记录一次（固定token，重复无增量信息）。 */
     private val edtViolationReported = AtomicBoolean()
+
+    /**
+     * M24（C5）：controller资源token——构造即acquire（真实所有者），[dispose]释放。
+     * token的close幂等（Resources保证首次close才减计数），重复dispose绝不负数；
+     * listener注册不acquire，绝不重复计入controller。
+     */
+    private val controllerToken = resources.acquire(RESOURCE_CONTROLLER)
 
     /**
      * M11恢复观测的token绑定（B3）：[token]是begin时的[SessionLoadState.Loading]令牌，全部
@@ -217,6 +229,10 @@ class SessionController(
         private const val DISPOSE_SOURCE = "global_disposed"
         private const val DISPOSE_TRANSITION = "ready_loading"
         private const val DISPOSE_RISK_CACHE_MAX = 32
+
+        // M24（C5）：资源kind闭集（字典RESOURCES逐字），token绑定真实所有者。
+        private const val RESOURCE_CONTROLLER = "controller"
+        private const val RESOURCE_SUBSCRIPTION = "subscription"
     }
 
     init {
@@ -1647,9 +1663,13 @@ class SessionController(
         cancelSubscriptions()
         subscriptionUp = false
         eventJob = cs.launch {
+            // M24（C5）：订阅token绑定真正启动的流——onStart（采集器真正进入collect）acquire，
+            // finally close。取消订阅后新建的订阅是新token；未启动即取消则token为null无计数。
+            var subscriptionToken: AutoCloseable? = null
             try {
                 sessions.events(id, directory)
                     .onStart {
+                        subscriptionToken = resources.acquire(RESOURCE_SUBSCRIPTION)
                         // 订阅已建立信号（M11）：采集器真正进入collect才置位，不是调用
                         // subscribeEvents即算；此后open/restore的success才允许结算。
                         edt {
@@ -1678,6 +1698,7 @@ class SessionController(
                 }
                 log.warn("${ChatLogSummary.sid(id)} kind=subscription route=controller-events failed message=${e.message}", e)
             } finally {
+                subscriptionToken?.close()
                 LOG.debug { "${ChatLogSummary.sid(id)} kind=subscription subscribe=false" }
             }
         }
@@ -1689,17 +1710,22 @@ class SessionController(
         if (childJobs.containsKey(child)) return
         LOG.debug { "${ChatLogSummary.sid(sid ?: "pending")} kind=child-subscription child=$child subscribe=true" }
         val job = cs.launch {
+            // M24（C5）：子会话订阅与主订阅同语义——真正启动acquire、finally close、新订阅新token。
+            var subscriptionToken: AutoCloseable? = null
             try {
-                sessions.events(child, directory).collect { event ->
-                    if (!isChildEvent(event, child)) return@collect
-                    LOG.debug { "${ChatLogSummary.sid(sid ?: "pending")} kind=child-event child=$child ${ChatLogSummary.eventBody(event)}" }
-                    updates.enqueue(event)
-                }
+                sessions.events(child, directory)
+                    .onStart { subscriptionToken = resources.acquire(RESOURCE_SUBSCRIPTION) }
+                    .collect { event ->
+                        if (!isChildEvent(event, child)) return@collect
+                        LOG.debug { "${ChatLogSummary.sid(sid ?: "pending")} kind=child-event child=$child ${ChatLogSummary.eventBody(event)}" }
+                        updates.enqueue(event)
+                    }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
                 log.warn("${ChatLogSummary.sid(sid ?: "pending")} kind=child-subscription child=$child failed message=${e.message}", e)
             } finally {
+                subscriptionToken?.close()
                 LOG.debug { "${ChatLogSummary.sid(sid ?: "pending")} kind=child-subscription child=$child subscribe=false" }
             }
         }
@@ -3033,6 +3059,8 @@ class SessionController(
         runEdt {
             if (disposed) return@runEdt
             disposed = true
+            // M24（C5）：controller token在真实dispose释放（首次close才减计数，重复dispose不负数）。
+            controllerToken.close()
             connectionDelay.dispose()
             cancelSubscriptions()
             // M18（C2）：关闭会话清理释放风险去重缓存（正常退出不产事实，缓存不跨生命周期）。

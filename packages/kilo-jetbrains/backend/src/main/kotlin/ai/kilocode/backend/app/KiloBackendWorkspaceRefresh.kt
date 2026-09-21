@@ -2,6 +2,8 @@
 package ai.kilocode.backend.app
 
 import ai.kilocode.log.KiloLog
+import ai.kilocode.stability.Operation
+import ai.kilocode.stability.Operations
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.application.ModalityState
 import com.intellij.openapi.project.Project
@@ -9,10 +11,54 @@ import com.intellij.openapi.vfs.LocalFileSystem
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.put
 import java.nio.file.Files
 import java.nio.file.Path
+
+internal const val IDE_OPERATION_NAME = "ide.operation"
+internal const val IDE_OPERATION_DEADLINE_MS = 30_000L
+
+private const val OPERATION_VFS_REFRESH = "vfs_refresh"
+private const val STAGE_REFRESH = "refresh"
+private const val RESULT_SUCCESS = "success"
+private const val RESULT_FAILURE = "failure"
+private const val RESULT_CANCELLED = "cancelled"
+private const val CAUSE_IDE = "ide"
+private const val CAUSE_ENVIRONMENT = "environment"
+private const val CAUSE_USER = "user"
+private const val CODE_REFRESH = "refresh_failed"
+private const val CODE_PATH_NOT_FOUND = "path_not_found"
+
+/**
+ * M23 vfs_refresh观测句柄（C5）：一次已调度的路径刷新对应一个操作。begin在真实处理器内部的
+ * 调度点（前端调用方与本类绝不双计）；end只在postRunnable完成信号——`file.refresh`在EDT回调里
+ * 真正完成后结算success，绝不在refresh(true,...)调度返回时提前success。异步链路上的早退
+ * （项目已关闭→cancelled；路径与工作区都未找到→failure=environment）与真实刷新异常
+ * （→failure=ide）各自结算唯一终态（Operation的CAS保证晚到信号不二次end）。
+ * operations为null（采集未接入）时全程no-op，业务照常。
+ */
+internal class VfsRefreshObservation(operations: Operations?) {
+    private val operation: Operation? = operations?.begin(
+        IDE_OPERATION_NAME,
+        IDE_OPERATION_DEADLINE_MS,
+        buildJsonObject { put("operation", OPERATION_VFS_REFRESH) },
+    )
+
+    fun succeeded() {
+        operation?.end(RESULT_SUCCESS, STAGE_REFRESH)
+    }
+
+    fun failed(cause: String, code: String) {
+        operation?.end(RESULT_FAILURE, STAGE_REFRESH, cause, code)
+    }
+
+    fun cancelled() {
+        operation?.end(RESULT_CANCELLED, STAGE_REFRESH, CAUSE_USER)
+    }
+}
 
 /**
  * Refreshes IntelliJ's VFS after cs-cloud writes files in the active project.
@@ -25,6 +71,8 @@ class KiloBackendWorkspaceRefresh(
     private val project: Project,
     workspaceRoot: String,
     private val log: KiloLog = KiloLog.create(KiloBackendWorkspaceRefresh::class.java),
+    // M23（C5）：采集入口来源（生产为StabilityService，测试注入fixture）；null时本次不记录。
+    private val operations: Operations? = null,
 ) {
     companion object {
         internal fun paths(root: Path, event: SseEvent): List<Path> {
@@ -78,23 +126,36 @@ class KiloBackendWorkspaceRefresh(
     fun onEvent(event: SseEvent) = handle(event)
 
     private fun schedule(path: Path) {
+        // M23（C5）：调度点开一个vfs_refresh操作，postRunnable完成信号结算（见VfsRefreshObservation）。
+        val refresh = VfsRefreshObservation(operations)
         ApplicationManager.getApplication().executeOnPooledThread {
-            if (project.isDisposed) return@executeOnPooledThread
+            if (project.isDisposed) {
+                refresh.cancelled()
+                return@executeOnPooledThread
+            }
             try {
                 val fs = LocalFileSystem.getInstance()
                 val file = fs.refreshAndFindFileByPath(path.toString())
                     ?: fs.refreshAndFindFileByPath(root.toString())
                 if (file == null) {
+                    refresh.failed(CAUSE_ENVIRONMENT, CODE_PATH_NOT_FOUND)
                     log.debug { "VFS refresh skipped: path and workspace not found path=$path" }
                     return@executeOnPooledThread
                 }
                 ApplicationManager.getApplication().invokeLater({
-                    if (!project.isDisposed) {
-                        runCatching { file.refresh(true, true) }
-                            .onFailure { log.warn("VFS refresh failed path=$path", it) }
+                    if (project.isDisposed) {
+                        refresh.cancelled()
+                        return@invokeLater
                     }
+                    runCatching { file.refresh(true, true) }
+                        .onSuccess { refresh.succeeded() }
+                        .onFailure {
+                            refresh.failed(CAUSE_IDE, CODE_REFRESH)
+                            log.warn("VFS refresh failed path=$path", it)
+                        }
                 }, ModalityState.nonModal())
             } catch (error: Exception) {
+                refresh.failed(CAUSE_IDE, CODE_REFRESH)
                 // VFS failures must not affect session/app state. They are actionable diagnostics
                 // for the log, while the next host event can still schedule another refresh.
                 log.warn("VFS refresh failed path=$path", error)

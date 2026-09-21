@@ -199,6 +199,7 @@ abstract class SessionControllerTestBase : BasePlatformTestCase() {
             echo = echo,
             operations = fixture.operations,
             render = Render(fixture.clock, fixture.recorder),
+            resources = fixture.resources,
         )
         controllers.add(m)
         roots[m] = root

@@ -1,12 +1,15 @@
 package ai.kilocode.client.vfs
 
 import ai.kilocode.client.util.edtWait
+import ai.kilocode.stability.Resources
+import ai.kilocode.stability.StabilityService
 import com.intellij.openapi.Disposable
 import com.intellij.openapi.components.service
 import com.intellij.openapi.fileEditor.FileEditorManager
 import com.intellij.openapi.project.Project
 import com.intellij.testFramework.fixtures.BasePlatformTestCase
 import com.intellij.util.ui.components.BorderLayoutPanel
+import java.nio.file.Files
 import javax.swing.JComponent
 
 @Suppress("UnstableApiUsage")
@@ -67,5 +70,43 @@ class KiloVfsManagerTest : BasePlatformTestCase() {
 
         override fun createContent(project: Project, file: KiloVirtualFile, parent: Disposable): JComponent =
             BorderLayoutPanel()
+    }
+
+    // ------ M24（C5）editor资源token：真实编辑器开/关回落基线，重复dispose不负数 ------
+
+    /** 真实临时项目文件：编辑器计数的路径指向真实存在的临时文件（内容不进入事实）。 */
+    private fun tempFileParams(n: Int): Map<String, String> {
+        val file = Files.createTempFile("kilo-vfs-lifecycle-$n", ".txt")
+        Files.writeString(file, "lifecycle $n")
+        file.toFile().deleteOnExit()
+        return mapOf("path" to file.toString().replace('\\', '/'))
+    }
+
+    fun `test open and close editors 100 times returns counts to baseline`() {
+        val vfs = project.service<KiloVfsManager>()
+        val resources = service<StabilityService>().resources
+        val baseline = resources.snapshot()
+
+        repeat(100) { n ->
+            val params = tempFileParams(n)
+            edtWait { assertTrue(vfs.open(kind, params)) }
+            assertEquals(baseline.getValue("editor") + 1, resources.snapshot()["editor"])
+            edtWait { vfs.close(kind, params) }
+            assertEquals(baseline.getValue("editor"), resources.snapshot()["editor"])
+        }
+        assertEquals(baseline, resources.snapshot())
+    }
+
+    fun `test repeated editor dispose never goes negative`() {
+        val resources = Resources()
+        val path = KiloPath(kind, mapOf("path" to "/repo/wt"))
+        val kilo = KiloVirtualFile(path)
+        val editor = KiloFileEditor(project, kilo, kilo, TestKind, resources)
+        assertEquals(1L, resources.snapshot()["editor"])
+
+        // token首次close才减计数：重复dispose（与生产Disposer路径同语义）绝不负数。
+        editor.dispose()
+        editor.dispose()
+        assertEquals(0L, resources.snapshot()["editor"])
     }
 }

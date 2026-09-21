@@ -90,6 +90,11 @@ private val DISPOSE_SOURCES = setOf("global_disposed", "server_instance_disposed
 private val API_GROUPS = setOf("profile", "config", "session", "workspace", "mcp", "other")
 private val VALIDITIES = setOf("valid", "suspended", "scheduler_gap", "unknown")
 private val BATCH_BUCKETS = setOf("1", "2-5", "6-20", "21-100", "100+")
+// C5覆盖记录（M23）：apply_edit在v1"无对应业务入口／未覆盖"——WorkspaceRpcApiImpl的写入只是
+// 缺省配置创建，不能映射为apply_edit；COSTRICT_IDE_TOOLS也没有编辑工具。登记保留词表值，
+// 不伪造零成功率，不为补遥测新增编辑功能；未来业务独立实现时在其自有处理器补同一接口。
+// 当前实际可观测的三种能力：open_diff（KiloDiffEditorKind）/vfs_refresh（KiloBackendWorkspaceRefresh）/
+// mcp_register（CsCloudMcpBridge.ensure新绑定成功）。
 private val IDE_OPERATIONS = setOf("apply_edit", "open_diff", "vfs_refresh", "mcp_register")
 private val RESOURCES = setOf("subscription", "controller", "editor")
 

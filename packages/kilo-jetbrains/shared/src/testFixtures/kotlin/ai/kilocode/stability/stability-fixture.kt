@@ -43,6 +43,9 @@ class Fixture(
     val recorder: Recorder = Recorder(DEFAULT_IDENTITY, policies, clock)
     private val operationsScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     val operations: Operations = Operations(recorder, clock, operationsScope)
+
+    /** M24（C5）：资源计数器与recorder同源注入真实所有者（controller/订阅/editor token）。 */
+    val resources: Resources = Resources()
     val writer: Writer = Writer(
         root = root,
         identity = DEFAULT_IDENTITY,

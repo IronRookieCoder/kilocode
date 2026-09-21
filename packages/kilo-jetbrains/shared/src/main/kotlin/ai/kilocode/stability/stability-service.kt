@@ -47,6 +47,7 @@ private const val REASON_STOPPED_PREFIX = "stopped_"
 private const val POLICY_POLL_MS = 30_000L
 private const val RETENTION_INTERVAL_MS = 3_600_000L
 private const val HEALTH_POLL_MS = 5_000L
+private const val RESOURCE_GAUGE_INTERVAL_MS = 30_000L
 private const val WRITER_STARTUP_TIMEOUT_MS = 10_000L
 private const val WRITER_STARTUP_POLL_MS = 20L
 
@@ -152,6 +153,7 @@ class StabilityService private constructor(
     private var activationJob: Job? = null
     private var retentionJob: Job? = null
     private var healthJob: Job? = null
+    private var resourceGaugeJob: Job? = null
 
     private val statusFlow = MutableStateFlow(
         Coverage("unknown", "unknown", PROFILE_DEFAULT, metrics = false, logs = false, reason = REASON_STARTING),
@@ -174,6 +176,13 @@ class StabilityService private constructor(
      */
     val faults: Faults
         get() = activeFaults ?: lazyStandbyFaults()
+
+    /**
+     * M24（C5）：插件自有资源token的唯一实例（本服务独有，绝不新建第二个计数器）。
+     * 订阅/controller/editor三类真实所有者经它acquire/close；计数与采集许可无关——
+     * 禁采期间token照常增减，只是gauge事实被recorder按既有准入丢弃。
+     */
+    val resources: Resources = Resources()
 
     /**
      * 幂等启动（立即返回）。 [side]是入口标注（frontend工具窗/backend app初始化），仅用于
@@ -199,6 +208,7 @@ class StabilityService private constructor(
             activationJob?.cancel()
             retentionJob?.cancel()
             healthJob?.cancel()
+            resourceGaugeJob?.cancel()
             if (runActive) {
                 if (permitted()) activeRecorder?.record(shutdownDraft(endKind))
                 activeRecorder?.close()
@@ -237,6 +247,7 @@ class StabilityService private constructor(
         activationJob = scope.launch { activationLoop() }
         retentionJob = scope.launch { retentionLoop() }
         healthJob = scope.launch { healthLoop() }
+        resourceGaugeJob = scope.launch { resourceGaugeLoop() }
     }
 
     private suspend fun activationLoop() {
@@ -374,6 +385,23 @@ class StabilityService private constructor(
             if (runActive) activeHealth?.let { health -> runCatching { health.poll() } }
             delay(HEALTH_POLL_MS)
         }
+    }
+
+    /**
+     * M24（C5）资源gauge后台循环：run活跃时每[RESOURCE_GAUGE_INTERVAL_MS]产出
+     * resource.snapshot三条（subscription/controller/editor各一条），只带[Resources.snapshot]
+     * 当前值——绝不推导泄漏或JVM内存归属。禁采/run未建立时不产事实（recorder准入本就拒绝）。
+     */
+    private suspend fun resourceGaugeLoop() {
+        while (!stoppedOnce.get()) {
+            if (runActive) recordResourceSnapshot()
+            delay(RESOURCE_GAUGE_INTERVAL_MS)
+        }
+    }
+
+    private fun recordResourceSnapshot() {
+        val recorder = activeRecorder ?: return
+        resourceSnapshotDrafts(resources.snapshot()).forEach { draft -> recorder.record(draft) }
     }
 
     private fun sweepOnce() {

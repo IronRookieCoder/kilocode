@@ -6,6 +6,7 @@ import ai.kilocode.backend.app.KiloSessionCapabilities
 import ai.kilocode.cscloud.CsCloudEndpoint
 import ai.kilocode.cscloud.CsCloudRequestException
 import ai.kilocode.log.KiloLog
+import ai.kilocode.stability.Operations
 import com.intellij.openapi.project.ProjectManager
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CancellationException
@@ -20,9 +21,11 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.put
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -32,6 +35,8 @@ import java.nio.file.Path
 import java.security.MessageDigest
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
+
+internal const val MCP_REGISTER_DEADLINE_MS = 30_000L
 
 internal suspend fun runLease(
     ready: CompletableDeferred<IdeMcpTransport>,
@@ -58,6 +63,9 @@ class CsCloudMcpBridge(
     private val factory: IdeMcpSessionFactory?,
     private val log: KiloLog,
     private val project: (String) -> String? = ::platformProject,
+    // M23（C5）：采集入口来源（生产由CsCloudConnectionService传入，测试注入fixture）；
+    // null=采集不可用，业务照常。
+    private val operations: Operations? = null,
 ) : KiloSessionCapabilities {
     private data class Lease(val workspace: String, val generation: String, val tools: Set<String>, val job: Job, val epoch: Long)
     private val leases = ConcurrentHashMap<String, Lease>()
@@ -102,6 +110,17 @@ class CsCloudMcpBridge(
         val old = leases.put(id, Lease(workspace, generation, tools, job, currentEpoch))
         old?.job?.cancel()
         old?.let { clear(id, it.generation, it.workspace) }
+        // M23 mcp_register（C5）：仅新绑定成功计一次注册（CapabilityResult.Ready返回之前结算）；
+        // 缓存lease复用绝不是注册（分母不增），绑定失败不开分母。begin与end都在实际处理器
+        // （ensure的新绑定成功分支）完成，调用方与backend实现绝不双计。
+        operations?.let { ops ->
+            val operation = ops.begin(
+                "ide.operation",
+                MCP_REGISTER_DEADLINE_MS,
+                buildJsonObject { put("operation", "mcp_register") },
+            )
+            operation.end("success", "bind")
+        }
         CapabilityResult.Ready(generation, tools)
     }
 

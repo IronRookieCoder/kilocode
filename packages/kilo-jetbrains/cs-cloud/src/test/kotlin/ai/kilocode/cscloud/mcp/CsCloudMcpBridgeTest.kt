@@ -4,6 +4,7 @@ import ai.kilocode.backend.app.CapabilityResult
 import ai.kilocode.cscloud.CsCloudEndpoint
 import ai.kilocode.cscloud.CsCloudRequestException
 import ai.kilocode.log.KiloLog
+import ai.kilocode.stability.Fixture
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
@@ -11,14 +12,15 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.OkHttpClient
 import okhttp3.mockwebserver.Dispatcher
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import okhttp3.mockwebserver.RecordedRequest
+import okhttp3.mockwebserver.SocketPolicy
 import java.nio.file.Files
 import java.util.concurrent.TimeUnit
-import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -135,6 +137,104 @@ class CsCloudMcpBridgeTest {
         } finally {
             scope.cancel()
             server.shutdown()
+        }
+    }
+
+    // ------ M23（C5）mcp_register：仅新绑定成功计一次注册；缓存lease复用不新增分母 ------
+
+    @Test
+    fun `new binding registers once and lease reuse adds no denominator`() {
+        val server = MockWebServer()
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse = when {
+                request.path == "/global/health" -> MockResponse().setBody("""{"capabilities":["conversation_ide_capability_v1"]}""")
+                request.method == "PUT" -> MockResponse().setResponseCode(200).setBody("{}")
+                request.method == "DELETE" -> MockResponse().setResponseCode(200)
+                else -> MockResponse().setResponseCode(404)
+            }
+        }
+        server.start()
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val workspace = Files.createTempDirectory("cs-cloud-register").toString()
+        var epoch: Long? = 1
+        Fixture().use { fixture ->
+            val bridge = CsCloudMcpBridge(
+                scope,
+                endpoint = { CsCloudEndpoint(server.url("/").toString().trimEnd('/'), null) },
+                client = { OkHttpClient() },
+                epoch = { epoch },
+                factory = FakeIdeMcpSessionFactory(),
+                log = TestLog(),
+                project = { directory -> directory },
+                operations = fixture.operations,
+            )
+            try {
+                // 新绑定成功：恰一次注册（start+end配对，Ready返回之前结算）。
+                val ready = runBlocking { bridge.ensure("conv-1", workspace) }
+                assertIs<CapabilityResult.Ready>(ready)
+                // 同epoch缓存lease复用：绝不是注册，分母不增。
+                runBlocking { bridge.ensure("conv-1", workspace) }
+                fixture.flush()
+
+                val ide = fixture.facts().filter { it.name == "ide.operation" }
+                val starts = ide.filter { it.data["phase"]?.jsonPrimitive?.content == "start" }
+                val ends = ide.filter { it.data["phase"]?.jsonPrimitive?.content == "end" }
+                assertEquals(1, starts.size)
+                assertEquals(1, ends.size)
+                assertEquals("mcp_register", starts.single().data.getValue("operation").jsonPrimitive.content)
+                assertEquals("success", ends.single().data.getValue("result").jsonPrimitive.content)
+                assertEquals("bind", ends.single().data.getValue("stage").jsonPrimitive.content)
+                assertEquals(starts.single().context["operation_id"], ends.single().context["operation_id"])
+
+                // epoch切换（daemon重启）：lease失效 → 重新绑定是新一次注册（+1）。
+                epoch = 2
+                runBlocking { bridge.ensure("conv-1", workspace) }
+                fixture.flush()
+                assertEquals(2, fixture.facts().count {
+                    it.name == "ide.operation" && it.data["phase"]?.jsonPrimitive?.content == "end"
+                })
+            } finally {
+                scope.cancel()
+                server.shutdown()
+            }
+        }
+    }
+
+    @Test
+    fun `failed bind opens no registration denominator`() {
+        val server = MockWebServer()
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse = when {
+                // PUT的传输级失败（响应永不到达 → 读超时）：bind的真实失败分支（HTTP错误码不在其裁决内）。
+                request.method == "PUT" -> MockResponse().setSocketPolicy(SocketPolicy.NO_RESPONSE)
+                request.path == "/global/health" -> MockResponse().setBody("""{"capabilities":["conversation_ide_capability_v1"]}""")
+                else -> MockResponse().setResponseCode(404)
+            }
+        }
+        server.start()
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val workspace = Files.createTempDirectory("cs-cloud-register-fail").toString()
+        Fixture().use { fixture ->
+            val bridge = CsCloudMcpBridge(
+                scope,
+                endpoint = { CsCloudEndpoint(server.url("/").toString().trimEnd('/'), null) },
+                client = { OkHttpClient.Builder().readTimeout(200, TimeUnit.MILLISECONDS).build() },
+                epoch = { 1 },
+                factory = FakeIdeMcpSessionFactory(),
+                log = TestLog(),
+                project = { directory -> directory },
+                operations = fixture.operations,
+            )
+            try {
+                // 绑定失败：ensure返回Unavailable，注册在成功分支内——不产任何ide.operation事实。
+                val down = runBlocking { bridge.ensure("conv-1", workspace) }
+                assertEquals("ide_capability_bind_failed", assertIs<CapabilityResult.Unavailable>(down).reason)
+                fixture.flush()
+                assertEquals(0, fixture.facts().count { it.name == "ide.operation" })
+            } finally {
+                scope.cancel()
+                server.shutdown()
+            }
         }
     }
 
