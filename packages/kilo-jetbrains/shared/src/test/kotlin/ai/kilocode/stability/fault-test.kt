@@ -112,6 +112,7 @@ class FaultTest {
             assertEquals(false, count.data["handled"]?.jsonPrimitive?.content?.toBooleanStrictOrNull())
             assertEquals("fault-u1", count.context["fault_id"])
             val detail = facts.single { it.channel == "diagnostic" }
+            assertEquals("error.uncaught", detail.name, "uncaught detail keeps the uncaught name (F4)")
             assertEquals(setOf("logs"), detail.purposes)
             assertEquals("fault-u1", detail.context["fault_id"], "both event ids share the fault id")
         }
@@ -209,6 +210,26 @@ class FaultTest {
             assertEquals(1, overflow.size)
             assertEquals("overflow", overflow.single().data["fingerprint"]?.jsonPrimitive?.content)
             assertEquals(setOf("logs"), overflow.single().purposes)
+        }
+    }
+
+    @Test
+    fun `uncaught detail and its next window summary keep the uncaught name`() {
+        Fixture().use { fixture ->
+            val faults = Faults(fixture.recorder, fixture.clock)
+            repeat(10) { index -> faults.report(FaultB(), "shared", handled = false, fault = "fault-u$index") }
+            fixture.flush()
+            fixture.advanceClock(WINDOW_STEP_MS)
+            // 下一窗口的任意新报告惰性冲刷上一窗口摘要；handled报告不得把摘要改名。
+            faults.report(FaultA(), "shared", handled = true, fault = "fault-h1")
+            fixture.flush()
+            val facts = fixture.facts()
+            val summary = facts.single { it.data["count"]?.jsonPrimitive?.long == 7L }
+            assertEquals("error.uncaught", summary.name, "summary follows the fingerprint's own name (F4)")
+            val handledDetail = facts.single {
+                it.channel == "diagnostic" && it.context["fault_id"] == "fault-h1"
+            }
+            assertEquals("error.reported", handledDetail.name)
         }
     }
 

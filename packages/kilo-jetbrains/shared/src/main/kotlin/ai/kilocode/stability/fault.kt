@@ -55,12 +55,14 @@ private const val MESSAGE_OVERFLOW_PREFIX = "fault summary: rate limit overflow 
 
 /**
  * 单个fingerprint的分钟窗口状态：详情配额、溢出计数与摘要所需的安全属性。
- * fingerprint同一 ⇒ 异常类同一（fingerprint输入含类名），error_class随之确定。
+ * fingerprint同一 ⇒ 异常类同一（fingerprint输入含类名），error_class随之确定；
+ * name随最近一次报告更新（F4：未捕获故障的详情/摘要不得误用error.reported）。
  */
 private class WindowState(
     val fingerprint: String,
     val frames: List<String>,
     val errorClass: String,
+    var name: String,
 ) {
     var window = -1L
     var details = 0
@@ -132,9 +134,10 @@ class Faults(
             )
             val state = windows[fingerprint]
             if (state != null) {
+                state.name = name
                 tallyLocked(state, window, fault)
             } else {
-                admitKeyLocked(window, fingerprint, frames, errorClass, fault)
+                admitKeyLocked(window, WindowState(fingerprint, frames.toList(), errorClass, name), fault)
             }
         }
     }
@@ -197,17 +200,10 @@ class Faults(
         recorder.record(draft)
     }
 
-    private fun admitKeyLocked(
-        window: Long,
-        fingerprint: String,
-        frames: List<String>,
-        errorClass: String,
-        fault: String,
-    ) {
+    private fun admitKeyLocked(window: Long, state: WindowState, fault: String) {
         if (windows.size < rateKeys) {
-            val state = WindowState(fingerprint, frames.toList(), errorClass)
             state.window = window
-            windows[fingerprint] = state
+            windows[state.fingerprint] = state
             emitDetail(state, fault)
             state.details = 1
         } else {
@@ -237,15 +233,19 @@ class Faults(
         overflowExtra += 1
     }
 
-    /** 冲刷上一窗口的摘要：per-fingerprint一条count=N，overflow归固定fingerprint；均仅logs。 */
+    /** 冲刷上一窗口的摘要：per-fingerprint一条count=N（F4：随该fingerprint的name），均仅logs。
+     * overflow摘要聚合多个fingerprint、不可归因单个故障，沿用登记的error.reported。 */
     private fun flushDueLocked(window: Long) {
         if (overflowExtra > 0 && overflowWindow < window) {
             emitDetailBranch(
-                OVERFLOW_FINGERPRINT,
-                emptyList(),
-                MESSAGE_OVERFLOW_PREFIX + overflowExtra,
-                overflowExtra,
-                null,
+                DetailBranch(
+                    name = NAME_HANDLED,
+                    fingerprint = OVERFLOW_FINGERPRINT,
+                    frames = emptyList(),
+                    message = MESSAGE_OVERFLOW_PREFIX + overflowExtra,
+                    count = overflowExtra,
+                    faultId = null,
+                ),
             )
             overflowExtra = 0
         }
@@ -261,34 +261,41 @@ class Faults(
             .minOfOrNull { it.window } ?: Long.MAX_VALUE
     }
 
-    /** 详情：固定模板message、白名单帧、count=1；context携带fault_id与计数事实关联。 */
+    /** 详情：固定模板message、白名单帧、count=1；context携带fault_id与计数事实关联。
+     * F4：name随该fingerprint的最近报告（uncaught→error.uncaught），与计数事实同名。 */
     private fun emitDetail(state: WindowState, fault: String) {
         val message = MESSAGE_DETAIL_PREFIX + state.errorClass
-        emitDetailBranch(state.fingerprint, state.frames, message, 1L, fault)
+        emitDetailBranch(
+            DetailBranch(state.name, state.fingerprint, state.frames, message, 1L, fault),
+        )
     }
 
     /** 摘要：额外次数在下一窗口生成一条count=N的固定安全摘要（仅logs，不进异常指标）。 */
     private fun emitSummary(state: WindowState, count: Long) {
         val message = MESSAGE_SUMMARY_PREFIX + state.errorClass + MESSAGE_SUMMARY_SUFFIX + count
-        emitDetailBranch(state.fingerprint, state.frames, message, count, null)
+        emitDetailBranch(DetailBranch(state.name, state.fingerprint, state.frames, message, count, null))
     }
 
-    private fun emitDetailBranch(
-        fingerprint: String,
-        frames: List<String>,
-        message: String,
-        count: Long,
-        faultId: String?,
-    ) {
+    /** 详情分支事实载荷（data类构造参数列表不受长度阈值约束）。 */
+    private data class DetailBranch(
+        val name: String,
+        val fingerprint: String,
+        val frames: List<String>,
+        val message: String,
+        val count: Long,
+        val faultId: String?,
+    )
+
+    private fun emitDetailBranch(branch: DetailBranch) {
         val data = buildJsonObject {
-            put("message", message)
-            putJsonArray("frames") { frames.forEach { frame -> add(frame) } }
-            put("fingerprint", fingerprint)
-            put("count", count)
+            put("message", branch.message)
+            putJsonArray("frames") { branch.frames.forEach { frame -> add(frame) } }
+            put("fingerprint", branch.fingerprint)
+            put("count", branch.count)
         }
-        val context = faultId?.let { mapOf(CONTEXT_FAULT_ID to it) } ?: emptyMap()
+        val context = branch.faultId?.let { mapOf(CONTEXT_FAULT_ID to it) } ?: emptyMap()
         val draft = Draft(
-            NAME_HANDLED,
+            branch.name,
             KIND_DIAGNOSTIC,
             CHANNEL_DIAGNOSTIC,
             data,

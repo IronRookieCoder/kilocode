@@ -30,16 +30,21 @@ internal const val READINESS_BLOCKED_CREDENTIALS = "credentials_missing"
  * update只被丢弃。reason是登记过的安全常量token，绝不透传服务端message；reason经
  * end的fields写入，error_code保持登记的安全码（reason不顶替error_code）。
  */
-class Readiness(operations: Operations, context: Map<String, String>) {
+class Readiness(
+    operations: Operations,
+    context: Map<String, String>,
+    /** deadline注入仅测试缩短真实定时器等待；生产一律缺省常量。 */
+    deadlineMs: Long = READINESS_DEADLINE_MS,
+) {
 
-    private val operation = operations.begin(READINESS_NAME, READINESS_DEADLINE_MS, context = context)
+    private val operation = operations.begin(READINESS_NAME, deadlineMs, context = context)
 
-    /** 是否已产生终态（本类经end结算；end返回false同样视为已结算——如deadline先到）。 */
-    @Volatile
-    private var ended = false
-
-    /** 分母是否已结算：Watch判断真实重激活是否需要新建分母的依据。 */
-    val settled: Boolean get() = ended
+    /**
+     * 分母是否已结算：Watch判断真实重激活是否需要新建分母的依据。
+     * F7（终审）：直接委托[Operation.isSettled]唯一终态裁决——deadline定时器先到的
+     * timeout结算同样算已结算（此前自有ended标志看不到定时器路径，会吞掉一次真实重激活）。
+     */
+    val settled: Boolean get() = operation.isSettled
 
     /** 五项条件 + blocked是brief规定的接口形态（逐字签名），抑制参数个数与组合条件告警。 */
     @Suppress("LongParameterList", "ComplexCondition")
@@ -52,14 +57,12 @@ class Readiness(operations: Operations, context: Map<String, String>) {
         blocked: String? = null,
     ) {
         if (blocked != null) {
-            ended = true
             operation.end("blocked", READINESS_STAGE, "environment", fields = buildJsonObject {
                 put("reason", blocked)
             })
             return
         }
         if (view && app && workspace && subscription && input) {
-            ended = true
             operation.end("success", READINESS_STAGE, fields = buildJsonObject {
                 put("reason", "none")
             })

@@ -329,6 +329,67 @@ class ProducerTest {
     }
 
     @Test
+    fun `standby captured before activation delivers facts to the active run`() {
+        Harness().use { harness ->
+            // 模拟EDT先于activateRun提交的长生命周期消费者：激活前捕获引用（F1）。
+            val capturedOperations = harness.service.operations
+            val capturedRecorder = harness.service.recorder
+            val capturedFaults = harness.service.faults
+            // 任何策略之前：fail closed不变。
+            assertEquals(
+                Admission.DISABLED,
+                capturedRecorder.record(Draft("plugin.started", "lifecycle", "critical", JsonObject(emptyMap()))),
+                "records before any policy stay disabled",
+            )
+            harness.writeControl(validControl())
+            harness.service.start("monolith")
+            harness.awaitReason("ok")
+            // 激活后经同一早捕获引用记录：必须落进活跃run（而非standby黑洞队列）。
+            capturedOperations.begin("plugin.readiness", 60_000)
+            assertEquals(
+                Admission.QUEUED,
+                capturedRecorder.record(Draft("plugin.started", "lifecycle", "critical", JsonObject(emptyMap()))),
+                "early-captured reference queues into the active run after activation",
+            )
+            capturedFaults.report(IllegalStateException("captured standby"), "frontend", handled = true, fault = "f-cap")
+            assertEquals(0, capturedRecorder.depth().items, "standby queue stays empty while forwarding")
+            harness.service.stop("unload")
+            harness.awaitReason("stopped_unload")
+            val facts = harness.facts()
+            val runId = facts.first { it.name == "plugin.started" }.run_id
+            assertTrue(facts.any { it.name == "plugin.readiness" }, "captured operations reach the active run")
+            assertTrue(facts.any { it.name == "error.reported" }, "captured faults reach the active run")
+            assertTrue(
+                facts.all { it.run_id == runId },
+                "every fact lands in the active run, got ${facts.map { it.run_id }.toSet()}",
+            )
+        }
+    }
+
+    @Test
+    fun `core prewarm runs in the background before any getter touches the standby`() {
+        Harness().use { harness ->
+            harness.writeControl(validControl())
+            // 从不触任何getter：控制文件读取与轮询线程只能来自构造即启动的后台预热（F2）。
+            var polled = false
+            var waited = 0L
+            while (waited < 15_000 && !polled) {
+                polled = Thread.getAllStackTraces().keys.any { it.name == "kilo-stability-policy-poll" }
+                if (!polled) {
+                    Thread.sleep(SERVICE_POLL_MS)
+                    waited += SERVICE_POLL_MS
+                }
+            }
+            assertTrue(polled, "PolicyStore was prewarmed off the first-touch path without any getter call")
+            // 预热不妨碍既有语义：start后照常激活。
+            harness.service.start("monolith")
+            harness.awaitReason("ok")
+            harness.awaitFacts(15_000) { facts -> facts.count { it.name == "plugin.started" } == 1 }
+            assertEquals(1, harness.facts().count { it.name == "plugin.started" })
+        }
+    }
+
+    @Test
     fun `workspace ids are random per project lifecycle and never derived from paths`() {
         val ids = WorkspaceIds()
         val first = ids.idFor("project-a")

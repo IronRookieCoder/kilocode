@@ -103,6 +103,9 @@ data class Coverage(
  * 生命周期kind取自平台真实回调（app_close/unload），不靠dispose()猜测。
  *
  * 线程纪律：writer/文件IO只在writer自有IO线程与本服务后台协程；record路径非阻塞可EDT调用。
+ * 核心预热（控制文件读取+standby）随构造在后台IO协程先行（F2），EDT首触通常不再做文件IO；
+ * 激活前被长生命周期消费者捕获的standby引用在run建立后经[Recorder.forwardTo]直投活跃run
+ * （F1），standby自身不再积压无人排空的事实。
  * 后台任务：许可watch（每[pollIntervalMs]）、残留清理（启动即扫+每小时，禁采也执行）、
  * health摘要（run内每[HEALTH_POLL_MS]采样，生成节奏由Health按30秒及损失变化裁决）。
  */
@@ -155,6 +158,20 @@ class StabilityService private constructor(
     private var healthJob: Job? = null
     private var resourceGaugeJob: Job? = null
 
+    init {
+        // F2（终审）：核心预热随服务构造在IO协程先行——控制文件读取与策略轮询线程不落在
+        // 首次触达的EDT调用上（工具窗装配、diff内容创建等）；竞态先行到达时getter仍可
+        // 惰性自建（ensureCore幂等，synchronized内单例），语义不变。
+        scope.launch(Dispatchers.IO) {
+            runCatching {
+                runMode = modeSource()
+                ensureCore()
+                // 与stop竞争：预热期间已裁决停机则不留下无人关闭的轮询线程（同initialize守卫）。
+                if (stoppedOnce.get()) runCatching { policies?.close() }
+            }
+        }
+    }
+
     private val statusFlow = MutableStateFlow(
         Coverage("unknown", "unknown", PROFILE_DEFAULT, metrics = false, logs = false, reason = REASON_STARTING),
     )
@@ -162,17 +179,22 @@ class StabilityService private constructor(
     /** 安全公开状态流。 */
     val status: StateFlow<Coverage> = statusFlow.asStateFlow()
 
-    /** 当前采集run的准入入口；run建立前经惰性standby（无策略时record恒DISABLED，fail closed）。 */
+    /**
+     * 当前采集run的准入入口；run建立前经惰性standby（无策略时record恒DISABLED，fail closed）。
+     * F1：激活前被捕获的standby引用在run建立后经[Recorder.forwardTo]直投活跃run，不再有
+     * 无人排空的黑洞队列；run切换后旧run引用仍仅产出DISABLED。
+     */
     val recorder: Recorder
         get() = activeRecorder ?: lazyStandby().first
 
-    /** 当前采集run的操作入口；与[recorder]同源，run切换后旧引用仅产出DISABLED。 */
+    /** 当前采集run的操作入口；与[recorder]同源，激活前捕获的引用经同一转发机制投递活跃run。 */
     val operations: Operations
         get() = activeOperations ?: lazyStandby().second
 
     /**
      * 当前采集run的安全异常入口（A6）；run建立前经惰性standby——standby绑定无策略的
-     * fail-closed recorder，report恒DISABLED；stop后与[recorder]同样保留已关闭引用。
+     * fail-closed recorder，report恒DISABLED；激活前捕获的引用随run建立转发至活跃run
+     * （与[recorder]同一[Recorder.forwardTo]机制），stop后同样保留已关闭引用。
      */
     val faults: Faults
         get() = activeFaults ?: lazyStandbyFaults()
@@ -219,6 +241,8 @@ class StabilityService private constructor(
             // 关闭准入：保留已关闭的run recorder在recorder属性上（getter恒DISABLED，
             // 绝不在停机后经由standby重新打开普通record），standby本身也一并关闭。
             if (!runActive) activeRecorder?.close()
+            // F1：先断开standby转发再关闭它，迟到的早捕获引用落回standby自身的关闭态准入。
+            standby?.first?.forwardTo = null
             runCatching { standby?.first?.close() }
             runCatching { policies?.close() }
             setStatus(REASON_STOPPED_PREFIX + endKind)
@@ -282,8 +306,8 @@ class StabilityService private constructor(
 
     /** 新采集run：新run_id→新recorder/operations→writer持锁→（每实例一次）登记→plugin.started一次。
      * 启动失败（存储不可验证/锁被占）时关闭准入并保持禁采，下一个watch周期自动重试。
-     * stop竞态：入口与等待返回后都复查stoppedOnce——stop裁决后绝不提交run，也不记started，
-     * 未提交的writer/recorder就地关闭（writer.close有界），status交由stop协程发布。 */
+     * stop竞态：入口与等待返回后都复查stoppedOnce，提交序列之后F5再复查一次——stop裁决后
+     * 绝不留活跃run，未提交的writer/recorder就地关闭（writer.close有界），status交由stop协程发布。 */
     @Suppress("ReturnCount")
     private fun activateRun() {
         if (stoppedOnce.get()) return
@@ -293,6 +317,10 @@ class StabilityService private constructor(
         val recorder = Recorder(identity, store, clock)
         activeRecorder = recorder
         activeOperations = Operations(recorder, clock, scope)
+        // F1：standby接管点先行——从本run的recorder诞生起，激活前被长生命周期消费者捕获的
+        // 引用即直投本run（启动窗口内的事实随writer ACTIVE后排空落盘），绝不滞留在无人
+        // 排空的standby队列；启动失败路径随即断开，落回standby自身的fail-closed准入。
+        standby?.first?.forwardTo = recorder
         val root = v1Root().resolve(identity.producerId)
         val storage = Storage(root)
         val writer = Writer(root, identity, recorder, store, clock, storage = storage)
@@ -301,12 +329,14 @@ class StabilityService private constructor(
         // 等待轮询不可经取消打断（Thread.sleep），stop可能恰好落在此窗口内。
         val active = awaitActiveHook(writer)
         if (stoppedOnce.get()) {
+            standby?.first?.forwardTo = null
             writer.close()
             recorder.close()
             return
         }
         if (!active) {
             // 保留已关闭的recorder在getter上：禁采期间record恒DISABLED，不经standby重新开口。
+            standby?.first?.forwardTo = null
             recorder.close()
             runFailure = REASON_WRITER_DISABLED
             setStatus(REASON_WRITER_DISABLED)
@@ -318,14 +348,26 @@ class StabilityService private constructor(
         outboxFull = false
         writeMetadataOnce(storage, root)
         recorder.record(startedDraft())
+        // F5：stop落在最后预检与提交序列之间的微窗口——提交后复查裁决，命中即就地收尾
+        // （recorder/writer的close幂等，与stop协程双路重入安全），绝不留下裁决后仍活跃的
+        // run；stopped_*状态仍由stop协程独占发布。
+        if (stoppedOnce.get()) {
+            runActive = false
+            recorder.close()
+            writer.close()
+            activeWriter = null
+            return
+        }
         // A6：安全异常入口与health摘要随run创建（去重缓存与计数随run生命周期绑定）。
         activeFaults = Faults(recorder, clock)
         activeHealth = Health(recorder, writer, clock)
     }
 
     /** 公共授权撤销：关准入→writer最后排空（失效事实按入盘前重判期丢弃），不记shutdown。
-     * 已关闭的recorder保留在getter上：撤销期间业务record恒DISABLED，不得换standby重新开口。 */
+     * 已关闭的recorder保留在getter上：撤销期间业务record恒DISABLED，不得换standby重新开口；
+     * standby转发随run结束断开，重开后由activateRun重新接管。 */
     private fun deactivateRun() {
+        standby?.first?.forwardTo = null
         activeRecorder?.close()
         activeWriter?.close()
         activeWriter = null

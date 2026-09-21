@@ -123,7 +123,16 @@ class Writer(
                 storage.ensureExchangeLock()
                 lockChannel = storage.acquireWriterLock()
                 state = WriterState.ACTIVE
-                ticker.scheduleWithFixedDelay({ wake() }, tickMs, tickMs, TimeUnit.MILLISECONDS)
+                // F6（终审）：close的shutdownNow可能先于本启动任务到达——停机后不再排定时器；
+                // 检查与调度之间的残余竞态按RejectedExecutionException就地吞掉（ticker已停，
+                // 最终排空由close自己的io.submit屏障完成），绝不向已死executor反复投递。
+                if (!stopping.get()) {
+                    try {
+                        ticker.scheduleWithFixedDelay({ wake() }, tickMs, tickMs, TimeUnit.MILLISECONDS)
+                    } catch (_: RejectedExecutionException) {
+                        // close已并发停掉ticker：无需定时器。
+                    }
+                }
             } catch (unverified: StorageUnverifiedException) {
                 disable(unverified.reason)
             } catch (_: OverlappingFileLockException) {

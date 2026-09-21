@@ -74,14 +74,23 @@ private val CAUSE_VALUES = setOf("plugin", "ide", "cs_cloud", "agent_core", "net
 
 /** 设计第9章各name专属键中明确给定的受控词表；未列出的值域按有界字符串处理。 */
 private val END_KIND_VALUES = setOf("app_close", "unload")
-private val SETUP_STAGES = setOf("create", "setup")
-private val STREAM_STAGES = setOf("resolve", "health", "streams")
-private val START_STAGES = setOf("spawn", "exit", "health")
-private val CREDENTIAL_STAGES = setOf("probe", "wait")
-private val DOWNLOAD_STAGES = setOf("download", "extract", "verify", "cache")
+
+/** END相的缺省stage（与operation.kt的DEFAULT_STAGE同值）：超时/无业务载荷的终态按
+ * "unknown"自包含产出。F3后end受name级stage词表约束，词表统一并入该缺省值，
+ * 绝不让合法的缺省终态记录因词表收紧被拒；"unknown"之外的越表值照旧拒绝。 */
+private const val DEFAULT_END_STAGE = "unknown"
+
+/** name级stage词表 = 显式登记值 + 缺省终态值。 */
+private fun stages(vararg values: String): Set<String> = setOf(DEFAULT_END_STAGE) + values
+
+private val SETUP_STAGES = stages("create", "setup")
+private val STREAM_STAGES = stages("resolve", "health", "streams")
+private val START_STAGES = stages("spawn", "exit", "health")
+private val CREDENTIAL_STAGES = stages("probe", "wait")
+private val DOWNLOAD_STAGES = stages("download", "extract", "verify", "cache")
 private val OPEN_MODES = setOf("create")
 private val RESTORE_MODES = setOf("open", "reconnect")
-private val RESTORE_STAGES = setOf("history", "subscription", "pending", "ui")
+private val RESTORE_STAGES = stages("history", "subscription", "pending", "ui")
 private val ACTIONS = setOf("prompt_submit", "stop", "permission_reply", "question_reply", "settings_save")
 private val INTERVENTIONS = setOf("automatic", "manual")
 private val AVAILABILITY_STATES = setOf("ready", "connecting", "blocked", "error")
@@ -219,7 +228,10 @@ object Dictionary {
         }
         val phase = (data[PHASE_KEY] as? JsonPrimitive)?.takeIf { primitive -> primitive.isString }?.contentOrNull
         val phaseRule = if (spec.kind == KIND_OPERATION) phase?.let { PHASE_RULES[it] } else null
-        val rules: Map<String, KeyRule> = spec.keys + (phaseRule?.keys ?: emptyMap())
+        // F3（终审）：name专属键规则优先于通用phase规则——否则END相的通用stage键（32B有界、
+        // 无词表）会覆盖name级stage词表（STREAM_STAGES等），让end记录逃逸name受控词表。
+        // phase规则独有的键（result/duration_ms/cause/error_code等）照常生效。
+        val rules: Map<String, KeyRule> = (phaseRule?.keys ?: emptyMap()) + spec.keys
         val required = buildSet {
             addAll(spec.required)
             if (spec.kind == KIND_OPERATION) add(PHASE_KEY)

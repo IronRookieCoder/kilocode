@@ -86,6 +86,30 @@ class FactTest {
     }
 
     @Test
+    fun `end phase stays inside the name stage vocabulary`() {
+        // F3（终审）：END相的通用phase键规则（32B有界、无词表）不得覆盖name级stage词表，
+        // 否则end记录逃逸name受控词表而progress仍受约束。
+        fun end(stage: String) = buildJsonObject {
+            put("phase", "end"); put("result", "failure"); put("duration_ms", 20)
+            put("stage", stage); put("cause", "network"); put("error_code", "timeout")
+        }
+        assertFalse(
+            Dictionary.validate(Draft("connection.attempt", "operation", "critical", end("bogus"))),
+            "end stage outside the name vocabulary must be rejected",
+        )
+        assertTrue(Dictionary.validate(Draft("connection.attempt", "operation", "critical", end("streams"))))
+        // progress相的name词表保持不变。
+        assertFalse(
+            Dictionary.validate(
+                Draft(
+                    "connection.attempt", "operation", "critical",
+                    buildJsonObject { put("phase", "progress"); put("stage", "bogus") },
+                ),
+            ),
+        )
+    }
+
+    @Test
     fun `operation start requires a positive deadline`() {
         fun start(deadline: Number?) = buildJsonObject {
             put("phase", "start"); put("trigger", "initial")

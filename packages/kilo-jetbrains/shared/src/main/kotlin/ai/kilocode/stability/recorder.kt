@@ -99,6 +99,15 @@ class Recorder(
     /** 生产路径的互斥临界区由[StabilityQueue]的tryLock提供；本类不另持锁，不产生二次等待。 */
     @Volatile private var closed = false
 
+    /**
+     * F1（终审，standby捕获黑洞）：本recorder作为激活前standby时，run建立后由服务置位的
+     * 转发目标（活跃run的recorder）。置位后[record]把事实原样转投目标——准入（策略/关闭/
+     * 容量）与run身份全部由目标recorder自行裁决，fail closed语义不变；run结束/停机即清除。
+     * 只是一次volatile读加委托调用，非阻塞、无IO，可EDT直接路径使用；活跃run的recorder
+     * 恒为null，绝不形成转发链。
+     */
+    @Volatile internal var forwardTo: Recorder? = null
+
     private val storageFull = AtomicBoolean(false)
     private val criticalSeq = AtomicLong(0)
     private val diagnosticSeq = AtomicLong(0)
@@ -119,6 +128,8 @@ class Recorder(
 
     @Suppress("ReturnCount")
     fun record(draft: Draft): Admission {
+        // F1：standby在run激活后把事实转投活跃run，先于一切本地裁决（目标recorder自行把守准入）。
+        forwardTo?.let { target -> return target.record(draft) }
         if (closed) {
             disabledShutdown.incrementAndGet()
             return Admission.DISABLED
@@ -157,15 +168,13 @@ class Recorder(
             val fact = buildFact(draft, policy, purposes, seq, now)
             QueuedRecord(fact, channel, seq, estimateBytes(fact), clock.mono())
         }
-        return when (outcome.offer) {
+        val admission = when (outcome.offer) {
             QueueOffer.QUEUED -> {
                 accepted.incrementAndGet()
-                if (outcome.evictedDiagnostics > 0) evictedDiagnostic.addAndGet(outcome.evictedDiagnostics.toLong())
                 Admission.QUEUED
             }
             QueueOffer.FULL -> {
                 droppedCapacity.incrementAndGet()
-                if (outcome.evictedDiagnostics > 0) evictedDiagnostic.addAndGet(outcome.evictedDiagnostics.toLong())
                 Admission.DROPPED
             }
             QueueOffer.CONTENTION -> {
@@ -173,6 +182,9 @@ class Recorder(
                 Admission.DROPPED
             }
         }
+        // 逐出计量对三种结论统一执行（争用时无逐出，计数为0即no-op）。
+        if (outcome.evictedDiagnostics > 0) evictedDiagnostic.addAndGet(outcome.evictedDiagnostics.toLong())
+        return admission
     }
 
     /** 停止准入：shutdown后record一律DISABLED（优先于空间闸门）；已排队事实留给writer按A4流程处理。 */
