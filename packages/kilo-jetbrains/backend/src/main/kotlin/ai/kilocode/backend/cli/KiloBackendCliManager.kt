@@ -3,8 +3,11 @@ package ai.kilocode.backend.cli
 import ai.kilocode.KiloPlugin
 import ai.kilocode.backend.dev.KiloDevMode
 import ai.kilocode.log.KiloLog
+import ai.kilocode.stability.Operations
+import ai.kilocode.stability.StabilityService
 import com.intellij.execution.process.OSProcessUtil
 import com.intellij.openapi.application.ApplicationInfo
+import com.intellij.openapi.components.service
 import com.intellij.openapi.application.PathManager
 import com.intellij.openapi.util.SystemInfo
 import com.intellij.util.EnvironmentUtil
@@ -137,8 +140,12 @@ class KiloBackendCliManager(
         }
         if (force) log.info("Force re-downloading CLI $version")
         log.info("Kilo CLI mode: DOWNLOAD — resolving CLI $version ($platform) from the GitHub release")
-        return KiloCliDownloader(log = log).resolve(version, force, onProgress)
+        return KiloCliDownloader(log = log, operations = stabilityOperations()).resolve(version, force, onProgress)
     }
+
+    /** 稳定性采集入口（B2同型）：采集不可用绝不妨碍下载业务。 */
+    private fun stabilityOperations(): Operations? =
+        runCatching { service<StabilityService>().operations }.getOrNull()
 
     // Must be called from a background thread — devStorageEnv() performs blocking I/O (mkdirs).
     internal fun buildEnv(pwd: String, base: Map<String, String> = EnvironmentUtil.getEnvironmentMap()): Map<String, String> =

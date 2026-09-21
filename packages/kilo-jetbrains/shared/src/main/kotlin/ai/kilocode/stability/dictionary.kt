@@ -93,6 +93,9 @@ private val BATCH_BUCKETS = setOf("1", "2-5", "6-20", "21-100", "100+")
 private val IDE_OPERATIONS = setOf("apply_edit", "open_diff", "vfs_refresh", "mcp_register")
 private val RESOURCES = setOf("subscription", "controller", "editor")
 
+/** migration_kind受控值（R11/指标M10）：按现有LegacyV5迁移路径登记，绝不按错误文本拼值。 */
+private val MIGRATION_KINDS = setOf("legacy_v5")
+
 /** 长度上限按UTF-8字节数执行（设计6.1）；writer落盘前以真实编码再核对32KiB。 */
 private const val MAX_RECORD_BYTES = 32 * 1024
 private const val MAX_CONTEXT_KEYS = 5
@@ -416,7 +419,7 @@ object Dictionary {
         )
         spec(
             "migration.required", "transition",
-            keys = listOf(key("migration_kind", FieldType.STRING)),
+            keys = listOf(key("migration_kind", FieldType.STRING, MIGRATION_KINDS)),
             required = setOf("migration_kind"),
         )
         spec(

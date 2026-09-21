@@ -307,11 +307,13 @@ class CsCloudConnectionServiceTest {
     @Test
     fun `startCsCloud returns starter outcome and reconnects on success`() = runBlocking {
         val root = Files.createTempDirectory("cs-cloud-start")
+        val fixture = Fixture()
         val service = CsCloudConnectionService(
             scope,
             CsCloudEndpointResolver(root, emptyMap()),
             TestLog,
             starter = { CsCloudStartDto(true, "started") },
+            operations = fixture.operations,
         )
         try {
             val result = service.startCsCloud()
@@ -322,19 +324,68 @@ class CsCloudConnectionServiceTest {
             assertTrue(result.ok)
             assertEquals("started", result.message)
             assertEquals(CsCloudStartDto.STAGE_START, result.stage)
+            // M07（brief Step 3）：exit 0但daemon不可发现——健康确认失败不得记success。
+            fixture.flush()
+            val start = fixture.facts().filter { it.name == "csc.start" }
+            assertTrue(start.any { it.data["phase"]?.jsonPrimitive?.content == "start" }, "missing start fact: ${start.map { it.data }}")
+            val end = ends(start, "csc.start").single()
+            assertEquals("failure", end.data["result"]?.jsonPrimitive?.content)
+            assertEquals("health", end.data["stage"]?.jsonPrimitive?.content)
+            assertEquals("health_failed", end.data["error_code"]?.jsonPrimitive?.content)
         } finally {
             service.dispose()
+            fixture.close()
+        }
+    }
+
+    @Test
+    fun `start operation ends success only after daemon health confirmation`() = runBlocking {
+        val server = MockWebServer()
+        server.enqueue(MockResponse().setBody("""{"ok":true,"data":{"status":"ok","version":"1.0.0"}}"""))
+        server.enqueue(MockResponse().setBody("""{"ok":true,"data":{"status":"ok","version":"1.0.0"}}"""))
+        server.enqueue(sse(SocketPolicy.KEEP_OPEN))
+        server.start()
+        val root = Files.createTempDirectory("cs-cloud-start-healthy")
+        writeDaemonFiles(server, root)
+        val fixture = Fixture()
+        val service = CsCloudConnectionService(
+            scope,
+            CsCloudEndpointResolver(root, emptyMap()),
+            TestLog,
+            timeout = 5_000,
+            workspace = root,
+            starter = { CsCloudStartDto(true, "started") },
+            operations = fixture.operations,
+        )
+        try {
+            val result = service.startCsCloud()
+            assertTrue(result.ok, "result=$result")
+            assertIs<ConnectionState.Connected>(service.state.value, service.state.value.toString())
+            // daemon可发现且健康：唯一success在health阶段结算；完整连接归M04另一operation。
+            factsUntil(fixture) { facts -> ends(facts, "csc.start").size == 1 }
+            fixture.flush()
+            val start = fixture.facts().filter { it.name == "csc.start" }
+            val end = ends(start, "csc.start").single()
+            assertEquals("success", end.data["result"]?.jsonPrimitive?.content)
+            assertEquals("health", end.data["stage"]?.jsonPrimitive?.content)
+            assertEquals(1, ends(fixture.facts(), "connection").size)
+        } finally {
+            service.dispose()
+            fixture.close()
+            server.shutdown()
         }
     }
 
     @Test
     fun `startCsCloud failure does not reconnect`() = runBlocking {
         val root = Files.createTempDirectory("cs-cloud-start-fail")
+        val fixture = Fixture()
         val service = CsCloudConnectionService(
             scope,
             CsCloudEndpointResolver(root, emptyMap()),
             TestLog,
-            starter = { CsCloudStartDto(false, "csc not installed") },
+            starter = { CsCloudStartDto(false, "csc not installed", ConnectionErrorCode.CSC_NOT_INSTALLED) },
+            operations = fixture.operations,
         )
         try {
             val result = service.startCsCloud()
@@ -342,8 +393,15 @@ class CsCloudConnectionServiceTest {
             assertEquals("csc not installed", result.message)
             assertEquals(CsCloudStartDto.STAGE_START, result.stage)
             assertEquals(ConnectionState.Disconnected, service.state.value)
+            fixture.flush()
+            val start = fixture.facts().filter { it.name == "csc.start" }
+            assertTrue(start.any { it.data["phase"]?.jsonPrimitive?.content == "start" }, "missing start fact: ${start.map { it.data }}")
+            val end = ends(start, "csc.start").single()
+            assertEquals("blocked", end.data["result"]?.jsonPrimitive?.content)
+            assertEquals("csc_not_installed", end.data["error_code"]?.jsonPrimitive?.content)
         } finally {
             service.dispose()
+            fixture.close()
         }
     }
 

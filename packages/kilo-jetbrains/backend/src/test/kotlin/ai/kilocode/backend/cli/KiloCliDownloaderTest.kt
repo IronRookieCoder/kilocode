@@ -1,7 +1,9 @@
 package ai.kilocode.backend.cli
 
 import ai.kilocode.backend.testing.TestLog
+import ai.kilocode.stability.Fixture
 import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import okio.Buffer
@@ -20,6 +22,7 @@ import kotlin.test.assertContains
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class KiloCliDownloaderTest {
@@ -29,71 +32,90 @@ class KiloCliDownloaderTest {
     @Test
     fun `downloads extracts and caches pinned cli`() = runBlocking {
         MockWebServer().use { server ->
-            val bytes = archive()
-            server.enqueue(MockResponse().setResponseCode(200).setBody(Buffer().write(bytes)))
-            val digests = digests(bytes)
-            val seen = mutableListOf<CliDownload>()
-            val log = TestLog()
-            val cli = KiloCliDownloader(
-                log = log,
-                root = dir,
-                baseUrl = server.url("/release").toString(),
-                api = server.url("/api").toString(),
-                digests = digests,
-            ).resolve("1.2.3", onProgress = { seen.add(it) })
+            Fixture().use { fixture ->
+                val bytes = archive()
+                server.enqueue(MockResponse().setResponseCode(200).setBody(Buffer().write(bytes)))
+                val digests = digests(bytes)
+                val seen = mutableListOf<CliDownload>()
+                val log = TestLog()
+                val cli = KiloCliDownloader(
+                    log = log,
+                    root = dir,
+                    baseUrl = server.url("/release").toString(),
+                    api = server.url("/api").toString(),
+                    digests = digests,
+                    operations = fixture.operations,
+                ).resolve("1.2.3", onProgress = { seen.add(it) })
 
-            assertTrue(cli.isFile)
-            assertEquals(File(File(dir, "1.2.3"), KiloCliPlatform.current()).absolutePath, cli.parentFile.parentFile.absolutePath)
-            assertEquals("#!/bin/sh\n", cli.readText())
-            assertTrue(File(cli.parentFile, "kilo-sandbox-mutation-worker.js").isFile)
-            assertEquals("/release/v1.2.3/kilo-${KiloCliPlatform.current()}.${KiloCliPlatform.archive()}", server.takeRequest().path)
-            assertEquals(CliDownload(0, "1.2.3", KiloCliPlatform.current()), seen.first())
-            assertTrue(seen.any { it.percent == 100 && it.version == "1.2.3" && it.platform == KiloCliPlatform.current() })
-            assertTrue(
-                log.messages.any {
-                    it.startsWith("INFO: Kilo CLI 1.2.3 for ${KiloCliPlatform.current()} is not cached; downloading new release into ") &&
-                        it.contains("/.tmp/")
-                }
-            )
-            assertTrue(log.messages.any { it.contains("Kilo CLI path diagnostics:") && it.contains("cacheRoot=${dir.absolutePath}") })
-            assertTrue(log.messages.any { it.contains("Kilo CLI cache target:") && it.contains("exe=${cli.absolutePath}") })
-            assertTrue(log.messages.any { it.contains("Kilo CLI cache lock path:") && it.contains(File(dir, ".lock").canonicalPath) })
+                assertTrue(cli.isFile)
+                assertEquals(File(File(dir, "1.2.3"), KiloCliPlatform.current()).absolutePath, cli.parentFile.parentFile.absolutePath)
+                assertEquals("#!/bin/sh\n", cli.readText())
+                assertTrue(File(cli.parentFile, "kilo-sandbox-mutation-worker.js").isFile)
+                assertEquals("/release/v1.2.3/kilo-${KiloCliPlatform.current()}.${KiloCliPlatform.archive()}", server.takeRequest().path)
+                assertEquals(CliDownload(0, "1.2.3", KiloCliPlatform.current()), seen.first())
+                assertTrue(seen.any { it.percent == 100 && it.version == "1.2.3" && it.platform == KiloCliPlatform.current() })
+                assertTrue(
+                    log.messages.any {
+                        it.startsWith("INFO: Kilo CLI 1.2.3 for ${KiloCliPlatform.current()} is not cached; downloading new release into ") &&
+                            it.contains("/.tmp/")
+                    }
+                )
+                assertTrue(log.messages.any { it.contains("Kilo CLI path diagnostics:") && it.contains("cacheRoot=${dir.absolutePath}") })
+                assertTrue(log.messages.any { it.contains("Kilo CLI cache target:") && it.contains("exe=${cli.absolutePath}") })
+                assertTrue(log.messages.any { it.contains("Kilo CLI cache lock path:") && it.contains(File(dir, ".lock").canonicalPath) })
 
-            val cachedProgress = mutableListOf<CliDownload>()
-            val cached = KiloCliDownloader(
-                log = log,
-                root = dir,
-                baseUrl = server.url("/release").toString(),
-                api = server.url("/api").toString(),
-                digests = digests,
-            ).resolve("1.2.3", onProgress = { cachedProgress.add(it) })
-            assertEquals(cli.absolutePath, cached.absolutePath)
-            assertEquals(1, server.requestCount)
-            assertTrue(cachedProgress.isEmpty())
-            assertContains(log.messages, "INFO: Kilo CLI 1.2.3 (${KiloCliPlatform.current()}) already cached at ${cli.absolutePath}; skipping download and extraction")
+                val cachedProgress = mutableListOf<CliDownload>()
+                val cached = KiloCliDownloader(
+                    log = log,
+                    root = dir,
+                    baseUrl = server.url("/release").toString(),
+                    api = server.url("/api").toString(),
+                    digests = digests,
+                    operations = fixture.operations,
+                ).resolve("1.2.3", onProgress = { cachedProgress.add(it) })
+                assertEquals(cli.absolutePath, cached.absolutePath)
+                assertEquals(1, server.requestCount)
+                assertTrue(cachedProgress.isEmpty())
+                assertContains(log.messages, "INFO: Kilo CLI 1.2.3 (${KiloCliPlatform.current()}) already cached at ${cli.absolutePath}; skipping download and extraction")
 
-            File(cli.parentFile.parentFile, ".complete").writeText("ok\n")
-            server.enqueue(MockResponse().setResponseCode(200).setBody(Buffer().write(bytes)))
-            val stale = KiloCliDownloader(
-                log = log,
-                root = dir,
-                baseUrl = server.url("/release").toString(),
-                api = server.url("/api").toString(),
-                digests = digests,
-            ).resolve("1.2.3")
-            assertEquals(cli.absolutePath, stale.absolutePath)
-            assertEquals(2, server.requestCount)
+                // M09（brief Step 6）：缓存命中是独立operation，stage=cache、cache_hit=true，
+                // 不并入下载耗时（下载operation只有一个end）。
+                fixture.flush()
+                val download = cliDownloadEnds(fixture, "verify")
+                assertEquals(1, download.size)
+                assertEquals("success", download.single().data["result"]?.jsonPrimitive?.content)
+                assertNull(download.single().data["cache_hit"])
+                val cacheEnds = cliDownloadEnds(fixture, "cache")
+                assertEquals(1, cacheEnds.size)
+                assertEquals("success", cacheEnds.single().data["result"]?.jsonPrimitive?.content)
+                assertEquals("true", cacheEnds.single().data["cache_hit"]?.jsonPrimitive?.content)
+                val starts = fixture.facts().filter { it.name == "cli.download" && it.data["phase"]?.jsonPrimitive?.content == "start" }
+                assertEquals(2, starts.size)
+                assertTrue(starts[0].context["operation_id"] != starts[1].context["operation_id"], "cache hit must be its own operation")
 
-            server.enqueue(MockResponse().setResponseCode(200).setBody(Buffer().write(bytes)))
-            val forced = KiloCliDownloader(
-                log = log,
-                root = dir,
-                baseUrl = server.url("/release").toString(),
-                api = server.url("/api").toString(),
-                digests = digests,
-            ).resolve("1.2.3", force = true)
-            assertEquals(cli.absolutePath, forced.absolutePath)
-            assertEquals(3, server.requestCount)
+                File(cli.parentFile.parentFile, ".complete").writeText("ok\n")
+                server.enqueue(MockResponse().setResponseCode(200).setBody(Buffer().write(bytes)))
+                val stale = KiloCliDownloader(
+                    log = log,
+                    root = dir,
+                    baseUrl = server.url("/release").toString(),
+                    api = server.url("/api").toString(),
+                    digests = digests,
+                ).resolve("1.2.3")
+                assertEquals(cli.absolutePath, stale.absolutePath)
+                assertEquals(2, server.requestCount)
+
+                server.enqueue(MockResponse().setResponseCode(200).setBody(Buffer().write(bytes)))
+                val forced = KiloCliDownloader(
+                    log = log,
+                    root = dir,
+                    baseUrl = server.url("/release").toString(),
+                    api = server.url("/api").toString(),
+                    digests = digests,
+                ).resolve("1.2.3", force = true)
+                assertEquals(cli.absolutePath, forced.absolutePath)
+                assertEquals(3, server.requestCount)
+            }
         }
     }
 
@@ -357,24 +379,40 @@ class KiloCliDownloaderTest {
         assertTrue(dir.mkdirs() || dir.isDirectory)
         val file = File(dir, ".lock")
         val log = TestLog()
-        RandomAccessFile(file, "rw").channel.use { channel ->
-            channel.lock().use {
-                val ex = assertFailsWith<IllegalStateException> {
-                    KiloCliDownloader(
-                        log = log,
-                        root = dir,
-                        digests = emptyMap(),
-                        lockTimeoutMs = 50,
-                    ).resolve("1.2.3")
-                }
+        Fixture().use { fixture ->
+            RandomAccessFile(file, "rw").channel.use { channel ->
+                channel.lock().use {
+                    val ex = assertFailsWith<IllegalStateException> {
+                        KiloCliDownloader(
+                            log = log,
+                            root = dir,
+                            digests = emptyMap(),
+                            lockTimeoutMs = 50,
+                            operations = fixture.operations,
+                        ).resolve("1.2.3")
+                    }
 
-                assertContains(ex.message.orEmpty(), "Timed out waiting for Kilo CLI cache lock")
-                assertContains(ex.message.orEmpty(), file.canonicalPath)
-                assertTrue(log.messages.any { it.contains("Waiting for Kilo CLI cache lock") && it.contains(file.canonicalPath) })
-                assertTrue(log.messages.any { it.contains("Timed out waiting for Kilo CLI cache lock") && it.contains(file.canonicalPath) })
+                    assertContains(ex.message.orEmpty(), "Timed out waiting for Kilo CLI cache lock")
+                    assertContains(ex.message.orEmpty(), file.canonicalPath)
+                    assertTrue(log.messages.any { it.contains("Waiting for Kilo CLI cache lock") && it.contains(file.canonicalPath) })
+                    assertTrue(log.messages.any { it.contains("Timed out waiting for Kilo CLI cache lock") && it.contains(file.canonicalPath) })
+                    // M09锁超时映射lock_timeout（metrics 3.2下载词表），stage=cache。
+                    fixture.flush()
+                    val end = cliDownloadEnds(fixture, "cache").single()
+                    assertEquals("failure", end.data["result"]?.jsonPrimitive?.content)
+                    assertEquals("lock_timeout", end.data["error_code"]?.jsonPrimitive?.content)
+                }
             }
         }
     }
+
+    /** cli.download的end事实（按stage过滤）；未埋点时返回空（新增断言以此证伪误绿）。 */
+    private fun cliDownloadEnds(fixture: Fixture, stage: String) =
+        fixture.facts().filter {
+            it.name == "cli.download" &&
+                it.data["phase"]?.jsonPrimitive?.content == "end" &&
+                it.data["stage"]?.jsonPrimitive?.content == stage
+        }
 
     private fun archive(script: String = "#!/bin/sh\n"): ByteArray {
         val files = mapOf(

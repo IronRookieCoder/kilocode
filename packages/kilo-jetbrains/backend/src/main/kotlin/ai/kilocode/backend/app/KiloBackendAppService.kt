@@ -32,6 +32,8 @@ import ai.kilocode.rpc.dto.DeviceAuthDto
 import ai.kilocode.rpc.dto.ConfigPatchDto
 import ai.kilocode.rpc.dto.CsCloudStartDto
 import ai.kilocode.rpc.dto.HealthDto
+import ai.kilocode.stability.Draft
+import ai.kilocode.stability.Operations
 import com.intellij.openapi.Disposable
 import com.intellij.openapi.components.Service
 import com.intellij.openapi.components.service
@@ -72,6 +74,7 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import java.net.ConnectException
 import java.net.SocketTimeoutException
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.coroutines.resume
@@ -172,6 +175,11 @@ class KiloBackendAppService private constructor(
     private var reconnecting = false
     private val loadLock = Any()
     private val rev = AtomicLong()
+
+    /** M10（brief Step 5）：每次激活首次进入MigrationRequired记一次transition。 */
+    private val migrationObservation = MigrationObservation {
+        runCatching { service<StabilityService>().operations }.getOrNull()
+    }
 
     private val _appState = MutableStateFlow<KiloAppState>(KiloAppState.Disconnected)
     val appState: StateFlow<KiloAppState> = _appState.asStateFlow()
@@ -506,6 +514,9 @@ class KiloBackendAppService private constructor(
 
                 val migration = detectMigration()
                 if (migration != null) {
+                    // M10：迁移transition每激活首次转换记录一次；M03的blocked由同一分支的
+                    // backend.load end承载（B1），此处不重复。
+                    migrationObservation.onMigrationRequired()
                     operation?.end("blocked", LOAD_STAGE, "environment", fields = buildJsonObject {
                         put("reason", LOAD_REASON_MIGRATION)
                     })
@@ -1295,6 +1306,39 @@ internal const val LOAD_REASON_OTHER = "other"
 
 /** M02 trigger闭集：initial=连接后首次加载，recovery=重连后的恢复加载。 */
 internal fun loadTrigger(recover: Boolean): String = if (recover) "recovery" else "initial"
+
+/** migration_kind受控值（R11，G0字典登记）：现有LegacyV5迁移路径，绝不按错误文本拼值。 */
+internal const val MIGRATION_KIND_LEGACY_V5 = "legacy_v5"
+
+/**
+ * M10（brief Step 5）：每次激活首次进入MigrationRequired记录一次transition；重复load
+ * 状态与提示渲染不增计（含用户强制重跑迁移检测的再次进入）。purposes请求metrics+logs，
+ * 由字典收窄为metrics-only出口；kind是G0字典/Spec同时登记的受控值。
+ *
+ * @param operations采集入口来源（生产为StabilityService，测试注入fixture）；null时本次
+ * 不记录也不消耗once标志，采集恢复后的首次进入仍会记录。
+ */
+internal class MigrationObservation(private val operations: () -> Operations?) {
+    private val recorded = AtomicBoolean(false)
+
+    /** 首次进入返回true并记录；已记录过（重复提示/再次进入）或采集不可用返回false。 */
+    @Synchronized
+    fun onMigrationRequired(): Boolean {
+        if (recorded.get()) return false
+        return operations()?.also { ops ->
+            ops.record(
+                Draft(
+                    "migration.required",
+                    "transition",
+                    "critical",
+                    buildJsonObject { put("migration_kind", MIGRATION_KIND_LEGACY_V5) },
+                    purposes = setOf("metrics", "logs"),
+                ),
+            )
+            recorded.set(true)
+        } != null
+    }
+}
 
 /**
  * 失败reason映射（brief Step 4）：timeout单独结算（TimeoutCancellationException分支），

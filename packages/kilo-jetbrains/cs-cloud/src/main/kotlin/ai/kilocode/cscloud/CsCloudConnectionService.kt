@@ -18,6 +18,7 @@ import ai.kilocode.rpc.dto.CsCloudStartDto
 import ai.kilocode.stability.ConnectionObservation
 import ai.kilocode.stability.ConnectionReasons
 import ai.kilocode.stability.ConnectionTriggers
+import ai.kilocode.stability.Operation
 import ai.kilocode.stability.Operations
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CancellationException
@@ -52,6 +53,20 @@ private const val STAGE_STREAMS = "streams"
 private const val HTTP_UNAUTHORIZED = 401
 private const val HTTP_FORBIDDEN = 403
 
+/** M07 csc.start（brief Step 3）：deadline=CscCloudStarter默认的180秒业务等待换算毫秒。 */
+private const val START_OPERATION = "csc.start"
+private const val START_DEADLINE_MS = 180_000L
+private const val START_CODE_HEALTH_FAILED = "health_failed"
+
+/** result六值（metrics 1.2）与cause受控词表（metrics 1.3）固定值。 */
+private const val RESULT_SUCCESS = "success"
+private const val RESULT_FAILURE = "failure"
+private const val RESULT_BLOCKED = "blocked"
+private const val CAUSE_CS_CLOUD = "cs_cloud"
+private const val CAUSE_ENVIRONMENT = "environment"
+private const val CAUSE_UNKNOWN = "unknown"
+private const val START_CODE_OTHER = "other"
+
 /** Connection to an already-running local cs-cloud daemon. */
 @Suppress("LongParameterList")
 class CsCloudConnectionService(
@@ -61,11 +76,12 @@ class CsCloudConnectionService(
     private val timeout: Long = 30_000L,
     workspace: Path? = null,
     private val roots: () -> List<Path> = { listOfNotNull(workspace) },
-    private val starter: suspend () -> CsCloudStartDto = { CsCloudStartDto(false, "cs-cloud starter is not configured") },
+    private val starter: suspend (Operation?) -> CsCloudStartDto =
+        { _ -> CsCloudStartDto(false, "cs-cloud starter is not configured") },
     private val installer: suspend () -> CsCloudStartDto = { CsCloudStartDto(false, "cs-cloud installer is not configured") },
     private val login: suspend () -> CsCloudStartDto = { CsCloudStartDto(false, "cs-cloud login is not configured") },
     /** 稳定性采集入口（B2）：生产由provider传入；null=采集不可用，业务照常。 */
-    operations: Operations? = null,
+    private val operations: Operations? = null,
 ) : KiloConnection {
 
     /**
@@ -158,11 +174,65 @@ class CsCloudConnectionService(
 
     override suspend fun reinstall(): Nothing = throw CsCloudUnsupportedOperationException()
 
+    /**
+     * M07（brief Step 3）：本服务协调同一个启动operation与健康确认。begin≈spawn（starter
+     * lambda立即拉起进程），CscCloudStarter结算spawn/exit终态并在exit 0后保持打开；此处
+     * 确认daemon可发现且/global/health 200后才结算success/health_failed。不等全部streams
+     * （那是M04的connection分母），也不只依据CsCloudStartDto.ok。
+     */
     override suspend fun startCsCloud(): CsCloudStartDto {
-        val result = starter()
-        if (result.ok) connect()
+        val operation = operations?.begin(START_OPERATION, START_DEADLINE_MS)
+        val result = starter(operation)
+        if (result.ok) {
+            val healthCode = confirmDaemonHealth()
+            if (healthCode == null) {
+                operation?.end(RESULT_SUCCESS, START_STAGE_HEALTH)
+            } else {
+                operation?.end(RESULT_FAILURE, START_STAGE_HEALTH, CAUSE_CS_CLOUD, healthCode)
+            }
+            connect()
+        } else if (operation != null && !operation.isSettled) {
+            // 兜底（stub starter/未来实现未接operation时）：按Dto受控code映射，不解析文本。
+            if (result.code == ConnectionErrorCode.CSC_NOT_INSTALLED) {
+                operation.end(
+                    RESULT_BLOCKED,
+                    START_STAGE_SPAWN,
+                    CAUSE_ENVIRONMENT,
+                    ConnectionErrorCode.CSC_NOT_INSTALLED,
+                )
+            } else {
+                operation.end(RESULT_FAILURE, START_STAGE_EXIT, CAUSE_UNKNOWN, START_CODE_OTHER)
+            }
+        }
         // Every result of this call describes the start phase, standalone or via installCsc().
         return result.copy(stage = CsCloudStartDto.STAGE_START)
+    }
+
+    /**
+     * 启动健康确认：daemon端点可发现（resolver）且健康检查通过才算启动成功（metrics M07
+     * "命令返回正常但健康超时不能算服务可用"）。复用resolver+checkHealth现有实现，不建
+     * 镜像业务；返回null=健康，否则启动error_code受控值。发现失败同样归health_failed——
+     * csc能退出0说明二进制在，失败在daemon未起（完整插件连接归M04，这里不归csc_not_installed）。
+     */
+    private suspend fun confirmDaemonHealth(): String? {
+        val found = resolver.resolve().getOrElse { return START_CODE_HEALTH_FAILED }
+        return runCatching {
+            endpoint = found
+            val clients = CsCloudHttpClients.create(found, roots)
+            try {
+                checkHealth(clients)
+                null
+            } finally {
+                shutdown(clients.apiClient)
+                shutdown(clients.sseClient)
+                shutdown(clients.healthClient)
+                shutdown(clients.favoritesClient)
+            }
+        }.getOrElse { error ->
+            if (error is CancellationException) throw error
+            log.warn("csc cloud start health confirmation failed", error)
+            START_CODE_HEALTH_FAILED
+        }
     }
 
     /** Install the csc CLI, then start the daemon so the fresh install takes effect. */

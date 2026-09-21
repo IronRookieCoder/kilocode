@@ -1,22 +1,29 @@
 package ai.kilocode.backend.cli
 
 import ai.kilocode.log.KiloLog
+import ai.kilocode.stability.Operation
+import ai.kilocode.stability.Operations
 import com.intellij.openapi.application.PathManager
 import com.intellij.openapi.util.SystemInfo
 import com.intellij.util.EnvironmentUtil
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.put
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
 import org.apache.commons.compress.archivers.tar.TarArchiveInputStream
 import org.apache.commons.compress.compressors.gzip.GzipCompressorInputStream
 import java.io.File
+import java.io.IOException
 import java.io.RandomAccessFile
 import java.nio.channels.FileLock
 import java.nio.channels.OverlappingFileLockException
@@ -29,6 +36,39 @@ import java.util.concurrent.TimeUnit
 import java.util.zip.ZipInputStream
 import kotlin.math.roundToInt
 
+/** M09 cli.download（brief Step 5）：固定provider=kilo-cli由采集身份的
+ *  connection_provider承载（kilo-cli模式下运行本下载器），无需逐条携带。 */
+private const val CLI_DOWNLOAD_OPERATION = "cli.download"
+private const val STAGE_DOWNLOAD = "download"
+private const val STAGE_EXTRACT = "extract"
+private const val STAGE_VERIFY = "verify"
+private const val STAGE_CACHE = "cache"
+
+/** result六值（metrics 1.2）与cause受控词表（metrics 1.3）固定值。 */
+private const val RESULT_SUCCESS = "success"
+private const val RESULT_FAILURE = "failure"
+private const val RESULT_TIMEOUT = "timeout"
+private const val RESULT_CANCELLED = "cancelled"
+private const val CAUSE_USER = "user"
+private const val CAUSE_NETWORK = "network"
+private const val CAUSE_ENVIRONMENT = "environment"
+private const val CAUSE_UNKNOWN = "unknown"
+
+/** 下载error_code受控值（metrics 3.2）：none/github_ratelimit/digest_mismatch/
+ *  lock_timeout/readonly_fs/network/other。 */
+private const val CODE_GITHUB_RATELIMIT = "github_ratelimit"
+private const val CODE_DIGEST_MISMATCH = "digest_mismatch"
+private const val CODE_LOCK_TIMEOUT = "lock_timeout"
+private const val CODE_READONLY_FS = "readonly_fs"
+private const val CODE_NETWORK = "network"
+private const val CODE_OTHER = "other"
+
+/** 固定error_code映射所需的类型化失败：按抛出点分类，绝不解析消息文本。 */
+private class LockTimeoutException(message: String) : IllegalStateException(message)
+private class RateLimitException(message: String) : IllegalStateException(message)
+private class DigestMismatchException(message: String) : IllegalStateException(message)
+private class CacheWriteException(message: String) : IllegalStateException(message)
+
 class KiloCliDownloader(
     private val http: OkHttpClient = KiloBackendHttpClients.cliDownload(),
     private val log: KiloLog = KiloLog.create(KiloCliDownloader::class.java),
@@ -37,72 +77,128 @@ class KiloCliDownloader(
     private val api: String = "https://api.github.com/repos/Kilo-Org/kilocode/releases/tags",
     private val digests: Map<String, String> = KiloCliChecksums.load(),
     private val lockTimeoutMs: Long = LOCK_TIMEOUT_MS,
+    /** 稳定性采集入口（B2同型注入）：null=采集不可用，下载业务照常。 */
+    private val operations: Operations? = null,
 ) {
     companion object {
         private const val LOCK_TIMEOUT_MS = 30_000L
         private const val LOCK_POLL_MS = 100L
+
+        /**
+         * cli.download的观测deadline：真实业务上界是KiloBackendCliManager.init的
+         * withTimeout（30s启动+8s宽限），resolve（含下载）在该窗口内被业务放弃。
+         */
+        private const val DOWNLOAD_DEADLINE_MS = 38_000L
         private val DIGEST = Regex("^sha256:[a-f0-9]{64}$")
         private val JSON = Json { ignoreUnknownKeys = true }
         private val LOCKS = ConcurrentHashMap<String, Any>()
     }
 
-    suspend fun resolve(version: String, force: Boolean = false, onProgress: (CliDownload) -> Unit = {}): File =
-        withContext(Dispatchers.IO) {
-            logPaths(version, force)
-            locked {
-                val platform = KiloCliPlatform.current()
-                val dir = File(File(root, version), platform)
-                val exe = File(dir, "bin/${KiloCliPlatform.exe()}")
-                val done = File(dir, ".complete")
-                val ext = KiloCliPlatform.archive(platform)
+    /**
+     * M09（brief Step 5）：begin包围真实获取与验证；cached分支end(stage=cache,
+     * cache_hit=true)不混入下载耗时；download/extract/verify保留业务进度回调并另记
+     * progress；失败按metrics 3.2映射固定error_code（类型化失败，不解析消息文本）。
+     */
+    suspend fun resolve(version: String, force: Boolean = false, onProgress: (CliDownload) -> Unit = {}): File {
+        val operation = operations?.begin(CLI_DOWNLOAD_OPERATION, DOWNLOAD_DEADLINE_MS)
+        return runCatching { resolveDownload(version, force, onProgress, operation) }
+            .onFailure { error -> operation?.settleResolveFailure(error) }
+            .getOrThrow()
+    }
+
+    /** 唯一终态映射：超时/取消之外按异常类型落固定error_code（metrics 3.2下载词表）。 */
+    private fun Operation.settleResolveFailure(error: Throwable) {
+        when (error) {
+            is TimeoutCancellationException ->
+                // 业务deadline（init的38s上界）到点：下载词表无timeout码，result已表达超时。
+                end(RESULT_TIMEOUT, STAGE_DOWNLOAD, CAUSE_NETWORK, CODE_OTHER)
+            is CancellationException -> end(RESULT_CANCELLED, STAGE_DOWNLOAD, CAUSE_USER)
+            else -> settleDownloadFailure(error)
+        }
+    }
+
+    private suspend fun resolveDownload(
+        version: String,
+        force: Boolean,
+        onProgress: (CliDownload) -> Unit,
+        operation: Operation?,
+    ): File = withContext(Dispatchers.IO) {
+        logPaths(version, force)
+        locked {
+            val platform = KiloCliPlatform.current()
+            val dir = File(File(root, version), platform)
+            val exe = File(dir, "bin/${KiloCliPlatform.exe()}")
+            val done = File(dir, ".complete")
+            val ext = KiloCliPlatform.archive(platform)
+
+            log.info(
+                "Kilo CLI cache target: version=$version platform=$platform exe=${exe.absolutePath} " +
+                    "complete=${done.absolutePath} force=$force"
+            )
+
+            if (!force) {
+                cached(version, platform, exe, done)?.let {
+                    // 缓存命中是独立operation的success（stage=cache），绝不并入下载耗时。
+                    operation?.end(RESULT_SUCCESS, STAGE_CACHE, fields = buildJsonObject { put("cache_hit", true) })
+                    return@locked it
+                }
+            }
+
+            val digest = digest(version, platform, ext)
+            val stage = stage(version, platform)
+            try {
+                val archive = File(stage, "kilo-$platform.$ext")
+                val staged = File(stage, "bin/${KiloCliPlatform.exe()}")
+                val complete = File(stage, ".complete")
 
                 log.info(
-                    "Kilo CLI cache target: version=$version platform=$platform exe=${exe.absolutePath} " +
-                        "complete=${done.absolutePath} force=$force"
+                    "Kilo CLI $version for $platform is not cached; downloading new release into ${stage.absolutePath}"
                 )
-
-                if (!force) {
-                    cached(version, platform, exe, done)?.let { return@locked it }
+                operation?.progress(STAGE_DOWNLOAD)
+                onProgress(CliDownload(0, version, platform))
+                download(version, platform, ext, archive, onProgress)
+                log.info("Verifying Kilo CLI archive ${archive.absolutePath}")
+                operation?.progress(STAGE_VERIFY)
+                verify(archive, digest)
+                log.info(
+                    "Downloaded Kilo CLI $version for $platform to ${archive.absolutePath} (size=${archive.length()} bytes)"
+                )
+                operation?.progress(STAGE_EXTRACT)
+                extract(archive, stage)
+                if (!staged.isFile) {
+                    throw IllegalStateException("Downloaded CLI archive did not contain bin/${KiloCliPlatform.exe()}")
                 }
-
-                val digest = digest(version, platform, ext)
-                val stage = stage(version, platform)
-                try {
-                    val archive = File(stage, "kilo-$platform.$ext")
-                    val staged = File(stage, "bin/${KiloCliPlatform.exe()}")
-                    val complete = File(stage, ".complete")
-
-                    log.info(
-                        "Kilo CLI $version for $platform is not cached; downloading new release into ${stage.absolutePath}"
-                    )
-                    onProgress(CliDownload(0, version, platform))
-                    download(version, platform, ext, archive, onProgress)
-                    log.info("Verifying Kilo CLI archive ${archive.absolutePath}")
-                    verify(archive, digest)
-                    log.info(
-                        "Downloaded Kilo CLI $version for $platform to ${archive.absolutePath} (size=${archive.length()} bytes)"
-                    )
-                    extract(archive, stage)
-                    if (!staged.isFile) {
-                        throw IllegalStateException("Downloaded CLI archive did not contain bin/${KiloCliPlatform.exe()}")
-                    }
-                    if (!SystemInfo.isWindows) staged.setExecutable(true)
-                    if (archive.exists() && !archive.delete()) {
-                        log.warn("Failed to delete extracted Kilo CLI archive ${archive.absolutePath}")
-                    }
-                    log.info("Writing Kilo CLI cache completion marker ${complete.absolutePath}")
-                    complete.writeText("$digest\n")
-                    replace(dir, stage)
-                    onProgress(CliDownload(100, version, platform))
-                    prune(version)
-                    exe
-                } finally {
-                    if (stage.exists() && !stage.deleteRecursively()) {
-                        log.warn("Failed to delete staged Kilo CLI download ${stage.absolutePath}")
-                    }
+                if (!SystemInfo.isWindows) staged.setExecutable(true)
+                if (archive.exists() && !archive.delete()) {
+                    log.warn("Failed to delete extracted Kilo CLI archive ${archive.absolutePath}")
+                }
+                log.info("Writing Kilo CLI cache completion marker ${complete.absolutePath}")
+                complete.writeText("$digest\n")
+                replace(dir, stage)
+                onProgress(CliDownload(100, version, platform))
+                prune(version)
+                // 一次获取到可用文件且校验完成（metrics M09）：success的stage=verify。
+                operation?.end(RESULT_SUCCESS, STAGE_VERIFY)
+                exe
+            } finally {
+                if (stage.exists() && !stage.deleteRecursively()) {
+                    log.warn("Failed to delete staged Kilo CLI download ${stage.absolutePath}")
                 }
             }
         }
+    }
+
+    /** 失败→固定（result/stage/cause/error_code）映射（metrics 1.2/1.3/3.2下载词表）。 */
+    private fun Operation.settleDownloadFailure(error: Throwable) {
+        when (error) {
+            is LockTimeoutException -> end(RESULT_FAILURE, STAGE_CACHE, CAUSE_ENVIRONMENT, CODE_LOCK_TIMEOUT)
+            is CacheWriteException -> end(RESULT_FAILURE, STAGE_CACHE, CAUSE_ENVIRONMENT, CODE_READONLY_FS)
+            is DigestMismatchException -> end(RESULT_FAILURE, STAGE_VERIFY, CAUSE_NETWORK, CODE_DIGEST_MISMATCH)
+            is RateLimitException -> end(RESULT_FAILURE, STAGE_DOWNLOAD, CAUSE_NETWORK, CODE_GITHUB_RATELIMIT)
+            is IOException -> end(RESULT_FAILURE, STAGE_DOWNLOAD, CAUSE_NETWORK, CODE_NETWORK)
+            else -> end(RESULT_FAILURE, STAGE_DOWNLOAD, CAUSE_UNKNOWN, CODE_OTHER)
+        }
+    }
 
     private fun cached(version: String, platform: String, exe: File, done: File): File? {
         val digest = done.takeIf { it.isFile }?.readText()?.trim()
@@ -121,7 +217,7 @@ class KiloCliDownloader(
     private fun <T> locked(block: () -> T): T {
         log.info("Ensuring Kilo CLI cache root ${root.absolutePath}")
         if (!root.isDirectory && !root.mkdirs()) {
-            throw IllegalStateException("Failed to create Kilo CLI cache root ${root.absolutePath}")
+            throw CacheWriteException("Failed to create Kilo CLI cache root ${root.absolutePath}")
         }
         val file = File(root, ".lock").canonicalFile
         log.info("Kilo CLI cache lock path: ${file.absolutePath}")
@@ -151,7 +247,7 @@ class KiloCliDownloader(
             if (waited >= lockTimeoutMs) {
                 val msg = "Timed out waiting for Kilo CLI cache lock after ${waited}ms: ${file.absolutePath}"
                 log.warn(msg)
-                throw IllegalStateException(msg)
+                throw LockTimeoutException(msg)
             }
             Thread.sleep(LOCK_POLL_MS.coerceAtMost((lockTimeoutMs - waited).coerceAtLeast(1L)))
         }
@@ -164,7 +260,7 @@ class KiloCliDownloader(
         val dir = File(tmp, "$version-$platform-${System.nanoTime()}")
         log.info("Creating Kilo CLI staging directory ${dir.absolutePath}")
         if (!dir.isDirectory && !dir.mkdirs()) {
-            throw IllegalStateException("Failed to create Kilo CLI staging directory ${dir.absolutePath}")
+            throw CacheWriteException("Failed to create Kilo CLI staging directory ${dir.absolutePath}")
         }
         return dir
     }
@@ -178,7 +274,7 @@ class KiloCliDownloader(
 
         val backup = File(parent, ".${dir.name}.backup-${System.nanoTime()}")
         if (dir.exists() && !dir.renameTo(backup)) {
-            throw IllegalStateException("Failed to move existing Kilo CLI cache ${dir.absolutePath} aside")
+            throw CacheWriteException("Failed to move existing Kilo CLI cache ${dir.absolutePath} aside")
         }
         if (stage.renameTo(dir)) {
             log.info("Installed Kilo CLI cache at ${dir.absolutePath}")
@@ -191,7 +287,7 @@ class KiloCliDownloader(
         if (backup.exists() && !backup.renameTo(dir)) {
             log.warn("Failed to restore previous Kilo CLI cache ${backup.absolutePath} to ${dir.absolutePath}")
         }
-        throw IllegalStateException("Failed to install Kilo CLI cache ${stage.absolutePath} to ${dir.absolutePath}")
+        throw CacheWriteException("Failed to install Kilo CLI cache ${stage.absolutePath} to ${dir.absolutePath}")
     }
 
     private fun fail(message: String): Nothing {
@@ -225,7 +321,7 @@ class KiloCliDownloader(
                 val detail = if (body.isNullOrBlank()) "" else ": $body"
                 if (limited(response)) {
                     log.warn("GitHub API rate limit hit fetching Kilo CLI $version metadata from $url ($info)$detail")
-                    throw IllegalStateException(
+                    throw RateLimitException(
                         "GitHub API rate limit exceeded while resolving Kilo CLI $version ($info)$detail"
                     )
                 }
@@ -302,7 +398,7 @@ class KiloCliDownloader(
         val actual = sum(file)
         if (actual == digest) return
         if (file.exists() && !file.delete()) log.warn("Failed to delete invalid Kilo CLI archive ${file.absolutePath}")
-        throw IllegalStateException("Kilo CLI archive digest mismatch for ${file.name}: expected $digest, got $actual")
+        throw DigestMismatchException("Kilo CLI archive digest mismatch for ${file.name}: expected $digest, got $actual")
     }
 
     private fun sum(file: File) = "sha256:${sha256(file)}"
