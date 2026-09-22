@@ -35,7 +35,11 @@ private val METRICS = setOf("metrics")
 private val DUAL = setOf("metrics", "logs")
 private val LOGS = setOf("logs")
 
-/** 全部登记name的期望形态；plugin.unclean无插件发射点（设计7.3属消费端判定），本扫描经Draft验证其登记形状可落盘。 */
+/**
+ * 全部登记name的期望形态（31个，非error键在第一用例内与Dictionary.names闭集对齐）；
+ * plugin.unclean无插件发射点（设计7.3属消费端判定），本扫描经Draft验证其登记形状可落盘。
+ * error.count/error.detail是error族两个schema分支的期望键，对应登记名error.reported/error.uncaught。
+ */
 private val EXPECTED: Map<String, Form> = mapOf(
     "plugin.started" to Form("lifecycle", "critical", DUAL),
     "plugin.shutdown" to Form("lifecycle", "critical", DUAL),
@@ -64,6 +68,7 @@ private val EXPECTED: Map<String, Form> = mapOf(
     "resource.snapshot" to Form("sample", "critical", METRICS),
     "protocol.error" to Form("diagnostic", "critical", DUAL),
     "edt.violation" to Form("diagnostic", "critical", DUAL),
+    "edt.stall" to Form("sample", "critical", METRICS),
     "telemetry.health" to Form("health", "critical", DUAL),
     // error族两形态：计数写critical仅metrics（限频不改变次数），详情写diagnostic仅logs。
     "error.count" to Form("diagnostic", "critical", METRICS),
@@ -75,10 +80,18 @@ private fun fields(vararg pairs: Pair<String, String>): JsonObject = buildJsonOb
 }
 
 /**
+ * 扫描用tick：全量覆盖断言要求突发写入零丢弃，而writer后台tick的tryClaim/release与
+ * 生产者tryLock争用会把突发中的记录按CONTENTION计丢（fail-open语义，对逐name闭集断言
+ * 即假失败——HEAD上曾观察到一次3条相邻transition事实被丢）。60秒初始延迟保证整个突发
+ * 期间无后台排空，落盘只经flush()屏障（排空与tick无关），断言语义不变。
+ */
+private const val SWEEP_QUIET_TICK_MS = 60_000L
+
+/**
  * 全字典落盘扫描（设计第9章事件字典/第6章事实格式；验收口径"插件端所有类型"）：
  * 真实Recorder→真实Writer→真实临时目录，对每个登记name产出至少一条合法事实，
- * flush封存后只从.ready还原断言——
- *  - 30个登记name全部落盘，kind/channel/purposes与Dictionary投影一致；
+ * flush后从追加事实文件（单一jsonl，Fixture.facts()）还原断言——
+ *  - 31个登记name全部落盘，kind/channel/purposes与Dictionary投影一致；
  *  - error族计数形态（critical/metrics）与详情形态（diagnostic/logs）分道落盘；
  *  - 7种kind（operation/transition/lifecycle/interval/sample/diagnostic/health）齐备；
  *  - seq按通道从1连续；account_epoch/policy_revision来自控制文件；
@@ -89,17 +102,27 @@ class DictionarySweepTest {
 
     @Test
     fun `all registered names land on disk in their dictionary form`() {
-        Fixture().use { fixture ->
+        Fixture(tickMs = SWEEP_QUIET_TICK_MS).use { fixture ->
             driveAllNames(fixture)
             fixture.flush()
             val facts = fixture.facts()
+
+            // —— 闭集锚定：EXPECTED的非error键必须恰等于Dictionary登记名的非error子集
+            // （error两形态期望键对应error.reported/error.uncaught两个登记名）；
+            // 字典新增name而本扫描未补形态/驱动时，在此先失败 ——
+            assertEquals(
+                Dictionary.names.filter { !it.startsWith("error.") }.toSet(),
+                EXPECTED.keys.filter { !it.startsWith("error.") }.toSet(),
+                "EXPECTED must project exactly the registered non-error names",
+            )
+            assertEquals(setOf("error.reported", "error.uncaught"), Dictionary.names.filter { it.startsWith("error.") }.toSet())
 
             // —— 覆盖：每个登记name至少一条（error族按形态核对）——
             val names = facts.map { it.name }.filter { !it.startsWith("error.") }.toSet()
             val expectedNames = EXPECTED.keys
                 .filter { !it.startsWith("error.") } // error两形态单独断言
                 .toSet()
-            assertEquals(expectedNames, names, "every registered name must reach .ready files on disk")
+            assertEquals(expectedNames, names, "every registered name must reach the appended jsonl on disk")
 
             // —— 形态：kind/channel/purposes与Dictionary投影一致 ——
             val violations = facts.mapNotNull { fact ->
@@ -160,7 +183,7 @@ class DictionarySweepTest {
 
     @Test
     fun `logs-only policy keeps logs facts on disk and drops metrics-only names`() {
-        Fixture().use { fixture ->
+        Fixture(tickMs = SWEEP_QUIET_TICK_MS).use { fixture ->
             fixture.base.resolve("control.json").writeText(controlJson(metrics = false, logs = true))
             fixture.policies.refresh()
             val ops = fixture.operations
@@ -182,7 +205,7 @@ class DictionarySweepTest {
 
     @Test
     fun `metrics-only policy keeps metrics facts on disk and drops log details`() {
-        Fixture().use { fixture ->
+        Fixture(tickMs = SWEEP_QUIET_TICK_MS).use { fixture ->
             fixture.base.resolve("control.json").writeText(controlJson(metrics = true, logs = false))
             fixture.policies.refresh()
             val ops = fixture.operations
@@ -289,6 +312,15 @@ class DictionarySweepTest {
                 },
             ),
         )
+        // ---- edt.stall经真实StallMerger驱动：同区间两枚首尾相接样本（seq 1→2）合并为
+        // 2.5秒窗口，onObservationEnded终结后达标产出——Draft形状由合并器产出，不伪造 ----
+        val stalls = mutableListOf<Draft>()
+        val stallMerger = StallMerger { stalls.add(it) }
+        stallMerger.onValidSample("obs-sweep-stall", 1, 10_000, 11_800)
+        stallMerger.onValidSample("obs-sweep-stall", 2, 11_800, 12_500)
+        stallMerger.onObservationEnded()
+        stalls.forEach(fixture.recorder::record)
+
         fixture.resources.acquire("subscription").use { }
         resourceSnapshotDrafts(fixture.resources.snapshot()).forEach { fixture.recorder.record(it) }
 
