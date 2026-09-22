@@ -417,6 +417,30 @@ class KiloBackendSessionManagerTest {
     }
 
     @Test
+    fun `nested invalid SSE status records one decode error and continues`() = runBlocking {
+        Fixture().use { fixture ->
+            val app = setup()
+            ready(app)
+            val manager = KiloBackendSessionManager(scope, log, fixture.operations)
+            manager.start(app.api ?: error("missing API"), app.http ?: error("missing HTTP"), app.base ?: error("missing base"), app.events)
+
+            mock.awaitSseConnection()
+            mock.pushEvent("session.status", """{"type":"session.status","properties":{"sessionID":"ses_bad","status":{"type":{}}}}""")
+            mock.pushEvent("session.status", """{"type":"session.status","properties":{"sessionID":"ses_good","status":{"type":"busy"}}}""")
+
+            withTimeout(5_000) {
+                manager.statuses.first { it["ses_good"]?.type == "busy" }
+            }
+            fixture.flush()
+            manager.stop()
+
+            val facts = fixture.facts().filter { it.name == "protocol.error" }
+            assertEquals(1, facts.size)
+            assertEquals("decode_failed", facts.single().data.getValue("error_code").jsonPrimitive.content)
+        }
+    }
+
+    @Test
     fun `SSE status updates replace previous status`() = runBlocking {
         val app = setup()
         ready(app)

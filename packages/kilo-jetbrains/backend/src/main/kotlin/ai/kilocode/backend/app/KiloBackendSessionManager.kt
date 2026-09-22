@@ -85,7 +85,9 @@ class KiloBackendSessionManager(
                     val pair = try {
                         KiloCliDataParser.parseSessionStatusStrict(event.data)
                     } catch (_: SerializationException) {
-                        operations?.protocolError(ProtocolTransport.SSE, ProtocolStage.DECODE, ProtocolCode.DECODE_FAILED)
+                        if (!event.observed) {
+                            operations?.protocolError(ProtocolTransport.SSE, ProtocolStage.DECODE, ProtocolCode.DECODE_FAILED)
+                        }
                         log.warn("SSE session status decode failed")
                         return@collect
                     }

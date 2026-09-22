@@ -43,7 +43,8 @@ sealed class ConnectionState {
     data class Error(val message: String, val details: String? = null, val code: String? = null) : ConnectionState()
 }
 
-data class SseEvent(val type: String, val data: String)
+/** [observed] means an upstream transport already emitted a protocol.error for this event. */
+data class SseEvent(val type: String, val data: String, val observed: Boolean = false)
 
 /**
  * Manages the CLI server connection: SSE stream, health polling, heartbeat,

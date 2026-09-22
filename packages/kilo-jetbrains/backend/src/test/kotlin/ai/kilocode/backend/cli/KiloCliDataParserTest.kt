@@ -1132,6 +1132,12 @@ class KiloCliDataParserTest {
             assertFailsWith<kotlinx.serialization.SerializationException> {
                 KiloCliDataParser.parseSessionStatusStrict("""{"sessionID":{},"status":{"type":"idle"}}""")
             }
+            assertFailsWith<kotlinx.serialization.SerializationException> {
+                KiloCliDataParser.parseSessionStatusStrict("""{"sessionID":"ses_1","status":{}}""")
+            }
+            assertFailsWith<kotlinx.serialization.SerializationException> {
+                KiloCliDataParser.parseSessionStatusStrict("""{"sessionID":"ses_1","status":{"type":{}}}""")
+            }
         }
 
         @Test

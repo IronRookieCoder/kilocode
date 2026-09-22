@@ -1,6 +1,8 @@
 package ai.kilocode.cscloud
 
 import ai.kilocode.backend.app.SseEvent
+import ai.kilocode.backend.app.KiloBackendSessionManager
+import ai.kilocode.jetbrains.api.client.DefaultApi
 import ai.kilocode.log.KiloLog
 import ai.kilocode.stability.Fixture
 import java.nio.file.Files
@@ -12,6 +14,14 @@ import kotlin.test.BeforeTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.OkHttpClient
 import okhttp3.mockwebserver.MockResponse
@@ -31,6 +41,7 @@ class SseObservationTest {
     private lateinit var server: MockWebServer
     private lateinit var fixture: Fixture
     private var workspace: java.nio.file.Path? = null
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
     @BeforeTest
     fun setUp() {
@@ -42,6 +53,7 @@ class SseObservationTest {
     @AfterTest
     fun tearDown() {
         fixture.close()
+        scope.cancel()
         server.shutdown()
     }
 
@@ -52,6 +64,12 @@ class SseObservationTest {
             .setHeader("Content-Type", "text/event-stream")
             .setSocketPolicy(SocketPolicy.KEEP_OPEN)
             .setBody(events.joinToString("") { "data: $it\n\n" })
+
+    private fun statuses(vararg events: String): MockResponse =
+        MockResponse()
+            .setHeader("Content-Type", "text/event-stream")
+            .setSocketPolicy(SocketPolicy.KEEP_OPEN)
+            .setBody(events.joinToString("") { "event: session.status\ndata: $it\n\n" })
 
     private fun open(vararg events: String): Harness {
         server.enqueue(sse(*events))
@@ -157,6 +175,44 @@ class SseObservationTest {
 
         // 每个真实解码失败计一次（accept与infer的二次解析不重复计数）；重复事件各自独立计。
         assertEquals(2, protocolFacts().size)
+    }
+
+    @Test
+    fun `invalid cs cloud status is observed once before session manager continues`() = runBlocking {
+        server.enqueue(statuses(
+            "{not-json",
+            """{"payload":{"type":"session.status","properties":{"sessionID":"ses_good","status":{"type":"busy"}}}}""",
+        ))
+        val base = server.url("/").toString().trimEnd('/')
+        val http = OkHttpClient()
+        val events = MutableSharedFlow<SseEvent>(replay = 2)
+        val manager = KiloBackendSessionManager(scope, TestLog, fixture.operations)
+        manager.start(DefaultApi(base, http), http, base, events)
+        val opened = CountDownLatch(1)
+        val client = CsCloudSseClient(
+            http = http,
+            base = base,
+            workspace = null,
+            log = TestLog,
+            onOpen = { opened.countDown() },
+            onEvent = { event -> events.tryEmit(event) },
+            onClosed = {},
+            onFailure = { _, _ -> },
+            operations = fixture.operations,
+        )
+        try {
+            client.start()
+            assertTrue(opened.await(5, TimeUnit.SECONDS), "sse stream did not open")
+            withTimeout(5_000) {
+                manager.statuses.first { it["ses_good"]?.type == "busy" }
+            }
+            fixture.flush()
+
+            assertEquals(1, protocolFacts().size)
+        } finally {
+            manager.stop()
+            client.close()
+        }
     }
 
     @Test

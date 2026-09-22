@@ -76,9 +76,11 @@ class CsCloudSseClient(
         }
 
         override fun onEvent(src: EventSource, id: String?, type: String?, data: String) {
-            if (!isCurrent(src) || !accept(data)) return
+            if (!isCurrent(src)) return
+            val result = accept(data)
+            if (!result.accepted) return
             val kind = type?.trim()?.takeIf { it.isNotEmpty() } ?: infer(data)
-            onEvent(SseEvent(kind, data))
+            onEvent(SseEvent(kind, data, result.observed))
         }
 
         override fun onClosed(src: EventSource) {
@@ -102,30 +104,32 @@ class CsCloudSseClient(
         true
     }
 
+    private data class Acceptance(val accepted: Boolean, val observed: Boolean = false)
+
     /** Host file events are global; only forward events scoped to the active project. */
-    private fun accept(data: String): Boolean {
+    private fun accept(data: String): Acceptance {
         val root = runCatching { json.parseToJsonElement(data).jsonObject }.getOrElse {
             // M15（C2）：真实SSE解码失败记一次protocol.error后照旧容忍转发（既有行为）。
             // 同事件在infer()里的二次解析不重复计数（它不产事实）；正常新增可选字段被
             // ignoreUnknownKeys正常忽略，绝不走这里；原始响应正文不入事实。
             operations?.protocolError(ProtocolTransport.SSE, ProtocolStage.DECODE, ProtocolCode.DECODE_FAILED)
-            return true
+            return Acceptance(accepted = true, observed = true)
         }
         val payload = root["payload"]?.let { runCatching { it.jsonObject }.getOrNull() }
         val kind = infer(data)
-        if (!kind.startsWith("host.")) return true
+        if (!kind.startsWith("host.")) return Acceptance(accepted = true)
         val dir = sequenceOf(
             root["directory"]?.jsonPrimitive?.contentOrNull(),
             payload?.get("directory")?.jsonPrimitive?.contentOrNull(),
             payload?.get("properties")?.let { runCatching { it.jsonObject["directory"]?.jsonPrimitive?.contentOrNull() }.getOrNull() },
-        ).filterNotNull().firstOrNull() ?: return true
-        val rootPath = workspace?.toAbsolutePath()?.normalize() ?: return true
+        ).filterNotNull().firstOrNull() ?: return Acceptance(accepted = true)
+        val rootPath = workspace?.toAbsolutePath()?.normalize() ?: return Acceptance(accepted = true)
         val eventPath = runCatching { Path.of(dir).toAbsolutePath().normalize() }.getOrNull() ?: run {
             // M15（C2）：host事件的directory违反可解析路径约束（apply违规）；既有丢弃行为不变。
             operations?.protocolError(ProtocolTransport.SSE, ProtocolStage.APPLY, ProtocolCode.APPLY_VIOLATION)
-            return false
+            return Acceptance(accepted = false, observed = true)
         }
-        return eventPath == rootPath || eventPath.startsWith(rootPath)
+        return Acceptance(accepted = eventPath == rootPath || eventPath.startsWith(rootPath))
     }
 
     private fun infer(data: String): String {

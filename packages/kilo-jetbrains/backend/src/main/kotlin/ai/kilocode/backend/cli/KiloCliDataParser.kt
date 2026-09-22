@@ -380,7 +380,15 @@ object KiloCliDataParser {
             ?: throw SerializationException("Session status requires sessionID")
         val status = props["status"]?.strictObject("Session status must be an object")
             ?: throw SerializationException("Session status requires status")
-        return id to parseStatus(status)
+        val type = status["type"]?.strictString("Session status type must be a string")
+            ?: throw SerializationException("Session status requires type")
+        return id to SessionStatusDto(
+            type = type,
+            message = status.optionalString("message", "Session status message must be a string"),
+            attempt = status.optionalLong("attempt", "Session status attempt must be an integer")?.safeInt(),
+            next = status.optionalLong("next", "Session status next must be an integer"),
+            requestID = status.optionalString("requestID", "Session status requestID must be a string"),
+        )
     }
 
     /** Parse a status event tolerantly for existing callers that do not observe protocol failures. */
@@ -1849,6 +1857,20 @@ object KiloCliDataParser {
     private fun JsonElement.strictString(message: String): String {
         val value = this as? JsonPrimitive
         if (value?.isString == true) return value.content
+        throw SerializationException(message)
+    }
+
+    private fun JsonObject.optionalString(key: String, message: String): String? {
+        val value = this[key] ?: return null
+        if (value is JsonNull) return null
+        return value.strictString(message)
+    }
+
+    private fun JsonObject.optionalLong(key: String, message: String): Long? {
+        val value = this[key] ?: return null
+        if (value is JsonNull) return null
+        val item = value as? JsonPrimitive
+        if (item?.isString == false) return item.longOrNull ?: throw SerializationException(message)
         throw SerializationException(message)
     }
 
