@@ -28,8 +28,10 @@ private const val PRODUCER_PREFIX = "pr-"
 private const val RUN_PREFIX = "run-"
 private const val DEVICE_PREFIX = "device-"
 private const val WORKSPACE_PREFIX = "ws-"
+private const val SCOPE_PREFIX = "sc-"
 private const val RANDOM_ID_CHARS = 12
 private const val DEVICE_SETTING_KEY = "ai.kilocode.stability.device.id"
+private const val SCOPE_SETTING_KEY = "ai.kilocode.stability.scope.id"
 private const val REGISTRATION_SCHEMA_MAJOR = 1
 
 /** 内部随机短ID：UUID去连字符取前12个十六进制字符。 */
@@ -78,6 +80,30 @@ fun platformDeviceIdStore(): DeviceIdStore = DeviceIdStore {
         PropertiesComponent.getInstance().getValue(DEVICE_SETTING_KEY)
             ?: (DEVICE_PREFIX + randomId()).also { PropertiesComponent.getInstance().setValue(DEVICE_SETTING_KEY, it) }
     }.getOrElse { DEVICE_PREFIX + randomId() }
+}
+
+/**
+ * IDE安装范围持久随机标识（设计5.2）：同一IDE多次启动共享，用于识别前任文件
+ * （plugin.unclean判定）与同源清理归属；不同IDE安装互不相同。存IDE持久设置，
+ * 与device_id分开存储；实现不得抛出。
+ */
+fun interface ScopeIdStore {
+    fun loadOrCreate(): String
+}
+
+/**
+ * 生产实现：与[platformDeviceIdStore]同型的PropertiesComponent持久化。平台应用不可得时
+ * 退化为本轮进程内固定的随机值（缓存而非每次重抽）：scope-id在同一实例内必须稳定，
+ * 否则同一安装的outbox文件名会漂移、前任文件无法识别。
+ */
+fun platformScopeIdStore(): ScopeIdStore {
+    var cached: String? = null
+    return ScopeIdStore {
+        runCatching {
+            PropertiesComponent.getInstance().getValue(SCOPE_SETTING_KEY)
+                ?: (SCOPE_PREFIX + randomId()).also { PropertiesComponent.getInstance().setValue(SCOPE_SETTING_KEY, it) }
+        }.getOrElse { cached ?: (SCOPE_PREFIX + randomId()).also { cached = it } }
+    }
 }
 
 /**

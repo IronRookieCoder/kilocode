@@ -438,6 +438,15 @@ class ProducerTest {
     }
 
     @Test
+    fun `scope id persists across store instances and matches the file name pattern`() {
+        val store = platformScopeIdStore() // 纯JVM环境：PropertiesComponent不可得时退化随机值
+        val scopeId = store.loadOrCreate()
+        assertTrue(scopeId.startsWith("sc-"), scopeId)
+        assertTrue(Regex("^[a-z0-9][a-z0-9-]*$").matches(scopeId), scopeId)
+        assertEquals(scopeId, store.loadOrCreate())
+    }
+
+    @Test
     fun `stop landing inside activation aborts the run without a started fact`() {
         val enteredActivation = java.util.concurrent.CountDownLatch(1)
         val releaseActivation = java.util.concurrent.CountDownLatch(1)
