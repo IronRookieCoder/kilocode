@@ -257,14 +257,14 @@ export JAVA_HOME="$HOME/.jdks/ms-21.0.12.1"
 | 命令 | 结果 |
 |---|---|
 | `./gradlew :shared:test --tests "ai.kilocode.stability.*"` | **178 tests / 0 failures**（17 类，BUILD SUCCESSFUL in 17s） |
-| `./gradlew :frontend:test --tests 'ai.kilocode.client.stability.*' --tests '*RenderObservation*' --tests 'ai.kilocode.client.KiloToolWindowFactoryTest'` | **42 tests / 0 failures**（6 类：stability 包 4 类 37 + RenderObservationTest 5） |
+| `./gradlew :frontend:test --tests 'ai.kilocode.client.stability.*' --tests '*RenderObservation*' --tests 'ai.kilocode.client.KiloToolWindowFactoryTest'` | **42 tests / 0 failures**（6 类：stability 包 4 类 28 + KiloToolWindowFactoryTest 9 + RenderObservationTest 5） |
 | `./gradlew :backend:test --tests '*MigrationObservation*' --tests '*IdeObservation*' --tests 'ai.kilocode.backend.app.KiloAppStateTest'` | **22 tests / 0 failures**（3 类：KiloAppStateTest 12 + MigrationObservationTest 5 + IdeObservationTest 5） |
 | `./gradlew :cs-cloud:test --tests '*ConnectionObservation*' --tests 'ai.kilocode.cscloud.CscInstallerTest' --tests 'ai.kilocode.cscloud.CscCloudStarterTest' --tests 'ai.kilocode.cscloud.CscLoginTest'` | **27 tests / 0 failures**（4 类：ConnectionObservationTest 11 + Csc 三件套 16） |
 | `./gradlew typecheck` | BUILD SUCCESSFUL in 44s |
 
 **glob 模式坑（记录备查）**：连字符 glob（`*render-observation*`、`*migration-observation*`、`*ide-observation*`、`*connection-observation*`）匹配的是**测试类名**，而这四个类实为 `RenderObservationTest`/`MigrationObservationTest`/`IdeObservationTest`/`ConnectionObservationTest`（无连字符）——连字符 glob 静默匹配零个类（其余 pattern 命中时 Gradle 不报错），§7/§10.4 沿用该命令形态时这四类从未被选中执行。本轮已改用驼峰 glob 补跑并计入上表。
 
-与迁移前（§10.4：175 tests）的结构变化（机制变更的直接映射）：新增 EdtStallTest（7，edt.stall 区间合并推导）、UncleanTest（3，前任文件 unclean 判定）；RetentionTest 11→3（`.ready` 淘汰/锁文件/身份三态用例随机制废止，现为 24h 同 scope 前缀清扫 3 条）；WriterTest 15→13、QueueTest 19→16（分段/锁/存储闸用例移除，新增 unbound fail-open）；ProducerTest 9→12（+单 jsonl 布局/撤销删待交接文件/scope id 持久）；PolicyTest 20→24、FactTest 29→30、FaultTest 11→12、HealthTest 6→9（health 增量语义）、OperationTest/RpcObservationTest/ResourcesTest/ContractTest/EnqueueBenchmarkTest/SelfTestTest/DictionarySweepTest 持平。
+与迁移前（§10.4 基线：175 tests / 0 failures）的净变化为 **+3 → 现 178 tests / 17 类**。机制变更的直接映射是定性的：新增 EdtStallTest（7，edt.stall 区间合并推导）与 UncleanTest（3，前任文件 unclean 判定）；`.ready` 淘汰/锁文件/身份三态用例随机制废止（清理语义现为 24h 同 scope 前缀清扫）；分段/锁/存储闸用例移除，新增 unbound fail-open、单 jsonl 布局、撤销删待交接文件、scope id 持久等用例；health 改为增量语义。迁移前的逐类构成未在历史记录中留档（本文档仅留 165→172→174→175 的总量轨迹，见 §2/§7/§9.6/§10.4），故不做逐类前后对比；现行逐类计数见 `shared/build/test-results/test/` 的本轮 JUnit XML 与任务报告。
 
 ### 11.3 真实 IDE E2E（Task 13 修复轮终态，未重跑）
 
