@@ -26,6 +26,9 @@ private const val FAR_EXPIRES = 9_000_000_000_000L
 /** 测试/fixture共用的Json实例约定（writer-test同款）：默认值随wire记录一并编码。 */
 private val factJson = Json { encodeDefaults = true }
 
+private fun Fact.phase(): String = data.getValue("phase").jsonPrimitive.content
+private fun Fact.text(key: String): String = data.getValue(key).jsonPrimitive.content
+
 /**
  * 13字段闭集控制文件（control-schema.json）的最小合法构造（brief Step 1）。
  * expiresAt由调用方传入；本文件统一用[FAR_EXPIRES]（brief示例字面9_999_999_999相对
@@ -408,6 +411,32 @@ class ProducerTest {
                 facts.all { it.run_id == runId },
                 "every fact lands in the active run, got ${facts.map { it.run_id }.toSet()}",
             )
+        }
+    }
+
+    @Test
+    fun `standby captured rpc timeout reaches the active run`() {
+        Harness().use { harness ->
+            val operations = harness.service.operations
+            harness.writeControl(validControl())
+            harness.service.start("monolith")
+            harness.awaitReason("ok")
+
+            val operation = operations.begin(
+                "rpc",
+                100,
+                buildJsonObject { put("api_group", "other") },
+            )
+            harness.awaitFacts(15_000) { facts ->
+                facts.any { it.context[CONTEXT_OPERATION_ID] == operation.id && it.phase() == "end" }
+            }
+
+            val facts = harness.facts()
+            val rpc = facts.filter { it.context[CONTEXT_OPERATION_ID] == operation.id }
+            val run = facts.first { it.name == "plugin.started" }.run_id
+            assertEquals(listOf("start", "end"), rpc.map { it.phase() })
+            assertEquals("timeout", rpc.last().text("result"))
+            assertTrue(rpc.all { it.run_id == run }, "captured rpc terminal reaches the active run")
         }
     }
 

@@ -177,6 +177,8 @@ $(( $(date +%s%3N) + 7200000 ))
 - `data` 内**没有**路径、Token、原始异常 message（§9 安全抽查）；
 - 高频事实（`rpc`/`edt.delay`/`render.apply`/`resource.snapshot`/`availability`）的 `purposes` 恒为 `["metrics"]`。
 
+RPC 终态复测：测试 RPC 时须保持 metrics 许可至少超过其 deadline；同一 `operation_id` 应有且仅有一条 `start` 与一条 `end(result=timeout)`。若中途切换用途，须同时检查最近一条 `telemetry.health` 的 `disabled_policy` 增量；metrics 终态停止采集是撤权语义，不能仅凭缺少 `end` 判定 RPC 生命周期故障。
+
 ## 6. 场景 C：策略生命周期（运行中改控制文件）
 
 单个 IDE 会话内按下表顺序操作；每步改文件时**同时递增 `revision`**，改完等 ≤ 45 秒再观察。所有阶段的落盘事实 `policy_revision` 应与产生它时的控制文件一致。
