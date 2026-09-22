@@ -259,6 +259,7 @@ class CsCloudMcpBridgeTest {
                 log = TestLog(),
                 project = { directory -> directory },
                 operations = fixture.operations,
+                timeout = TEST_BIND_TIMEOUT_MS,
             )
             try {
                 val down = runBlocking { bridge.ensure("conv-1", workspace) }
@@ -308,6 +309,7 @@ class CsCloudMcpBridgeTest {
         generateSequence { takeRequest(500, TimeUnit.MILLISECONDS) }.toList()
 
     private companion object {
+        const val TEST_BIND_TIMEOUT_MS = 200L
         val GENERATION = Regex("\"generation\":\"([^\"]+)\"")
     }
 }

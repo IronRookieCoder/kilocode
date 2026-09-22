@@ -68,6 +68,7 @@ class CsCloudMcpBridge(
     // M23（C5）：采集入口来源（生产由CsCloudConnectionService传入，测试注入fixture）；
     // null=采集不可用，业务照常。
     private val operations: Operations? = null,
+    private val timeout: Long = MCP_BIND_TIMEOUT_MS,
 ) : KiloSessionCapabilities {
     private data class Lease(val workspace: String, val generation: String, val tools: Set<String>, val job: Job, val epoch: Long)
     private val leases = ConcurrentHashMap<String, Lease>()
@@ -145,7 +146,7 @@ class CsCloudMcpBridge(
         val url = base.toHttpUrl().newBuilder().addPathSegments("api/v1/conversations").addPathSegment(id).addPathSegments("capabilities/ide").build()
         val request = Request.Builder().url(url).header("X-Workspace-Directory", workspace)
             .put(json.encodeToString(spec).toRequestBody("application/json".toMediaType())).build()
-        val bounded = http.newBuilder().callTimeout(MCP_BIND_TIMEOUT_MS, TimeUnit.MILLISECONDS).build()
+        val bounded = http.newBuilder().callTimeout(timeout, TimeUnit.MILLISECONDS).build()
         runCatching { bounded.newCall(request).execute().close() }.fold(
             onSuccess = { null },
             onFailure = {
