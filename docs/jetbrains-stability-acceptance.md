@@ -6,6 +6,7 @@
   - **PASS（插件范围）**——该行插件侧义务已被本分支测试真实覆盖，且在第 2 节命令下实际运行通过；服务端/消费端残留义务在"外部依赖清单"（第 10 节）登记。
   - **未通过**——该行核心验收需外部证据；缺失证据逐项写明，本地已覆盖子项一并注明。
   - **UNSUPPORTED**——无对应业务入口，不适用（仅 apply_edit）。
+- **迁移注记（2026-09-22）**：本文记录时点（2026-09-21）的采集协议为"分段封存 + 锁 + 登记"。其后的追加协议迁移（单写者追加 jsonl + 消费位移确认，设计文档 2026-09-22 版）已取代该机制。本文历史记录与判定**不回改**；凡引用旧机制（`registrations/`/`.ready`/`.claimed`/`.done`、`writer.lock`/`exchange.lock`、分段状态机、no_policy fail-closed、R9 存储闸）的行均已就地加注"**迁移后**"状态，现行证据见 [jetbrains-stability-e2e-evidence.md](./jetbrains-stability-e2e-evidence.md) §11。
 
 ## 1. 实际版本与环境
 
@@ -56,21 +57,21 @@
 
 | 场景 | 状态 | 本地证据（本分支实际运行通过） | 缺失证据（外部，精确到交付物） |
 |---|---|---|---|
-| 正常封存、认领、复制、ACK | 未通过 | WriterTest：封存仅 ATOMIC_MOVE、UTF-8 无 BOM NDJSON、预算恰好释放一次；QueueTest：tryClaim 跨通道取最老、claim 后预算至 release | Go consumer 的复制→持久→ACK、`.done` 派生与 `.ready`→`.done` 全链路实测（依赖第 10 节 1、2 项） |
-| writer 写一半崩溃 | 未通过 | WriterTest：写失败半行留 `.open`、不计 records、write_error 计数、禁用该段 | consumer 取得 writer 锁后救援完整行的跨进程实测 |
-| IDE 休眠/暂停超过 30 分钟 | 未通过 | WriterTest：封存由"首条起 30s/300s + 字节阈值"驱动（可控时钟），不依赖 mtime | 真平台休眠/断电后目录项持久性实验；平台休眠通知不可用（C3，`suspended` 词表位保留待 G1 校准） |
-| 多 IDE、PID 复用、多个 daemon | 未通过 | RetentionTest：`alive writer with matching start is skipped but pid reuse is swept`（ProcessHandle+startInstant 三态，同 JVM 等价） | 同机多 IDE 进程、多 daemon 单一消费者的跨进程实测 |
+| 正常封存、认领、复制、ACK | 未通过 | WriterTest：封存仅 ATOMIC_MOVE、UTF-8 无 BOM NDJSON、预算恰好释放一次；QueueTest：tryClaim 跨通道取最老、claim 后预算至 release **迁移后（2026-09-22）：`.ready`→`.claimed`/`.done` 认领状态机废止，确认=消费位移（设计 §7.2）；插件侧现行义务=单写者追加+线格式，外部缺失项改为位移提交事务性与 event_id 幂等重放** | Go consumer 的复制→持久→ACK、`.done` 派生与 `.ready`→`.done` 全链路实测（依赖第 10 节 1、2 项） |
+| writer 写一半崩溃 | 未通过 | WriterTest：写失败半行留 `.open`、不计 records、write_error 计数、禁用该段 **迁移后：无锁无救援；残缺尾行由 consumer 跳过、写者重写时截至最后完整行（WriterTest `append after crash residue starts on a fresh line`/`rewrite drops the unterminated residue tail`），"跨进程救援实测"外部项废止** | consumer 取得 writer 锁后救援完整行的跨进程实测 |
+| IDE 休眠/暂停超过 30 分钟 | 未通过 | WriterTest：封存由"首条起 30s/300s + 字节阈值"驱动（可控时钟），不依赖 mtime **迁移后：分段封存废止；现行 flush 语义=积压时最迟 30s flush+fsync 一次、16 条/64KiB 批阈值提前触发，diagnostic 不设更长延迟（WriterTest `pending bytes flush at most thirty seconds after the first unwritten batch entry` 等），与 mtime 无关的不变主张仍成立** | 真平台休眠/断电后目录项持久性实验；平台休眠通知不可用（C3，`suspended` 词表位保留待 G1 校准） |
+| 多 IDE、PID 复用、多个 daemon | 未通过 | RetentionTest：`alive writer with matching start is skipped but pid reuse is swept`（ProcessHandle+startInstant 三态，同 JVM 等价） **迁移后：pid/process_start 三态识别废止；清理=同 scope 前缀且 24h 无追加的整文件删除（RetentionTest 3 条），跨 scope 归 cs-cloud（§7.4）** | 同机多 IDE 进程、多 daemon 单一消费者的跨进程实测 |
 | consumer 在复制、累计、ACK 前后崩溃 | 未通过 | （插件侧无此职责） | daemon 崩溃重放不重复累计、稳定输出不变、已 ACK 输入可重建两出口 |
-| .ready 淘汰与认领竞争 | 未通过 | RetentionTest：最旧 diagnostic→critical 淘汰、锁文件绝不 unlink/recreate、`.claimed`/`.done` 永不触碰；WriterTest：同根第二 writer DISABLED | Go consumer 认领与插件淘汰的真实跨语言竞争（锁内只有一方成功） |
-| writer 淘汰与 consumer 救援并发 | 未通过 | RetentionTest：`own source sweep takes exchange only while the writer lock is already held`（writer→exchange 顺序） | Go consumer 不持 exchange 等 writer 的并发救援实测 |
-| 磁盘满、队列满、异常风暴 | 未通过 | QueueTest 19 条（2000 条/4MiB 先到、critical 预留 400 条/20% 字节、驱逐最老 diagnostic、争用即弃不变量）；R9 存储满准入闸（quota 计数、outbox_full 状态）；RetentionTest 10MiB 淘汰；record() 全路径无阻塞无 I/O | daemon 侧容量预算、真实磁盘满与异常风暴的全链路实测 |
+| .ready 淘汰与认领竞争 | 未通过 | RetentionTest：最旧 diagnostic→critical 淘汰、锁文件绝不 unlink/recreate、`.claimed`/`.done` 永不触碰；WriterTest：同根第二 writer DISABLED **迁移后：整行机制废止——无 `.ready`/`.done`、无锁文件；10MiB 容量由写者重写淘汰最旧行（WriterTest `oversize file rewrites keeping the tail and counting evicted lines`），无淘汰/认领竞争可言** | Go consumer 认领与插件淘汰的真实跨语言竞争（锁内只有一方成功） |
+| writer 淘汰与 consumer 救援并发 | 未通过 | RetentionTest：`own source sweep takes exchange only while the writer lock is already held`（writer→exchange 顺序） **迁移后：废止——无锁协议，并发简化为"consumer 只读 + 写者单写者追加"；重写与读取的竞争行为改为外部 gate `append_rewrite_contention_verified`（contract.json，false）** | Go consumer 不持 exchange 等 writer 的并发救援实测 |
+| 磁盘满、队列满、异常风暴 | 未通过 | QueueTest 19 条（2000 条/4MiB 先到、critical 预留 400 条/20% 字节、驱逐最老 diagnostic、争用即弃不变量）；R9 存储满准入闸（quota 计数、outbox_full 状态）；RetentionTest 10MiB 淘汰；record() 全路径无阻塞无 I/O **迁移后：R9 存储满准入闸与 outbox_full 状态废止（见第 8 节同行迁移后注）；磁盘容量=写者 10MiB 重写；内存队列容量/优先级/争用即弃不变量仍由 QueueTest 现行 16 条覆盖** | daemon 侧容量预算、真实磁盘满与异常风暴的全链路实测 |
 | 版本升级、账户切换且插件尚未刷新策略 | **PASS（插件范围）** | PolicyTest：epoch 更替永久退役、同账户重登不复活、时钟回跳防护、30s 轮询生效；ProducerTest：`revocation ends the run without faking shutdown and re-enable starts a new run`；A5 Coverage reason 闭集 | 服务端归属审计与外部凭据切换 e2e（第 10 节 6、7 项） |
-| daemon 不可用、IDE 多次重启并关闭采集 | 未通过 | RetentionTest：死亡 producer 过期文件清理、身份不明跳过、孤儿登记移除；ProducerTest：`collection stays off without permit and activates on the first permit` | 真实 daemon 不可用 + 多次 IDE 重启的长周期实测 |
+| daemon 不可用、IDE 多次重启并关闭采集 | 未通过 | RetentionTest：死亡 producer 过期文件清理、身份不明跳过、孤儿登记移除；ProducerTest：`collection stays off without permit and activates on the first permit` **迁移后：`孤儿登记移除`/`身份不明跳过` 废止（无 registrations 目录，目录即发现）；过期清理=24h 同 scope 前缀整文件清扫（RetentionTest 3 条）** | 真实 daemon 不可用 + 多次 IDE 重启的长周期实测 |
 | Split Mode 前端无消费器 | 未通过 | ProducerTest：mode/side 唯一来源平台 IdeProductMode（split/frontend、split/backend）；B5 设置页覆盖标签闭集（前端未接入/未授权） | Split Mode 真实两机部署验证（前端覆盖缺口不能宣称完整） |
 | 输入含路径/Token/异常消息 | **PASS（插件范围）** | FactTest：路径分隔符/控制字符/UTF-8 字节边界/上下文闭集拒绝；FaultTest：固定模板+受控枚举、frames 白名单、verbatim 限频用例无 "secret"/"alice"；WriterTest：落盘即 UTF-8 无 BOM NDJSON | 上传请求不含机密的出口审计（插件不实现上报，归外部 Sender，第 10 节 3、4 项） |
 | Windows/Linux/macOS | 未通过 | WriterTest（Windows/NTFS 实测）：ACL 配置后逐条比对核验（仅当前用户+SYSTEM）、ATOMIC_MOVE、0700/0600 POSIX 分支同实现 | Linux/macOS 实机矩阵（原子封存、锁、救援、清理、目录越界） |
-| JVM writer 与 Go consumer 同时持锁/救援 | 未通过 | WriterTest：FileChannel 字节范围 [0,1) 独占、CREATE_NEW 不 unlink（同 JVM/同进程互斥已证） | 外部 Go Writer/Consumer 可执行与互操作锁原语实验（fcntl/LockFileEx 与 FileChannel 互斥，不能用两套单测替代） |
-| 非默认 data-dir/auth-path、多 daemon 发布策略 | 未通过 | 自定义 profile 表现为默认控制文件缺失 → `no_policy` fail-closed（PolicyTest 不可读/缺失即拒；ProducerTest 无许可不激活） | daemon 侧多 daemon 发布者唯一性与非默认路径行为实测 |
+| JVM writer 与 Go consumer 同时持锁/救援 | 未通过 | WriterTest：FileChannel 字节范围 [0,1) 独占、CREATE_NEW 不 unlink（同 JVM/同进程互斥已证） **迁移后：整行废止——协议无锁（§7.2），锁互斥实验不再适用；历史锁证据（本行及 e2e-evidence §2 的 JVM↔Go LockFileEx 实测）保留为迁移前记录** | 外部 Go Writer/Consumer 可执行与互操作锁原语实验（fcntl/LockFileEx 与 FileChannel 互斥，不能用两套单测替代） |
+| 非默认 data-dir/auth-path、多 daemon 发布策略 | 未通过 | 自定义 profile 表现为默认控制文件缺失 → `no_policy` fail-closed（PolicyTest 不可读/缺失即拒；ProducerTest 无许可不激活） **迁移后：默认控制文件缺失的语义翻转为 fail-open——unbound 占位 epoch、rev0、purposes 全标（§8）；现行证据 QueueTest `unknown major falls open to the unbound placeholder` 与 E2E unbound 采集确认（e2e-evidence §11.3）；自定义 profile 仍不支持** | daemon 侧多 daemon 发布者唯一性与非默认路径行为实测 |
 
 ## 4. 设计 14.2 指标链路
 
@@ -130,9 +131,9 @@
 | 约束 | 覆盖测试（本分支，实际运行通过） |
 |---|---|
 | 队列 2000 条且 4MiB 先到者为准；critical 预留 400 条与 20% 字节 | QueueTest：`1600 diagnostics leave room for 400 critical records`、多字节先触字节限、持续 critical 只驱逐 diagnostic、超总容量驱逐后仍拒 |
-| 每 producer 未交接 10MiB、保留 24 小时 | RetentionTest：`own source quota evicts oldest diagnostic ready before critical`、`expired open and ready of a dead producer are swept while fresh files stay`、`expired claimed and done files are never touched by retention` |
+| 每 producer 未交接 10MiB、保留 24 小时 | RetentionTest：`own source quota evicts oldest diagnostic ready before critical`、`expired open and ready of a dead producer are swept while fresh files stay`、`expired claimed and done files are never touched by retention` **迁移后：`.ready` 淘汰与 `.claimed`/`.done` 保护用例废止；10MiB 超限由写者重写淘汰最旧行（淘汰计数入 health drop，WriterTest `oversize file rewrites keeping the tail and counting evicted lines`），24h 陈旧同 scope 文件整文件清扫（RetentionTest `sweep deletes only stale same-scope files` 等 3 条）** |
 | 单记录 32KiB、message 摘要 512 字节 | FactTest：UTF-8 字节口径 512/128/32KiB 边界、frames≤5；WriterTest：落盘前真实编码核对（超限丢弃计数） |
-| outbox 满拒绝新写入并计数（7.4） | 准入闸行为：QueueTest R9 三条——`storage full gate drops with quota reason and recovers when cleared`、`closed admission wins over the storage full gate`、`storage full gate beats queue capacity`（closed>full>capacity 优先级、quota 计数不入 buffer_full）。状态面：stability-service.kt 状态机（REASON_OUTBOX_FULL：预算不足置 outbox_full、预算恢复复开准入、随状态发布）与 KiloSettingsConfigurableTest 内部 reason token 闭集用例（outbox_full 不得泄漏为对外标签）。注：outbox_full 置位/恢复的状态转换本身无直接测试断言（经预算淘汰与 sweep 接线间接覆盖） |
+| outbox 满拒绝新写入并计数（7.4） | 准入闸行为：QueueTest R9 三条——`storage full gate drops with quota reason and recovers when cleared`、`closed admission wins over the storage full gate`、`storage full gate beats queue capacity`（closed>full>capacity 优先级、quota 计数不入 buffer_full）。状态面：stability-service.kt 状态机（REASON_OUTBOX_FULL：预算不足置 outbox_full、预算恢复复开准入、随状态发布）与 KiloSettingsConfigurableTest 内部 reason token 闭集用例（outbox_full 不得泄漏为对外标签）。注：outbox_full 置位/恢复的状态转换本身无直接测试断言（经预算淘汰与 sweep 接线间接覆盖） **迁移后：整行废止——R9 存储准入闸、outbox_full 状态机及其设置页 reason token 随分段机制移除；磁盘容量语义改为写者 10MiB 重写（§7.4 新版，见上一行迁移后注），内存队列 2000 条/4MiB 与 critical 预留语义仍由 QueueTest 现行 16 条覆盖** |
 | 双出口独立预算（服务端侧 metrics/logs 各自配额） | 未通过——依赖第 10 节 3、4 项 |
 
 ## 9. 灰度状态
@@ -144,8 +145,8 @@
 
 | # | 外部交付物 | 缺失证据/状态 | 阻塞的验收项 |
 |---|---|---|---|
-| 1 | 外部 Go Writer/Consumer 可执行测试程序 | 协议 `--scenario <name> --root <dir> --peer <executable>`；握手 `LOCKED`/`CLAIMED`/`SYNCED`/`ACKED`；确认状态后才触发中断/恢复（禁止 sleep 猜测）；peer 用 `--role peer` 且禁止递归启动对方；双进程 watchdog 内退出 0。驱动脚本 `script/stability-acceptance.ps1` 已就位，因缺此交付物今日运行即失败（第 2 节实测） | 六场景矩阵（lock-contention/dead-writer/pid-reuse/claim-race/sync-failure/replay-after-ack）、14.1 锁/救援各行、Step 3 全部文件场景 |
-| 2 | cs-cloud daemon consumer | 复制→持久→ACK、`.done`/`.claimed` 处置、认领竞争、durable ACK、崩溃重放不重复累计、旧 producer 清理、多 daemon 单一消费者 | 14.1 第 1/2/5/6/10 行、第 13 章联调确认 |
+| 1 | 外部 Go Writer/Consumer 可执行测试程序 | 协议 `--scenario <name> --root <dir> --peer <executable>`；握手 `LOCKED`/`CLAIMED`/`SYNCED`/`ACKED`；确认状态后才触发中断/恢复（禁止 sleep 猜测）；peer 用 `--role peer` 且禁止递归启动对方；双进程 watchdog 内退出 0。驱动脚本 `script/stability-acceptance.ps1` 已就位，因缺此交付物今日运行即失败（第 2 节实测） **迁移后：该交付物规格废止——协议无握手/认领/锁，整合面=按位移读取、文件变短（重写）归零重读、event_id 去重（§7.2）；原六场景矩阵不再适用，外部证据门槛改为位移提交/重放幂等与重写竞争（contract.json `offset_commit_verified`/`append_rewrite_contention_verified`，均 false）** | 六场景矩阵（lock-contention/dead-writer/pid-reuse/claim-race/sync-failure/replay-after-ack）、14.1 锁/救援各行、Step 3 全部文件场景 |
+| 2 | cs-cloud daemon consumer | 复制→持久→ACK、`.done`/`.claimed` 处置、认领竞争、durable ACK、崩溃重放不重复累计、旧 producer 清理、多 daemon 单一消费者 **迁移后：`.done`/`.claimed` 处置与认领竞争废止；现行义务=每文件持久位移与可靠接收原子提交、崩溃重放不重复累计、跨 scope 陈旧文件按 24h 保留期清理（§7.2/§7.4）** | 14.1 第 1/2/5/6/10 行、第 13 章联调确认 |
 | 3 | 统一指标 Sender 与指标服务 | Spec/labels 接受样例、逐项部分成功、重复 ID 幂等、413/stale_event 永久拒绝、多源累计查询与序列键承载定案（10.1） | 14.2 第 4/5 行、14.4 第 1 行、G0 指标侧 flag |
 | 4 | 日志 Sender 与日志服务 | endpoint 发现、九字段校验、expires_in 换算、空 200、413/429/401/403/503、Retry-After、X-Request-ID 关联 | 14.3 全部、14.4 第 6 行 |
 | 5 | M17（cs-cloud 两出口自观测） | cs_bridge 提案仍 Draft、未接入统一指标 Sender 及日志 Sender；不把候选名当已发布指标 | Step 4 出口指标、"数据何时进入上报服务" |

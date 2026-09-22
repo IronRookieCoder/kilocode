@@ -1,6 +1,6 @@
 # JetBrains 插件稳定性采集端到端证据（真实 IDE，G1 补充）
 
-- 记录日期：2026-09-21（首两场景）～2026-09-22（§9 查漏补缺轮、§10 全字典真实 IDE 落盘轮）；分支：`feat/jetbrains-stability`（工作区 HEAD `018b403e50` + 本次新增测试代码）。
+- 记录日期：2026-09-21（首两场景）～2026-09-22（§9 查漏补缺轮、§10 全字典真实 IDE 落盘轮、§11 追加协议迁移收口轮）；分支：`feat/jetbrains-stability`（工作区 HEAD `018b403e50` + 本次新增测试代码；§11 时点 HEAD `0f5fe48aad`）。
 - 测试载体：新增 Starter/Driver 集成测试 [StabilityE2eTest.kt](../packages/kilo-jetbrains/src/integrationTest/kotlin/ai/kilocode/jetbrains/StabilityE2eTest.kt)（2 个场景，各 1 次真实 IDE 启动）与 Go 锁探针 [lockprobe/main.go](../packages/kilo-jetbrains/src/integrationTest/go/lockprobe/main.go)。
 - 与 [jetbrains-stability-acceptance.md](./jetbrains-stability-acceptance.md) 的关系：该记录的"未通过"行中有 6 行当时缺失的是**真实 IDE 内运行、跨进程、跨语言**证据（第 3 节表格中标"本地证据"为同 JVM 单测的行）。本文补齐这部分；cs-cloud 消费端/服务端仍未部署，外部依赖清单（该文第 10 节）不变。
 - 环境：Windows 10 Pro 19045；OpenJDK 21.0.12.1；Gradle 9.4.1；IU-2026.1（IU-261.22158.277，本地缓存 IDE）；插件 `1.0.0-rc.1`（buildPlugin 产物 zip 安装进沙箱）；Go 1.26.4；沙箱 IDE `user.home` 为隔离临时目录（真实 `~/.costrict` 不受影响）。
@@ -234,4 +234,82 @@ export JAVA_HOME="$HOME/.jdks/ms-21.0.12.1"
 ./gradlew :shared:test --tests "ai.kilocode.stability.SelfTestTest"   # 驱动面单元级
 ./gradlew integrationTest --tests "ai.kilocode.jetbrains.StabilityDictionaryE2eTest"  # 全字典真实 IDE
 # 人工检查：out/stability-evidence/dictionary/（outbox + telemetry-home + samples.md）
+```
+
+## 11. 追加协议迁移轮（2026-09-22，单 jsonl 追加协议迁移收口）
+
+本轮为追加协议迁移（Task 1-13）的收口（Task 14）：Task 13 修复轮真实 IDE E2E 已 5/5 全绿（§11.3，按收口纪律未重跑、直接引用），本轮补齐全部定向单测回归与 typecheck（§11.2），并登记落盘证据（§11.4）。
+
+**与旧轮证据的差异声明**：本迁移将插件采集端从"分段封存 + 锁 + 登记"协议改为"单写者追加 jsonl + 消费位移确认"协议（设计 §5.2/§7.2/§7.4，设计文档 2026-09-22 版）。旧轮 §1-§10 所描述并验证的以下机制**均已被取代，不再是现行为**：`.open`/`.ready`/`.claimed`/`.done` 分段生命周期、`writer.lock`/`exchange.lock` 跨进程锁、`registrations/` 发现目录与 `producer.json`、多段 seq 连续性口径（现行：单文件内每 producer+run+channel 从 1 连续，写入闸策略丢弃消耗 seq）。§1-§10 作为历史记录保留不回改，**当前机制以本节与 2026-09-22 版设计文档为准**；[jetbrains-stability-acceptance.md](./jetbrains-stability-acceptance.md) 中引用旧机制的行已逐行加注迁移后状态。
+
+### 11.1 迁移后协议要点（判读口径）
+
+- **布局**：`~/.costrict/telemetry/outbox/<scope-id>-<producer-id>.jsonl` 每采集进程一个平铺文件，目录即发现、文件名即身份；无登记目录、无锁文件、无状态机后缀（§5.2）。
+- **确认**：cs-cloud 按文件持久位移确认（§7.2）；文件变短（容量重写）即位移归零重读，重复由 event_id 去重吸收。
+- **策略默认值**：无有效策略 fail-open——unbound 占位 epoch、policy_revision=0、purposes 全标（§8），E2E 实测见 §11.3 场景 2（无控制文件期）与场景 3（退役 epoch 回退占位）。
+- **容量与清理**：每文件 10MiB 由写者后台重写淘汰最旧行（截断至最后完整行、原子替换后同名重建）；陈旧（24h 无追加）**同 scope 前缀**文件由后续插件实例整文件删除，跨 scope 归 cs-cloud（§7.4）。
+- **崩溃语义**：无救援、无 mtime 死亡推断（§7.3）；残缺尾行由消费方跳过、写者重写时截去；`plugin.unclean` 由下一实例按 scope 前缀找到前任文件、`plugin.started` 之后无 `plugin.shutdown` 判定。
+
+### 11.2 定向回归与 typecheck（2026-09-22 实测）
+
+工作目录 `packages/kilo-jetbrains`，`JAVA_HOME=~/.jdks/ms-21.0.12.1`，全部退出码 0：
+
+| 命令 | 结果 |
+|---|---|
+| `./gradlew :shared:test --tests "ai.kilocode.stability.*"` | **178 tests / 0 failures**（17 类，BUILD SUCCESSFUL in 17s） |
+| `./gradlew :frontend:test --tests 'ai.kilocode.client.stability.*' --tests '*RenderObservation*' --tests 'ai.kilocode.client.KiloToolWindowFactoryTest'` | **42 tests / 0 failures**（6 类：stability 包 4 类 37 + RenderObservationTest 5） |
+| `./gradlew :backend:test --tests '*MigrationObservation*' --tests '*IdeObservation*' --tests 'ai.kilocode.backend.app.KiloAppStateTest'` | **22 tests / 0 failures**（3 类：KiloAppStateTest 12 + MigrationObservationTest 5 + IdeObservationTest 5） |
+| `./gradlew :cs-cloud:test --tests '*ConnectionObservation*' --tests 'ai.kilocode.cscloud.CscInstallerTest' --tests 'ai.kilocode.cscloud.CscCloudStarterTest' --tests 'ai.kilocode.cscloud.CscLoginTest'` | **27 tests / 0 failures**（4 类：ConnectionObservationTest 11 + Csc 三件套 16） |
+| `./gradlew typecheck` | BUILD SUCCESSFUL in 44s |
+
+**glob 模式坑（记录备查）**：连字符 glob（`*render-observation*`、`*migration-observation*`、`*ide-observation*`、`*connection-observation*`）匹配的是**测试类名**，而这四个类实为 `RenderObservationTest`/`MigrationObservationTest`/`IdeObservationTest`/`ConnectionObservationTest`（无连字符）——连字符 glob 静默匹配零个类（其余 pattern 命中时 Gradle 不报错），§7/§10.4 沿用该命令形态时这四类从未被选中执行。本轮已改用驼峰 glob 补跑并计入上表。
+
+与迁移前（§10.4：175 tests）的结构变化（机制变更的直接映射）：新增 EdtStallTest（7，edt.stall 区间合并推导）、UncleanTest（3，前任文件 unclean 判定）；RetentionTest 11→3（`.ready` 淘汰/锁文件/身份三态用例随机制废止，现为 24h 同 scope 前缀清扫 3 条）；WriterTest 15→13、QueueTest 19→16（分段/锁/存储闸用例移除，新增 unbound fail-open）；ProducerTest 9→12（+单 jsonl 布局/撤销删待交接文件/scope id 持久）；PolicyTest 20→24、FactTest 29→30、FaultTest 11→12、HealthTest 6→9（health 增量语义）、OperationTest/RpcObservationTest/ResourcesTest/ContractTest/EnqueueBenchmarkTest/SelfTestTest/DictionarySweepTest 持平。
+
+### 11.3 真实 IDE E2E（Task 13 修复轮终态，未重跑）
+
+```text
+./gradlew integrationTest --tests "ai.kilocode.jetbrains.StabilityE2eTest" --tests "ai.kilocode.jetbrains.StabilityDictionaryE2eTest"
+# BUILD SUCCESSFUL in 23m 4s（out/stability-evidence/probe/e2e-run4-fix1.log，E2E_EXIT=0）
+```
+
+JUnit 证据：`out/stability-evidence/probe/TEST-ai.kilocode.jetbrains.StabilityE2eTest-fixround1.xml`（**tests=4 failures=0**，1190.9s）+ `TEST-ai.kilocode.jetbrains.StabilityDictionaryE2eTest.xml`（**tests=1 failures=0**，177.5s）——合计 **5/5 PASS**。
+
+| 场景 | 耗时 | 关键实测（全部通过） |
+|---|---|---|
+| valid permit from cold start appends one wire-clean file and closes with a shutdown | 224.6s | 控制文件先于启动发布（rev1）；唯一文件 `sc-0db387d99587-pr-3144847b652e.jsonl` 在激活后出现并存活期字节单调不减；85 条全量线格式校验（seq 连续、epoch/rev 全一致）；恰 1 started、1 shutdown（app_close、物理末行）、0 unclean |
+| policy lifecycle gates collection and cleans the pending file on revocation without faking shutdown | 265.8s | 启动时无控制文件 → fail-open 采集确认（unbound/rev0、purposes 全标，159s 处）；rev1 后 30s 轮询预算内切换；run A 快照 45 条（unbound+rev1 同文件混存）；撤销（enabled=false）后 **19293ms** 删除待交接文件（等待期逐行扫描无伪造 shutdown——fix 轮 pin），且不重建；重授权后**同名文件重建**（assertEquals pin：run 换代、scope-producer 文件身份不变）；run B 仅 rev3，shutdown 物理末行；unbound 事实永不改绑 |
+| epoch rotation retires the old account without rebinding or faking shutdown | 291.2s | 直接换代（rev2）run A 存续、epoch-01 事实 20s 静默、无改绑交错；pending（rev3）发布后 **11020ms** 清理 pending 文件、无伪造 shutdown；epoch-03 ready 新 run B；回写已退役 epoch-01（rev5）→ **回退 unbound/rev0 占位继续采集**（fail-open 语义），退役 epoch 永不复活；seq 缺口逐个落在策略写入窗口（assertSeqGapsAtPolicyBoundaries） |
+| dead predecessor file is kept unclean-reported while stale same scope residue is swept | 409.3s | launch A 硬杀：文件保留、无伪造 shutdown；栽种 25h 同 scope+跨 scope 空文件；launch B：跨 scope 残留保留（消费者职责）、A 新鲜文件（24h 内）保留、B 全新 run 线格式干净（57 条 critical）；**scope 漂移 sc-0f5c66db9408≠sc-31e351378403 → R14 fallback (a) RECORDED 跳过**（见下） |
+| StabilityDictionaryE2eTest：every registered fact type lands on disk in a real ide and files are preserved | 177.5s | 30 个登记 name 全部经真实采集管线落盘于**唯一** jsonl（critical 与 diagnostic 行同文件）；文件名匹配 `^sc-[0-9a-f]{12}-pr-[0-9a-f]{12}\.jsonl$` 且全程稳定；7 kind 齐备、metrics/logs/dual 投影齐备、error 计数/详情分道；恰 1 started、1 shutdown |
+
+**R14 fallback（scope 守卫）如实说明**：沙箱 IDE 每次启动 ConfigImportHelper 重置设置目录，持久 scope id 跨启动不保留（专用探针 StabilityScopeProbeTest 实证：scopeA=sc-17c323cb3d3e → scopeB=sc-eecdebd904e9，495.1s，证据 `TEST-ai.kilocode.jetbrains.StabilityScopeProbeTest.xml`）。因此 residue 场景的"跨启动 plugin.unclean + 同 scope 残留清扫"分支在本环境不可 exercised：测试以"B 的文件是否与 A 同 scope 前缀"为守卫——同 scope 时必须完整断言（清扫栽种文件 + 恰 1 条 unclean 且为首条业务事实、`previous_run_id`/`no_shutdown_after_started` 逐字段核对）；不同 scope 时（当前沙箱行为）**响亮 RECORDED 跳过**，同时反向断言仍然生效：栽种的同 scope 文件按跨 scope 对待**必须保留**、B **不得**报告任何 unclean。unclean 判定逻辑本身由 UncleanTest 3 条单元覆盖（started-无-shutdown → 1 条 unclean 草稿；干净前任 → 无；跨 scope/自身文件 → 忽略）。
+
+**residue 弹窗状态**：§9.4/§10.5 记录的 JetBrains 试用反馈调查弹窗本轮**未再出现**——residue 场景 409.3s 完整通过（含 launch A 硬杀与 launch B 全程），5 场景 0 次弹窗。沙箱 vmoptions 的 `evaluation.feedback.enabled=false` 注入生效，环境级阻塞解除，无需人工 "No, Thanks"。
+
+**fix 轮两项 pinning（0f5fe48aad，已纳入最终断言面）**：
+1. **重建文件名 pin**：撤销删除后重授权，重建文件 assertEquals 必须**同名**——run 换代而文件身份不变，是"文件名即身份"协议的核心不变量；
+2. **排空窗口伪造关机扫描**：`awaitFileGone(dyingRunId=…)` 在等待待交接文件消失期间容忍性扫描其完整行，dying run 的 `plugin.shutdown` 一旦落盘即在案发现场失败——防止清理方删除证据前伪造关机事实逃过断言。
+
+### 11.4 落盘证据（人工检查入口）
+
+`packages/kilo-jetbrains/out/stability-evidence/`（Starter 同名重跑会清空沙箱，此目录为稳定保留点）：
+
+| 子目录 | 内容 |
+|---|---|
+| `probe/` | `e2e-run4-fix1.log`（终轮 gradle 全量输出，BUILD SUCCESSFUL in 23m 4s）；`TEST-…StabilityE2eTest-fixround1.xml`（4/4，含全部 `[e2e]` 断言叙事与耗时）；`TEST-…StabilityDictionaryE2eTest.xml`（1/1）；`TEST-…StabilityScopeProbeTest.xml`（scope 漂移探针 495.1s）；更早轮次 run1-3 日志与探针 run 日志 |
+| `dictionary/` | `outbox/sc-3a00f0183044-pr-c034ceb87fbd.jsonl`（92 行全字典事实）+ `telemetry-home/`（控制文件 + 同内容副本）+ `samples.md`（每 name 一条样本） |
+| `policy/` | `telemetry-home/`：控制文件 + 终态 outbox `sc-ff3346303e88-pr-37a9384f4f94.jsonl`（撤销清理后由 run B 同名重建的终态文件；run A 全量 45 条在测试内存快照中校验，叙事见 fixround1 XML） |
+| `epoch/` | `telemetry-home/`：控制文件（rev5 终态）+ 终态 outbox（run B 文件，含 rev4 事实与回退 unbound 后的事实） |
+| `residue/` | `outbox/` 4 文件：A 硬杀残留 `sc-0f5c66db9408-pr-9049cf924a6e.jsonl`（105 行）、B 文件 `sc-31e351378403-pr-d08c4ac55e33.jsonl`（57 行）、两个栽种空文件（同/跨 scope，均呈"跨 scope 保留"终态）+ `telemetry-home/` |
+
+### 11.5 复现
+
+```bash
+cd packages/kilo-jetbrains
+export JAVA_HOME="$HOME/.jdks/ms-21.0.12.1"
+./gradlew :shared:test --tests "ai.kilocode.stability.*"                # 单测 178 条
+./gradlew integrationTest --tests "ai.kilocode.jetbrains.StabilityE2eTest" \
+  --tests "ai.kilocode.jetbrains.StabilityDictionaryE2eTest"            # 真实 IDE 5 场景
+# 证据残留：out/stability-evidence/{probe,dictionary,policy,epoch,residue}/
 ```
