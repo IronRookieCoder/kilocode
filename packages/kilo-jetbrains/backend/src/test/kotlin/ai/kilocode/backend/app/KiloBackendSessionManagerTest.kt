@@ -6,6 +6,8 @@ import ai.kilocode.backend.app.KiloBackendSessionManager
 import ai.kilocode.backend.testing.FakeCliServer
 import ai.kilocode.backend.testing.MockCliServer
 import ai.kilocode.backend.testing.TestLog
+import ai.kilocode.stability.Fixture
+import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -358,6 +360,60 @@ class KiloBackendSessionManagerTest {
         val status = app.sessions.statuses.value["ses_live"]
         assertNotNull(status)
         assertEquals("busy", status.type)
+    }
+
+    @Test
+    fun `invalid SSE status records one decode protocol error and continues`() = runBlocking {
+        Fixture().use { fixture ->
+            val app = setup()
+            ready(app)
+            val manager = KiloBackendSessionManager(scope, log, fixture.operations)
+            manager.start(app.api ?: error("missing API"), app.http ?: error("missing HTTP"), app.base ?: error("missing base"), app.events)
+
+            mock.awaitSseConnection()
+            mock.pushEvent("session.status", "{invalid-secret-session-status")
+            mock.pushEvent("session.status", """{"type":"session.status","properties":{"sessionID":"ses_good","status":{"type":"idle"}}}""")
+
+            withTimeout(5_000) {
+                manager.statuses.first { it["ses_good"]?.type == "idle" }
+            }
+            fixture.flush()
+            manager.stop()
+
+            val facts = fixture.facts().filter { it.name == "protocol.error" }
+            assertEquals(1, facts.size)
+            val fact = facts.single()
+            assertEquals("sse", fact.data.getValue("transport").jsonPrimitive.content)
+            assertEquals("decode", fact.data.getValue("stage").jsonPrimitive.content)
+            assertEquals("decode_failed", fact.data.getValue("error_code").jsonPrimitive.content)
+            assertFalse(fact.data.toString().contains("invalid-secret-session-status"))
+        }
+    }
+
+    @Test
+    fun `incomplete SSE status records one decode protocol error and continues`() = runBlocking {
+        Fixture().use { fixture ->
+            val app = setup()
+            ready(app)
+            val manager = KiloBackendSessionManager(scope, log, fixture.operations)
+            manager.start(app.api ?: error("missing API"), app.http ?: error("missing HTTP"), app.base ?: error("missing base"), app.events)
+
+            mock.awaitSseConnection()
+            mock.pushEvent("session.status", """{"type":"session.status","properties":{"status":{"type":"idle"}}}""")
+            mock.pushEvent("session.status", """{"type":"session.status","properties":{"sessionID":"ses_good","status":{"type":"idle"}}}""")
+
+            withTimeout(5_000) {
+                manager.statuses.first { it["ses_good"]?.type == "idle" }
+            }
+            fixture.flush()
+            manager.stop()
+
+            val facts = fixture.facts().filter { it.name == "protocol.error" }
+            assertEquals(1, facts.size)
+            assertEquals("sse", facts.single().data.getValue("transport").jsonPrimitive.content)
+            assertEquals("decode", facts.single().data.getValue("stage").jsonPrimitive.content)
+            assertEquals("decode_failed", facts.single().data.getValue("error_code").jsonPrimitive.content)
+        }
     }
 
     @Test

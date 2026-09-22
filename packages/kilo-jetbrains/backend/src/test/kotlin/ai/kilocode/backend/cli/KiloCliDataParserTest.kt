@@ -1113,12 +1113,34 @@ class KiloCliDataParserTest {
         }
 
         @Test
-        fun `parseSessionStatus - missing status defaults to idle`() {
+        fun `parseSessionStatus - missing status returns null`() {
             val data = """{"sessionID":"ses_xyz"}"""
-            val result = KiloCliDataParser.parseSessionStatus(data)
-            assertNotNull(result)
-            assertEquals("idle", result.second.type)
-            assertNull(result.second.message)
+            assertNull(KiloCliDataParser.parseSessionStatus(data))
+        }
+
+        @Test
+        fun `parseSessionStatusStrict rejects malformed and incomplete events`() {
+            assertFailsWith<kotlinx.serialization.SerializationException> {
+                KiloCliDataParser.parseSessionStatusStrict("{not-json")
+            }
+            assertFailsWith<kotlinx.serialization.SerializationException> {
+                KiloCliDataParser.parseSessionStatusStrict("""{"status":{"type":"idle"}}""")
+            }
+            assertFailsWith<kotlinx.serialization.SerializationException> {
+                KiloCliDataParser.parseSessionStatusStrict("""{"sessionID":"ses_1","status":"idle"}""")
+            }
+            assertFailsWith<kotlinx.serialization.SerializationException> {
+                KiloCliDataParser.parseSessionStatusStrict("""{"sessionID":{},"status":{"type":"idle"}}""")
+            }
+        }
+
+        @Test
+        fun `parseStrings accepts arrays and wrapped arrays`() {
+            assertEquals(listOf("src/Main.kt"), KiloCliDataParser.parseStrings("""["src/Main.kt"]"""))
+            assertEquals(listOf("src/Main.kt"), KiloCliDataParser.parseStrings("""{"ok":true,"data":["src/Main.kt"]}"""))
+            assertFailsWith<kotlinx.serialization.SerializationException> {
+                KiloCliDataParser.parseStrings("""{"ok":false,"data":"not-an-array"}""")
+            }
         }
 
         @Test
