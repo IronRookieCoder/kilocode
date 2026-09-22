@@ -392,8 +392,14 @@ object KiloCliDataParser {
     }
 
     /** Parse a status event tolerantly for existing callers that do not observe protocol failures. */
-    fun parseSessionStatus(data: String): Pair<String, SessionStatusDto>? =
-        runCatching { parseSessionStatusStrict(data) }.getOrNull()
+    fun parseSessionStatus(data: String): Pair<String, SessionStatusDto>? = runCatching {
+        val obj = tryParseObject(data) ?: return@runCatching null
+        val payload = obj["payload"]?.jsonObject ?: obj
+        val props = payload["properties"]?.jsonObject ?: obj
+        val id = props.str("sessionID") ?: return@runCatching null
+        val status = props["status"]?.jsonObject ?: return@runCatching id to SessionStatusDto("idle")
+        id to parseStatus(status)
+    }.getOrNull()
 
     fun parseStrings(raw: String): List<String> {
         val data = when (val root = json.parseToJsonElement(raw)) {

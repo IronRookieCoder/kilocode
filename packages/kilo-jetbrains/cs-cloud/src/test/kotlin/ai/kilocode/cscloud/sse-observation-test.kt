@@ -216,6 +216,44 @@ class SseObservationTest {
     }
 
     @Test
+    fun `session manager observes invalid cs cloud status when client has no operations`() = runBlocking {
+        server.enqueue(statuses(
+            "{not-json",
+            """{"payload":{"type":"session.status","properties":{"sessionID":"ses_good","status":{"type":"busy"}}}}""",
+        ))
+        val base = server.url("/").toString().trimEnd('/')
+        val http = OkHttpClient()
+        val events = MutableSharedFlow<SseEvent>(replay = 2)
+        val manager = KiloBackendSessionManager(scope, TestLog, fixture.operations)
+        manager.start(DefaultApi(base, http), http, base, events)
+        val opened = CountDownLatch(1)
+        val client = CsCloudSseClient(
+            http = http,
+            base = base,
+            workspace = null,
+            log = TestLog,
+            onOpen = { opened.countDown() },
+            onEvent = { event -> events.tryEmit(event) },
+            onClosed = {},
+            onFailure = { _, _ -> },
+            operations = null,
+        )
+        try {
+            client.start()
+            assertTrue(opened.await(5, TimeUnit.SECONDS), "sse stream did not open")
+            withTimeout(5_000) {
+                manager.statuses.first { it["ses_good"]?.type == "busy" }
+            }
+            fixture.flush()
+
+            assertEquals(1, protocolFacts().size)
+        } finally {
+            manager.stop()
+            client.close()
+        }
+    }
+
+    @Test
     fun `normal close records no protocol or dispose facts`() {
         val harness = open("""{"payload":{"type":"session.idle","properties":{"sessionID":"s1"}}}""").start()
 

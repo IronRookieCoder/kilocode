@@ -1113,9 +1113,20 @@ class KiloCliDataParserTest {
         }
 
         @Test
-        fun `parseSessionStatus - missing status returns null`() {
+        fun `parseSessionStatus - missing status defaults to idle`() {
             val data = """{"sessionID":"ses_xyz"}"""
-            assertNull(KiloCliDataParser.parseSessionStatus(data))
+            val result = KiloCliDataParser.parseSessionStatus(data)
+            assertNotNull(result)
+            assertEquals("idle", result.second.type)
+            assertNull(result.second.message)
+        }
+
+        @Test
+        fun `parseSessionStatus - empty status defaults to idle`() {
+            val result = KiloCliDataParser.parseSessionStatus("""{"sessionID":"ses_xyz","status":{}}""")
+            assertNotNull(result)
+            assertEquals("idle", result.second.type)
+            assertNull(result.second.message)
         }
 
         @Test

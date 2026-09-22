@@ -112,8 +112,11 @@ class CsCloudSseClient(
             // M15（C2）：真实SSE解码失败记一次protocol.error后照旧容忍转发（既有行为）。
             // 同事件在infer()里的二次解析不重复计数（它不产事实）；正常新增可选字段被
             // ignoreUnknownKeys正常忽略，绝不走这里；原始响应正文不入事实。
-            operations?.protocolError(ProtocolTransport.SSE, ProtocolStage.DECODE, ProtocolCode.DECODE_FAILED)
-            return Acceptance(accepted = true, observed = true)
+            val observed = operations?.let {
+                it.protocolError(ProtocolTransport.SSE, ProtocolStage.DECODE, ProtocolCode.DECODE_FAILED)
+                true
+            } ?: false
+            return Acceptance(accepted = true, observed = observed)
         }
         val payload = root["payload"]?.let { runCatching { it.jsonObject }.getOrNull() }
         val kind = infer(data)
