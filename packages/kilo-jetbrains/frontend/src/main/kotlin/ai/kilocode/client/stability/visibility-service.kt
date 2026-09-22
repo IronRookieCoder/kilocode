@@ -1,6 +1,7 @@
 package ai.kilocode.client.stability
 
 import ai.kilocode.client.app.KiloAppService
+import ai.kilocode.rpc.dto.KiloAppStateDto
 import ai.kilocode.rpc.dto.KiloAppStatusDto
 import ai.kilocode.stability.Clock
 import ai.kilocode.stability.Operations
@@ -247,13 +248,16 @@ internal class VisibilityService(
 
 /** app状态→availability状态闭集；采集依赖不可用/过渡态按connecting（仍计活跃）。 */
 private fun currentAvailabilityState(): String {
-    val status = runCatching { service<KiloAppService>().state.value.status }.getOrNull()
-    return when (status) {
-        KiloAppStatusDto.READY -> STATE_READY
-        KiloAppStatusDto.MIGRATION_REQUIRED -> STATE_BLOCKED
-        KiloAppStatusDto.ERROR, KiloAppStatusDto.DISCONNECTED -> STATE_ERROR
-        KiloAppStatusDto.CONNECTING, KiloAppStatusDto.DOWNLOADING, KiloAppStatusDto.LOADING, null -> STATE_CONNECTING
-    }
+    val state = runCatching { service<KiloAppService>().state.value }.getOrNull()
+    return availabilityState(state)
+}
+
+internal fun availabilityState(state: KiloAppStateDto?): String = when {
+    state?.status == KiloAppStatusDto.MIGRATION_REQUIRED -> STATE_BLOCKED
+    state?.status == KiloAppStatusDto.READY && state.profile == null -> STATE_BLOCKED
+    state?.status == KiloAppStatusDto.READY -> STATE_READY
+    state?.status == KiloAppStatusDto.ERROR || state?.status == KiloAppStatusDto.DISCONNECTED -> STATE_ERROR
+    else -> STATE_CONNECTING
 }
 
 /** 平台默认采集入口：每次emit时定位，绝不缓存其他service实例（P0结构约定）。C3起probe.kt共用。 */
