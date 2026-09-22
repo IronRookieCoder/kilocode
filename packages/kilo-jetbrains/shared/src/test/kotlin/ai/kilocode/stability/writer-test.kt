@@ -3,6 +3,7 @@ package ai.kilocode.stability
 import java.nio.ByteBuffer
 import java.nio.file.Files
 import java.nio.file.Path
+import java.nio.file.StandardOpenOption
 import java.nio.file.attribute.AclEntry
 import java.nio.file.attribute.AclEntryFlag
 import java.nio.file.attribute.AclEntryType
@@ -176,6 +177,60 @@ class WriterTest {
             } finally {
                 reopened.close()
             }
+        }
+    }
+
+    // ---------- 崩溃残页（§7.2）：无LF的半行既不拼接下一条事实，也不进入重写结果 ----------
+
+    @Test
+    fun `append after crash residue starts on a fresh line`() {
+        Fixture(tickMs = 60_000L).use { fixture ->
+            assertEquals(Admission.QUEUED, fixture.recorder.record(criticalDraft()))
+            fixture.flush()
+            val file = fixture.outboxDir.resolve(fixture.fileName)
+            // 模拟崩溃残页：会话结束后向文件尾追加半行（无LF）——重启会话不得拼接。
+            fixture.writer.close()
+            Files.write(file, "{\"partial\"".encodeToByteArray(), StandardOpenOption.APPEND)
+            val resumed = Writer(
+                root = fixture.outboxDir,
+                fileName = fixture.fileName,
+                identity = REOPEN_IDENTITY,
+                recorder = fixture.recorder,
+                policies = fixture.policies,
+                clock = fixture.clock,
+                storage = fixture.storage,
+            )
+            resumed.start()
+            try {
+                assertEquals(Admission.QUEUED, fixture.recorder.record(criticalDraft()))
+                resumed.flush()
+                val lines = Files.readAllLines(file)
+                assertEquals(3, lines.size, "残页必须被终止为自己的行，新事实另起一行")
+                factJson.decodeFromString(Fact.serializer(), lines[0]) // 崩溃前的完整事实
+                assertEquals("{\"partial\"", lines[1], "残页字节终止为独立残行（consumer按§7.2跳过）")
+                factJson.decodeFromString(Fact.serializer(), lines[2]) // 新事实不得与残页拼接成一行
+            } finally {
+                resumed.close()
+            }
+        }
+    }
+
+    @Test
+    fun `rewrite drops the unterminated residue tail`() {
+        Fixture(tickMs = 60_000L, maxFileBytes = 1700L).use { fixture ->
+            repeat(2) { assertEquals(Admission.QUEUED, fixture.recorder.record(criticalDraft())) }
+            fixture.flush()
+            val file = fixture.outboxDir.resolve(fixture.fileName)
+            // 会话内追加半行（无LF）：下一次超预算写入触发rewrite，必须从最后一个行边界截断。
+            Files.write(file, "{\"partial\"".encodeToByteArray(), StandardOpenOption.APPEND)
+            assertEquals(Admission.QUEUED, fixture.recorder.record(criticalDraft()))
+            fixture.flush()
+            val text = Files.readString(file)
+            assertFalse(text.contains("{\"partial\""), "rewrite不得把无LF残页带入保留结果")
+            val lines = Files.readAllLines(file)
+            assertTrue(lines.size in 1..2, "保留完整行并追加新事实，got ${lines.size}")
+            lines.forEach { line -> factJson.decodeFromString(Fact.serializer(), line) } // 每行都是完整合法事实
+            assertTrue(fixture.writer.stats().droppedEvicted > 0)
         }
     }
 

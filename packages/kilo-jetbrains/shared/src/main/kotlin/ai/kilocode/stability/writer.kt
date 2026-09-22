@@ -5,6 +5,7 @@ import java.nio.ByteBuffer
 import java.nio.channels.FileChannel
 import java.nio.file.Files
 import java.nio.file.Path
+import java.nio.file.StandardOpenOption
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.RejectedExecutionException
@@ -301,8 +302,34 @@ class Writer(
         runCatching { channel?.close() }
         val open = storage.openAppend(file)
         channel = open
+        terminateUnterminatedTail(open)
         fileBytes = runCatching { open.size() }.getOrDefault(0L)
     }
+
+    /**
+     * 追加前的行对齐（§7.2/§7.4）：崩溃或写故障可能留下无LF残页——旧协议从不在损坏尾后追加
+     * （新run即新文件），追加协议必须先补一个LF把残页终止为独立残行（consumer按§7.2跳过），
+     * 绝不让本会话的第一条记录拼接到残页上。空文件与已对齐文件不动作。
+     */
+    private fun terminateUnterminatedTail(channel: FileChannel) {
+        if (fileEndsWithLf()) return
+        storage.writeAll(channel, ByteBuffer.wrap(byteArrayOf(LF_BYTE)))
+        storage.force(channel)
+    }
+
+    /**
+     * 尾字节核验：只有确认文件以LF结尾（或为空）才免修。核验失败按"需要对齐"处理——
+     * 误补一个LF至多留下空行（consumer按空白跳过），漏补则新事实与残页拼接丢一条记录。
+     */
+    private fun fileEndsWithLf(): Boolean = runCatching {
+        FileChannel.open(file, StandardOpenOption.READ).use { readable ->
+            val size = readable.size()
+            if (size == 0L) return@runCatching true
+            val tail = ByteBuffer.allocate(1)
+            readable.read(tail, size - 1)
+            tail.get(0) == LF_BYTE
+        }
+    }.getOrDefault(false)
 
     /** 文件被外部删除（§7.4）时关旧句柄；下次写入按原名重建，不视为错误。仅IO线程调用。 */
     private fun maybeReopenIfDeleted() {
@@ -349,7 +376,11 @@ class Writer(
         reopen()
     }
 
-    /** 读全部字节，从最后一段完整行起向首部按预算收纳；返回(保留字节, 淘汰整行数)。 */
+    /**
+     * 读全部字节，从最后一段完整行起向首部按预算收纳；返回(保留字节, 淘汰整行数)。
+     * 保留切片止于最后一个LF——无LF的崩溃残页被截断丢弃，既不进入重写结果（否则下一条
+     * 追加会拼接在残页上），也不计入fileBytes预算。
+     */
     private fun tailWithinBudget(reserveBytes: Int): Pair<ByteArray, Int> {
         if (!Files.exists(file)) return ByteArray(0) to 0
         val all = Files.readAllBytes(file)
@@ -373,7 +404,7 @@ class Writer(
             keptBytes += lineBytes
         }
         if (keepFrom == starts.size) return ByteArray(0) to starts.size
-        return all.copyOfRange(starts[keepFrom], all.size) to keepFrom
+        return all.copyOfRange(starts[keepFrom], start) to keepFrom
     }
 
     /** 禁用采集：原因固定可见并通知一次（A6在回调里做本地限频报告），绝不静默继续。 */
