@@ -120,6 +120,8 @@ class StabilityService private constructor(
     private val clock: Clock,
     private val pollIntervalMs: Long,
     private val awaitActiveHook: (Writer) -> Boolean,
+    private val retentionIntervalMs: Long = RETENTION_INTERVAL_MS,
+    private val retentionMaxBytes: Long = DEFAULT_MAX_BYTES,
 ) {
 
     /** 平台注入入口：light service按CoroutineScope构造（KiloBackendAppService同型）。 */
@@ -417,7 +419,7 @@ class StabilityService private constructor(
     private suspend fun retentionLoop() {
         while (!stoppedOnce.get()) {
             sweepOnce()
-            delay(RETENTION_INTERVAL_MS)
+            delay(retentionIntervalMs)
         }
     }
 
@@ -455,6 +457,7 @@ class StabilityService private constructor(
             producerId = identity.producerId,
             v1Root = v1Root(),
             registrationsDir = registrationsDir(),
+            maxBytes = retentionMaxBytes,
         )
         val withinQuota = runCatching { retention.sweepOwnSource(writerActive = runActive) }.getOrDefault(true)
         outboxFull = runActive && !withinQuota
@@ -525,6 +528,8 @@ class StabilityService private constructor(
             clock: Clock,
             pollIntervalMs: Long,
             awaitActiveHook: (Writer) -> Boolean = ::defaultAwaitActive,
+            retentionIntervalMs: Long = RETENTION_INTERVAL_MS,
+            retentionMaxBytes: Long = DEFAULT_MAX_BYTES,
         ) = StabilityService(
             scope,
             modeSource,
@@ -534,6 +539,8 @@ class StabilityService private constructor(
             clock,
             pollIntervalMs,
             awaitActiveHook,
+            retentionIntervalMs,
+            retentionMaxBytes,
         )
     }
 }

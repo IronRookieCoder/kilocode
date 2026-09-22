@@ -27,7 +27,7 @@ private const val LOCK_RANGE_OFFSET = 0L
 private const val LOCK_RANGE_SIZE = 1L
 
 /** 每producer未交接文件的默认预算（设计7.4）：10MiB、24小时；测试经构造参数校准。 */
-private const val DEFAULT_MAX_BYTES = 10L * 1024 * 1024
+internal const val DEFAULT_MAX_BYTES = 10L * 1024 * 1024
 private const val DEFAULT_MAX_AGE_MS = 24L * 60 * 60 * 1000
 
 /** 淘汰循环连续删除失败上限：超过即放弃本轮（Windows句柄占用等），下轮扫描重试。 */

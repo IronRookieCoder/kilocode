@@ -35,6 +35,9 @@ private class Harness(
     mode: RunMode = RunMode("monolith", "monolith"),
     deviceStore: DeviceIdStore = MemoryDeviceStore("device-fixed"),
     awaitActiveHook: (Writer) -> Boolean = ::defaultAwaitActive,
+    /** 生产默认=1小时（RETENTION_INTERVAL_MS为private，测试以字面值对齐）。 */
+    retentionIntervalMs: Long = 3_600_000L,
+    retentionMaxBytes: Long = DEFAULT_MAX_BYTES,
 ) : AutoCloseable {
 
     val telemetryHome = base.resolve("home").resolve(".costrict").resolve("telemetry")
@@ -53,6 +56,8 @@ private class Harness(
         clock = clock,
         pollIntervalMs = SERVICE_POLL_MS,
         awaitActiveHook = awaitActiveHook,
+        retentionIntervalMs = retentionIntervalMs,
+        retentionMaxBytes = retentionMaxBytes,
     )
 
     fun writeControl(json: String) {
@@ -143,6 +148,9 @@ private fun categories(on: Boolean) = JsonArray(
 private fun validControl(): String = control(enabled = true, metrics = true, logs = true)
 private fun metricsOnlyControl(): String = control(enabled = true, metrics = true, logs = false)
 private fun disabledControl(): String = control(enabled = false, metrics = false, logs = false)
+
+private fun startedDraft(): Draft =
+    Draft("plugin.started", "lifecycle", "critical", JsonObject(emptyMap()))
 
 private fun producerJsonField(root: Path, field: String): String {
     val json = Json.parseToJsonElement(Files.readString(root.resolve("producer.json"))) as JsonObject
@@ -325,6 +333,35 @@ class ProducerTest {
             assertTrue(runIds.size >= 2, "re-enable builds a new run id, got run ids $runIds")
             assertEquals(starts.size, runIds.size, "exactly one started fact per run")
             assertEquals(1, harness.facts().count { it.name == "plugin.shutdown" })
+        }
+    }
+
+    @Test
+    fun `outbox full gate closes admission and reopens after the age seal and eviction`() {
+        Harness(retentionMaxBytes = 2 * 1024, retentionIntervalMs = 200).use { harness ->
+            harness.writeControl(validControl())
+            harness.service.start("monolith")
+            harness.awaitReason("ok")
+
+            // 2KiB预算下单一.open段超预算且无.ready可淘汰：sweepOwnSource返回false→
+            // outbox_full（状态发布）→storage闸门拒绝新记录（R9，验收记录第135行缺口）。
+            repeat(6) {
+                assertEquals(Admission.QUEUED, harness.service.recorder.record(startedDraft()))
+            }
+            harness.awaitStatus(15_000) { it.reason == "outbox_full" }
+            assertEquals(
+                Admission.DROPPED,
+                harness.service.recorder.record(startedDraft()),
+                "storage gate must refuse new records while over budget",
+            )
+
+            // critical 30s年龄封存把.open转.ready后，下一轮sweep按预算淘汰最旧.ready：
+            // 预算恢复→闸门重开→新记录重新入队（closed>full>capacity优先级中的full分支解除）。
+            harness.clock.advance(31_000)
+            harness.awaitStatus(15_000) { it.reason == "ok" }
+            assertEquals(Admission.QUEUED, harness.service.recorder.record(startedDraft()))
+            harness.service.stop("unload")
+            harness.awaitReason("stopped_unload")
         }
     }
 

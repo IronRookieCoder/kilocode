@@ -238,10 +238,19 @@ class Writer(
      * 入盘前重判期（policy.kt契约：writer入盘前必须以当前时刻重新permit）：
      * 无有效策略或该记录用途已全部不被许可→丢弃并计数，绝不落盘；真实UTF-8编码后
      * 超过32KiB→丢弃并计数。返回null表示该记录不写。
+     *
+     * 已退役epoch的排队事实同样在此丢弃（设计8.1：插件观察到epoch更替即清空尚未写出
+     * 的旧epoch事实，不改绑新epoch）——策略快照本身仍有效时purposes重判覆盖不到这批
+     * 记录，必须显式对照[PolicyStore.retiredEpochs]；轮询窗口内已落盘的旧epoch记录
+     * 由consumer按退役集合丢弃，不属于本守卫职责。
      */
     @Suppress("ReturnCount")
     private fun encodeLine(fact: Fact): ByteArray? {
         val policy = policies.current()
+        if (fact.account_epoch in policies.retiredEpochs) {
+            droppedPolicy.incrementAndGet()
+            return null
+        }
         val permitted = policy?.permit(clock.wall(), fact.name) ?: emptySet()
         if (permitted.none { it in fact.purposes }) {
             droppedPolicy.incrementAndGet()

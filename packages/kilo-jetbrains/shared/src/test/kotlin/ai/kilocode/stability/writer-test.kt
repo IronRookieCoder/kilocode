@@ -217,6 +217,30 @@ class WriterTest {
         }
     }
 
+    // ---------- 8.1：观察到epoch更替后，已排队旧epoch事实不得改绑落盘 ----------
+
+    @Test
+    fun `queued facts of a retired epoch are dropped at the write gate`() {
+        Fixture(tickMs = 60_000L).use { fixture ->
+            // epoch=acct-a下排队（60s tick内writer尚未取出，构造真实的"已排队未写出"窗口）
+            assertEquals(Admission.QUEUED, fixture.recorder.record(lifecycleDraft()))
+            // 直接换到新epoch（pending过渡未被观察到）：acct-a在策略层永久退役
+            fixture.rotateEpochControl("acct-b", revision = 14L)
+            fixture.flush()
+
+            assertTrue(fixture.facts().none { it.account_epoch == "acct-a" }, "退役epoch的排队事实不得落盘")
+            assertEquals(1L, fixture.writer.stats().droppedPolicy)
+            assertEquals(0, fixture.recorder.depth().items)
+
+            // 换代后的新事实照常落盘，携带新epoch与revision（不改绑）
+            assertEquals(Admission.QUEUED, fixture.recorder.record(lifecycleDraft()))
+            fixture.flush()
+            val landed = fixture.facts()
+            assertEquals(listOf("acct-b"), landed.map { it.account_epoch })
+            assertEquals(listOf(14L), landed.map { it.policy_revision })
+        }
+    }
+
     // ---------- 预算释放：批次写入并计数后恰好释放一次 ----------
 
     @Test

@@ -113,6 +113,15 @@ class Fixture(
         policies.refresh()
     }
 
+    /**
+     * 将控制文件改写为同形状的新epoch并立即刷新策略快照（设计8.1"直接换"路径：
+     * daemon的pending过渡未被观察到，旧epoch在策略层已被退役）。
+     */
+    fun rotateEpochControl(epoch: String, revision: Long) {
+        base.resolve("control.json").writeText(defaultControl(epoch, revision))
+        policies.refresh()
+    }
+
     override fun close() {
         if (!closed.compareAndSet(false, true)) return
         runCatching { writer.close() }
@@ -155,9 +164,9 @@ class Fixture(
         )
 
         /** 真实wire形状（control-schema.json字段闭集），与A3测试同一形状。 */
-        fun defaultControl(): String = buildJsonObject {
+        fun defaultControl(epoch: String = "acct-a", revision: Long = 12L): String = buildJsonObject {
             put("schema_major", 1)
-            put("revision", 12L)
+            put("revision", revision)
             put("enabled", true)
             put("metrics_enabled", true)
             put("metrics_expires_at", 9_000_000_000_000L)
@@ -165,7 +174,7 @@ class Fixture(
             put("logs_enabled", true)
             put("logs_expires_at", 9_000_000_000_000L)
             put("logs_allowed_categories", JsonArray(listOf("critical", "diagnostic").map { JsonPrimitive(it) }))
-            put("account_epoch", "acct-a")
+            put("account_epoch", epoch)
             put("account_state", "ready")
             put("expires_at", 9_000_000_000_000L)
             put("log_detail_rate_limit", buildJsonObject { put("per_fingerprint_max_per_minute", 3) })
