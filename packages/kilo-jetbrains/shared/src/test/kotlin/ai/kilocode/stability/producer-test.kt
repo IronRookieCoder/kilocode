@@ -37,7 +37,7 @@ private class Harness(
     awaitActiveHook: (Writer) -> Boolean = ::defaultAwaitActive,
     /** 生产默认=1小时（RETENTION_INTERVAL_MS为private，测试以字面值对齐）。 */
     retentionIntervalMs: Long = 3_600_000L,
-    retentionMaxBytes: Long = DEFAULT_MAX_BYTES,
+    retentionMaxBytes: Long = 10L * 1024 * 1024,
 ) : AutoCloseable {
 
     val telemetryHome = base.resolve("home").resolve(".costrict").resolve("telemetry")

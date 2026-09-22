@@ -121,7 +121,8 @@ class StabilityService private constructor(
     private val pollIntervalMs: Long,
     private val awaitActiveHook: (Writer) -> Boolean,
     private val retentionIntervalMs: Long = RETENTION_INTERVAL_MS,
-    private val retentionMaxBytes: Long = DEFAULT_MAX_BYTES,
+    // 过渡桥接（T6）：DEFAULT_MAX_BYTES随Retention重写删除；参数与字面值随T11一并移除。
+    private val retentionMaxBytes: Long = 10L * 1024 * 1024,
 ) {
 
     /** 平台注入入口：light service按CoroutineScope构造（KiloBackendAppService同型）。 */
@@ -452,20 +453,13 @@ class StabilityService private constructor(
 
     private fun sweepOnce() {
         val identity = baseIdentity ?: return
-        val root = v1Root().resolve(identity.producerId)
-        val retention = Retention(
-            root = root,
-            clock = clock,
-            producerId = identity.producerId,
-            v1Root = v1Root(),
-            registrationsDir = registrationsDir(),
-            maxBytes = retentionMaxBytes,
-        )
-        val withinQuota = runCatching { retention.sweepOwnSource(writerActive = runActive) }.getOrDefault(true)
-        outboxFull = runActive && !withinQuota
-        // R9（设计7.4"仍无空间则拒绝新写入并计数"）：预算不满足即关闸，恢复回到预算内即开闸。
-        activeRecorder?.setStorageFull(outboxFull)
-        runCatching { retention.sweepOldSources() }
+        // 过渡桥接（T6）：陈旧清理改为同scope前缀的平铺jsonl整文件删除（§7.4）；现行布局
+        // （v1/<producer-id>/目录树）不含该形态，sweep对其为no-op；outbox布局与真实scope-id
+        // 随T11接入（届时改为Retention(outboxDir(), scopeId, outboxDir().resolve(fileName(identity)), clock)）。
+        val outbox = v1Root()
+        runCatching {
+            Retention(outbox, identity.producerId, outbox.resolve(identity.producerId), clock).sweep()
+        }
     }
 
     // ---- 惰性核心（控制读取与standby准入，run建立前record恒fail closed） --------
@@ -531,7 +525,7 @@ class StabilityService private constructor(
             pollIntervalMs: Long,
             awaitActiveHook: (Writer) -> Boolean = ::defaultAwaitActive,
             retentionIntervalMs: Long = RETENTION_INTERVAL_MS,
-            retentionMaxBytes: Long = DEFAULT_MAX_BYTES,
+            retentionMaxBytes: Long = 10L * 1024 * 1024,
         ) = StabilityService(
             scope,
             modeSource,

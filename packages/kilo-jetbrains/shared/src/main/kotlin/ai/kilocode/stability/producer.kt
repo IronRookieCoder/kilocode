@@ -120,37 +120,6 @@ class WorkspaceIds {
     }
 }
 
-/** pid证据（设计7.3：不能仅凭mtime判writer死亡，证据不足必须等待）。 */
-sealed class PidEvidence {
-    /** 进程不存在：可判定原writer已死。 */
-    data object Gone : PidEvidence()
-
-    /** 存活且启动时刻已知：与登记的process_start比对，一致=活跃writer，不一致=pid复用。 */
-    data class Alive(val startMs: Long) : PidEvidence()
-
-    /** 存活但启动时刻不明：证据不足，跳过清理。 */
-    data object Unknown : PidEvidence()
-}
-
-/** pid证据来源（产品依赖，测试注入假实现）。 */
-fun interface ProcessIdentity {
-    fun evidence(pid: Long): PidEvidence
-}
-
-/** 生产实现：ProcessHandle查询；startInstant不可得的存活进程按证据不足处理。 */
-object LiveProcesses : ProcessIdentity {
-    override fun evidence(pid: Long): PidEvidence = runCatching {
-        val handle = ProcessHandle.of(pid).orElse(null)
-        when {
-            handle == null -> PidEvidence.Gone
-            else -> {
-                val start = handle.info().startInstant().orElse(null)
-                if (start == null) PidEvidence.Unknown else PidEvidence.Alive(start.toEpochMilli())
-            }
-        }
-    }.getOrDefault(PidEvidence.Unknown)
-}
-
 /**
  * 生产者环境快照（设计5.2/6.1）：producer.json与ProducerIdentity公共字段的共同来源。
  * 全部平台读取经runCatching，取不到的值固定"unknown"（枚举闭集内绝不留空）；快照在run内不变。
