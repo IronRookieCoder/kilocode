@@ -378,7 +378,10 @@ class StabilityService private constructor(
         activeRecorder?.close()
         activeWriter?.close() // 有界排空：撤销后重判期使剩余事实不入盘
         activeWriter = null
-        runActive = false
+        synchronized(stateLock) {
+            runActive = false
+            baseIdentity = baseIdentity?.copy(connectionProvider = connectionProviderHint)
+        }
         // §8：用户撤销/总开关关闭/公共过期——停采并清理待交接数据，不保留补报
         val identity = baseIdentity
         if (identity != null) runCatching { Files.deleteIfExists(outboxDir().resolve(fileName(identity))) }

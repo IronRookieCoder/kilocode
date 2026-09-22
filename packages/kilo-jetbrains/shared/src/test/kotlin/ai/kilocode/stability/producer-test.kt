@@ -449,7 +449,6 @@ class ProducerTest {
 
             harness.writeControl(disabledControl())
             harness.awaitReason("unbound")
-            harness.service.noteConnectionProvider("kilo-cli")
             harness.writeControl(validControl())
             harness.awaitReason("ok")
             harness.service.stop("unload")
