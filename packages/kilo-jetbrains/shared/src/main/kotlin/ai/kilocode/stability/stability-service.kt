@@ -181,7 +181,7 @@ class StabilityService private constructor(
     val status: StateFlow<Coverage> = statusFlow.asStateFlow()
 
     /**
-     * 当前采集run的准入入口；run建立前经惰性standby（无策略时record恒DISABLED，fail closed）。
+     * 当前采集run的准入入口；run建立前经惰性standby（无策略时按unbound占位准入；显式关闭才DISABLED）。
      * F1：激活前被捕获的standby引用在run建立后经[Recorder.forwardTo]直投活跃run，不再有
      * 无人排空的黑洞队列；run切换后旧run引用仍仅产出DISABLED。
      */
@@ -193,8 +193,8 @@ class StabilityService private constructor(
         get() = activeOperations ?: lazyStandby().second
 
     /**
-     * 当前采集run的安全异常入口（A6）；run建立前经惰性standby——standby绑定无策略的
-     * fail-closed recorder，report恒DISABLED；激活前捕获的引用随run建立转发至活跃run
+     * 当前采集run的安全异常入口（A6）；run建立前经惰性standby——无策略时standby按unbound
+     * 占位准入，report照常入队；显式关闭才DISABLED；激活前捕获的引用随run建立转发至活跃run
      * （与[recorder]同一[Recorder.forwardTo]机制），stop后同样保留已关闭引用。
      */
     val faults: Faults
@@ -320,7 +320,7 @@ class StabilityService private constructor(
         activeOperations = Operations(recorder, clock, scope)
         // F1：standby接管点先行——从本run的recorder诞生起，激活前被长生命周期消费者捕获的
         // 引用即直投本run（启动窗口内的事实随writer ACTIVE后排空落盘），绝不滞留在无人
-        // 排空的standby队列；启动失败路径随即断开，落回standby自身的fail-closed准入。
+        // 排空的standby队列；启动失败路径随即断开，落回standby自身的unbound占位准入。
         standby?.first?.forwardTo = recorder
         // 追加协议布局（§5.2）：outbox下平铺单文件`<scope-id>-<producer-id>.jsonl`；
         // producerId每JVM固定，文件名跨run稳定（runId变化不改名）。
@@ -449,7 +449,7 @@ class StabilityService private constructor(
         }
     }
 
-    // ---- 惰性核心（控制读取与standby准入，run建立前record恒fail closed） --------
+    // ---- 惰性核心（控制读取与standby准入，run建立前record按unbound占位准入；显式关闭才DISABLED） --------
 
     private fun ensureCore(): ProducerIdentity = synchronized(stateLock) {
         val store = policies

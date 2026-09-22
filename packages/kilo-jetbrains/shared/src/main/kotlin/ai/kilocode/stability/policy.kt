@@ -156,8 +156,8 @@ class PolicyStore(
     val retiredEpochs: Set<String> get() = synchronized(lock) { retired.toSet() }
 
     /**
-     * 最新策略快照，**永非null**：无有效策略（公共策略缺失、不可读、畸形、未知major或
-     * 已观测过期）时返回[UNBOUND_POLICY]占位策略（设计第8章默认不限制采集）。
+     * 最新策略快照，**永非null**：无有效策略（公共策略缺失、不可读、畸形、未知major）
+     * 时返回[UNBOUND_POLICY]占位策略（设计第8章默认不限制采集）。
      * 每条记录与每次入盘前都必须重新调用：本方法即时推进时钟下沿并对已到期用途做禁用快照，
      * 到期判定不等下一次轮询。
      */
