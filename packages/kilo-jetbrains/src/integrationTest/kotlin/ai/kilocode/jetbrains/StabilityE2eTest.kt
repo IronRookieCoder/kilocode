@@ -181,12 +181,13 @@ class StabilityE2eTest : IntegrationTestBase() {
             // Snapshot run A's pending file before revocation (revocation deletes it from disk).
             runA = awaitAnyRunId(jsonl, timeoutMs = 30_000)
             runAFacts = parseTolerantLines(Files.readAllBytes(jsonl), jsonl)
-            println("[e2e] run A snapshot: ${runAFacts.size} facts (unbound + rev1 mix), run=$runA")
+            val runAFileName = jsonl.fileName.toString()
+            println("[e2e] run A snapshot: ${runAFacts.size} facts (unbound + rev1 mix), run=$runA, file=$runAFileName")
 
             // —— §8 revocation (common enabled=false): stop within 65s AND delete the pending file ——
             revokeMs = System.currentTimeMillis()
             writeControlFile(revision = 2, enabled = false)
-            awaitFileGone(jsonl, deadlineMs = revokeMs + 65_000)
+            awaitFileGone(jsonl, deadlineMs = revokeMs + 65_000, dyingRunId = runA)
             println("[e2e] pending file deleted ${System.currentTimeMillis() - revokeMs}ms after revocation")
             Thread.sleep(12_000)
             assertFalse(Files.exists(jsonl), "a revoked run must not re-create its fact file")
@@ -195,6 +196,11 @@ class StabilityE2eTest : IntegrationTestBase() {
             // —— §3 re-permit: the file is rebuilt under the SAME name with a NEW run_id ——
             writeControlFile(revision = 3, enabled = true)
             jsonl = awaitSingleOutboxFile(timeoutMs = 75_000)
+            assertEquals(
+                runAFileName,
+                jsonl.fileName.toString(),
+                "the rebuilt file must reuse the SAME scope-producer name (run identity changes, file identity must not)",
+            )
             awaitTolerantFact(timeoutMs = 65_000) { it.revision == 3L }
                 ?: throw AssertionError("run B did not record rev3 facts after re-permit")
             runB = awaitAnyRunId(jsonl, timeoutMs = 30_000)
@@ -304,7 +310,7 @@ class StabilityE2eTest : IntegrationTestBase() {
             // —— pending ends the run without faking a shutdown; the pending file is cleaned (§8) ——
             pendingMs = System.currentTimeMillis()
             writeControlFile(revision = 3, enabled = true, epoch = epoch2, accountState = "pending")
-            awaitFileGone(jsonl, deadlineMs = pendingMs + 65_000)
+            awaitFileGone(jsonl, deadlineMs = pendingMs + 65_000, dyingRunId = runA)
             println("[e2e] pending cleaned the pending file ${System.currentTimeMillis() - pendingMs}ms after publish")
 
             // —— ready under a brand-new epoch starts a new run (§8.1 "新操作上下文") ——
@@ -871,10 +877,27 @@ class StabilityE2eTest : IntegrationTestBase() {
         return null
     }
 
-    /** Polls until [file] disappears; fails once [deadlineMs] has passed. */
-    private fun awaitFileGone(file: Path, deadlineMs: Long) {
+    /**
+     * Polls until [file] disappears; fails once [deadlineMs] has passed. While the file is
+     * still present its complete lines are tolerantly scanned: a plugin.shutdown belonging to
+     * the dying run [dyingRunId] is a fabricated shutdown written during the drain window —
+     * the pending-file cleanup would delete the evidence, so it must fail here, in the act.
+     */
+    private fun awaitFileGone(file: Path, deadlineMs: Long, dyingRunId: String?) {
         while (System.currentTimeMillis() < deadlineMs) {
             if (!Files.exists(file)) return
+            if (dyingRunId != null) {
+                // 与写者/清理并发安全：读取失败按"文件已消失"处理，交还循环顶部的存在性检查。
+                runCatching { parseTolerantLines(Files.readAllBytes(file), file) }
+                    .getOrDefault(emptyList())
+                    .filter { it.name == "plugin.shutdown" && it.runId == dyingRunId }
+                    .forEach { fabricated ->
+                        throw AssertionError(
+                            "a fabricated plugin.shutdown landed during the drain window: " +
+                                "${file.fileName}:${fabricated.lineNo} data=${fabricated.obj["data"]}",
+                        )
+                    }
+            }
             Thread.sleep(1_000)
         }
         throw AssertionError("${file.fileName} still present ${deadlineMs - System.currentTimeMillis()}ms after its deadline")
