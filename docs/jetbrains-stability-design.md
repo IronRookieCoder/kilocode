@@ -149,7 +149,7 @@ flowchart LR
 
 本节回答“cs-cloud从哪里获取数据、拿到之后做什么”：把第1章的两条结论展开成cs-cloud侧的完整链路，供cs-cloud研发作为入口阅读。这里只划分阶段和职责边界，具体规则以引用章节为准，避免在两处重复维护。
 
-**获取数据（指标与日志共用）。** cs-cloud的消费组件随daemon启动，在agent初始化之前完成组装，也不依赖agent是否启动成功（见12.1）。它按下面四个阶段把插件落盘的事实接收到自己的可靠队列：
+**获取数据（指标与日志共用）。** cs-cloud的消费组件随daemon启动，在agent初始化之前完成组装，也不依赖agent是否启动成功（见12.1）。它按下面四个阶段把插件落盘的事实接收到自己的可靠队列（交接面的落盘路径、文件与格式总览见5.3）：
 
 | 阶段 | cs-cloud做什么 | 细节见 |
 |---|---|---|
@@ -206,6 +206,22 @@ critical保存计数、结果、生命周期和健康事实；diagnostic保存�
 producer.json固定该源的plugin_version、完整IDE构建号、归一化IDE版本、OS/arch、mode/side、env和device_id。记录本身也保存这些来源字段，避免生产者升级、清理元数据后历史无法解释。device_id是随机安装标识，重装是否更换取决于IDE持久设置是否保留，不能承诺重装必变。
 
 登记及控制子目录由双方约定专用，cs-cloud升级/清理不得误删。POSIX使用用户级0700/0600；Windows使用对应用户ACL，不能把chmod数值当作Windows权限实现。消费器验证用户所有权、解析后目录范围，拒绝符号链接/重解析点越界，不支持远程请求任意指定读取路径。
+
+#### 5.3 对接面总览：路径、文件与格式
+
+插件与cs-cloud在稳定性链路上的对接全部通过本机文件系统完成，插件不发起任何面向上报的HTTP调用：上行是outbox事实文件与发现登记，下行只有控制文件；认证、endpoint发现、上报与重试都在cs-cloud侧（见4.1）。cs-cloud实现消费器时，以下表为交接面的汇总入口，规则本体以引用章节为准，不在两处重复维护；消费组件的接入任务与可复用边界见12.1。
+
+| 交接物 | 落盘路径 | 写入方→读取方 | 格式与内容 | 细节见 |
+|---|---|---|---|---|
+| 事实文件 | `<ide-log-dir>/costrict-telemetry/v1/<producer-id>/<channel>/<run-id>-<segment-id>.open`，封存后同名`.ready`；channel取critical或diagnostic | 插件writer→cs-cloud consumer | NDJSON v1：UTF-8无BOM、LF结尾、每行一个JSON对象、普通记录≤32KiB；字段闭集与示例 | 6.1、7.1 |
+| 交接状态 | 同一文件名的后缀`.claimed`、`.done` | cs-cloud（插件永不触碰） | 后缀即状态机：.open→.ready→.claimed→.done；.done表示已进入durable spool | 7.2 |
+| 环境元数据 | `<outbox根>/producer.json` | 插件（首个成功run写一次）→cs-cloud | 单JSON对象：producer_id、device_id、plugin_version、ide_product、ide_build、ide_build_major、os_family、arch、mode、side、env、connection_provider | 5.2 |
+| 发现登记 | `~/.costrict/telemetry/registrations/<producer-id>.json` | 插件原子写→cs-cloud周期扫描（建议每5秒） | 单JSON对象：schema_major、outbox_path、producer_id、pid、process_start、created_at；只用于本机发现与所有权校验，不进入上报数据 | 4.1、5.2 |
+| 所有权与交接锁 | `<outbox根>/writer.lock`、`<outbox根>/exchange.lock` | 双方按规则持有 | 锁文件常驻、不得删除后重建；JVM/Go互操作原语、锁范围及统一锁顺序 | 7.2 |
+| 采集控制 | `~/.costrict/telemetry/control/jetbrains.json` | cs-cloud原子写→插件后台每30秒轮询 | control v1单JSON对象：开关、分用途有效期、account_epoch、account_state、允许事件类别及日志诊断限频；缺失、畸形或未知major按无有效策略fail closed | 8 |
+| 机器可读wire契约 | `packages/kilo-jetbrains/shared/src/test/resources/stability/` | 双方共同冻结 | fact-schema.json（事实行）与control-schema.json（控制文件）为JSON Schema；output-vectors.json承载输出ID向量的冻结（当前pending_freeze）；contract.json登记阶段0各项的冻结与验证状态 | 9.1、12 |
+
+两条根路径职责不同，不能混用：`~/.costrict/telemetry`位于用户主目录，是默认profile边界（5.2），只存放跨IDE的发现登记与控制文件；`<ide-log-dir>/costrict-telemetry`位于IDE日志目录，只存放本producer的outbox数据，机器局部——Split Mode下backend机器的cs-cloud读不到frontend机器的outbox（5.1）。事实行内禁止路径与凭据（6.1白名单）；登记文件的outbox_path是交接面中唯一的路径字段，consumer必须校验其解析结果不越出预期目录范围，并拒绝符号链接/重解析点越界（5.2）。
 
 ### 6. 本地事实格式v1
 
