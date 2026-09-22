@@ -152,20 +152,22 @@ class KiloSettingsConfigurable : SearchableConfigurable {
 
         /** A5公开状态reason闭集的token（stability-service.kt）；本页只比较，不透传其他值。 */
         private const val COVERAGE_REASON_OK = "ok"
-        private const val COVERAGE_REASON_NO_POLICY = "no_policy"
+        private const val COVERAGE_REASON_UNBOUNDED = "unbound"
 
         /**
-         * 覆盖状态映射（brief Step 4）：只从A5的[Coverage]派生用户可读闭集标签，绝不
-         * 显示内部锁名或spool细节；无前端本地consumer，也绝不显示全链路健康（采集已
-         * 接入不等于数据已上报/已入账）。reason=ok即已接入（outbox等采集内部健康不
-         * 参与标签）；no_policy即未授权——策略过期与自定义配置未支持在当前Coverage里
-         * 同样fail-closed为no_policy，无法分辨，两个标签保留在bundle待Coverage扩充后
-         * 接线；其余（starting、stopped_*、启动失败）统一按前端未接入表达。
+         * 覆盖状态映射：只从A5的[Coverage]派生用户可读闭集标签，绝不显示内部路径或
+         * spool细节；无前端本地consumer，也绝不显示全链路健康（采集已接入不等于数据已
+         * 上报/已入账）。reason=ok即已接入（outbox等采集内部健康不参与标签）；unbound即
+         * 无有效策略——追加协议按设计第8章默认不限制采集（fail-open采集中），本页复用
+         * 既有"未授权"标签表达（bundle键零新增；"未授权"字面为真：无任何有效策略）。
+         * 策略过期与自定义配置未支持在当前Coverage里同样收敛为unbound，无法分辨——专属
+         * "默认采集中"标签属产品决策，保留在bundle待Coverage扩充后接线；其余（starting、
+         * writer_disabled、stopped_*、启动失败）统一按前端未接入表达。
          */
         internal fun stabilityCoverageText(coverage: Coverage): String = KiloBundle.message(
             when (coverage.reason) {
                 COVERAGE_REASON_OK -> "settings.stability.coverage.enrolled"
-                COVERAGE_REASON_NO_POLICY -> "settings.stability.coverage.unauthorized"
+                COVERAGE_REASON_UNBOUNDED -> "settings.stability.coverage.unauthorized"
                 else -> "settings.stability.coverage.frontendNotConnected"
             },
         )

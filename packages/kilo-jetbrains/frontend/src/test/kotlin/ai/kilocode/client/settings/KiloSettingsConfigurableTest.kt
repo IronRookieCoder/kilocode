@@ -157,7 +157,9 @@ class KiloSettingsConfigurableTest : BasePlatformTestCase() {
     fun `test stability coverage text maps reason to safe closed labels`() {
         val enrolled = Coverage("monolith", "frontend", "default", metrics = true, logs = true, reason = "ok")
         assertEquals("Stability collection: enrolled", KiloSettingsConfigurable.stabilityCoverageText(enrolled))
-        val unauthorized = Coverage("monolith", "frontend", "default", metrics = false, logs = false, reason = "no_policy")
+        // unbound＝无有效策略（设计§8 fail-open采集中，metrics/logs双开）；本页复用既有
+        // "未授权"标签（R16：零bundle新增；策略过期与自定义配置未支持同样收敛为unbound）。
+        val unauthorized = Coverage("monolith", "frontend", "default", metrics = true, logs = true, reason = "unbound")
         assertEquals(
             "Stability collection: not authorized",
             KiloSettingsConfigurable.stabilityCoverageText(unauthorized),
