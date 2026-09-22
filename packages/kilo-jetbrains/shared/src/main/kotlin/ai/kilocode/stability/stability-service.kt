@@ -251,12 +251,14 @@ class StabilityService private constructor(
     }
 
     /** 后端连接提供方归因（best effort，run快照固定前调用才生效；其余值归unknown）。 */
-    fun noteConnectionProvider(id: String) {
-        connectionProviderHint = when (id) {
+    fun noteConnectionProvider(id: String) = synchronized(stateLock) {
+        val provider = when (id) {
             PROVIDER_CS_CLOUD -> PROVIDER_CS_CLOUD
             PROVIDER_KILO_CLI -> PROVIDER_KILO_CLI
             else -> PROVIDER_UNKNOWN
         }
+        connectionProviderHint = provider
+        if (!runActive) baseIdentity = baseIdentity?.copy(connectionProvider = provider)
     }
 
     // ---- 启动与run生命周期 ------------------------------------------------------

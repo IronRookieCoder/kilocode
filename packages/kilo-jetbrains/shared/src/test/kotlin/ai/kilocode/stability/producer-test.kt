@@ -415,6 +415,50 @@ class ProducerTest {
     }
 
     @Test
+    fun `provider noted after prewarm is captured by the first run`() {
+        Harness().use { harness ->
+            val operations = harness.service.operations
+            harness.service.noteConnectionProvider("cs-cloud")
+            harness.writeControl(validControl())
+            harness.service.start("monolith")
+            harness.awaitReason("ok")
+            operations.begin("plugin.readiness", 60_000)
+            harness.awaitFacts(15_000) { facts -> facts.any { it.name == "plugin.readiness" } }
+
+            val facts = harness.facts()
+            assertEquals("cs-cloud", facts.first { it.name == "plugin.started" }.connection_provider)
+            assertEquals("cs-cloud", facts.first { it.name == "plugin.readiness" }.connection_provider)
+        }
+    }
+
+    @Test
+    fun `provider is normalized and frozen for an active run`() {
+        Harness().use { harness ->
+            val operations = harness.service.operations
+            harness.service.noteConnectionProvider("other")
+            harness.writeControl(validControl())
+            harness.service.start("monolith")
+            harness.awaitReason("ok")
+            operations.begin("plugin.readiness", 60_000)
+            harness.awaitFacts(15_000) { facts -> facts.any { it.name == "plugin.readiness" } }
+
+            harness.service.noteConnectionProvider("kilo-cli")
+            operations.begin("plugin.readiness", 60_000)
+            harness.awaitFacts(15_000) { facts -> facts.count { it.name == "plugin.readiness" } >= 2 }
+            assertTrue(harness.facts().filter { it.name != "plugin.shutdown" }.all { it.connection_provider == "unknown" })
+
+            harness.writeControl(disabledControl())
+            harness.awaitReason("unbound")
+            harness.service.noteConnectionProvider("kilo-cli")
+            harness.writeControl(validControl())
+            harness.awaitReason("ok")
+            harness.service.stop("unload")
+            harness.awaitReason("stopped_unload")
+            assertEquals("kilo-cli", harness.facts().first { it.name == "plugin.started" }.connection_provider)
+        }
+    }
+
+    @Test
     fun `standby captured rpc timeout reaches the active run`() {
         Harness().use { harness ->
             val operations = harness.service.operations
