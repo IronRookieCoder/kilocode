@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "urn:costrict:jetbrains-stability:control-schema-v1",
   "title": "cs-cloud → 插件采集控制文件 v1（wire schema）",
-  "description": "cs-cloud原子写 ~/.costrict/telemetry/control/jetbrains.json，插件后台每30秒检查一般策略（设计第8章）。控制文件按机器生效；无JWT。公共策略缺失、过期或未知schema_major时关闭两种上传用途采集。每项用途的有效截止取自身expires与公共expires_at的较早值；单项允许策略最长有效期建议24小时。时间均为UTC Unix毫秒。",
+  "description": "cs-cloud原子写 ~/.costrict/telemetry/control/jetbrains.json，插件后台每30秒检查一般策略（设计第8章）。控制文件按机器生效；无JWT。无有效策略（文件不存在、为空、畸形或未知schema_major）时默认不限制采集：purposes全标、policy_revision=0、account_epoch使用占位值unbound；限制仅来自当前有效的显式策略（设计第8章fail open）。每项用途的有效截止取自身expires与公共expires_at的较早值；单项允许策略最长有效期建议24小时。时间均为UTC Unix毫秒。",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -57,7 +57,7 @@
       "type": "string",
       "minLength": 1,
       "maxLength": 64,
-      "description": "已验证账户/租户的随机本机代号，与device_id不同"
+      "description": "已验证账户/租户的随机本机代号，与device_id不同。无有效策略期间采集的事实使用占位值unbound，不绑定任何账户代际、不触发退役丢弃"
     },
     "account_state": {
       "enum": ["pending", "ready", "disabled"],

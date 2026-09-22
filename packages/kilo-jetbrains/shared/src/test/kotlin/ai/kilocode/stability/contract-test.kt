@@ -203,22 +203,28 @@ class ContractTest {
     }
 
     @Test
-    fun `output vectors stay pending until namespace is frozen`() {
+    fun `output vectors declare constraints until output identity is frozen`() {
         val json = loadObject("output-vectors.json")
+        assertEquals(SUPPORTED_SCHEMA_MAJOR, json.getValue("schema_major").jsonPrimitive.int)
         assertEquals("pending_freeze", json.getValue("status").jsonPrimitive.content)
-        assertEquals(JsonNull, json.getValue("namespace"))
         assertEquals(emptyList(), json.getValue("vectors").jsonArray.map { it.jsonPrimitive.content })
 
-        val encoding = json.getValue("array_encoding").jsonObject
+        // UUIDv5 命名空间冻结已废止：输出ID生成方案归 cs-cloud 内部，本契约只冻结约束声明。
+        listOf("namespace", "array_encoding", "pending_vectors").forEach { retired ->
+            assertFalse(json.containsKey(retired), "output-vectors.json must no longer freeze '$retired'")
+        }
+
+        val constraints = json.getValue("constraints").jsonObject
         assertEquals(
-            listOf("input_event_id", "sink", "output_name", "mapping_version"),
-            encoding.getValue("canonical_elements").jsonArray.map { it.jsonPrimitive.content },
+            listOf("determinism", "distinctness", "length_limits", "generation_owner"),
+            constraints.keys.toList(),
         )
-        assertEquals(OUTPUT_PURPOSES, encoding.getValue("sink_enum").jsonArray.map { it.jsonPrimitive.content })
-        assertEquals(
-            listOf("counter", "histogram", "log"),
-            json.getValue("pending_vectors").jsonArray.map { it.jsonPrimitive.content },
-        )
+        val limits = constraints.getValue("length_limits").jsonObject
+        assertEquals(64, limits.getValue("metrics_event_id_max_chars").jsonPrimitive.int)
+        assertEquals(128, limits.getValue("logs_event_id_max_chars").jsonPrimitive.int)
+        listOf("determinism", "distinctness", "generation_owner").forEach { key ->
+            assertTrue(constraints.getValue(key).jsonPrimitive.content.isNotBlank(), "$key must state a constraint")
+        }
     }
 
     private fun loadObject(name: String): JsonObject = Json.parseToJsonElement(resourceText(name)).jsonObject
@@ -274,9 +280,9 @@ class ContractTest {
             "metrics_authority_verified",
             "series_key_verified",
             "late_query_verified",
-            "output_ids_verified",
-            "cross_language_locks_verified",
-            "durable_ack_verified",
+            "output_identity_verified",
+            "append_rewrite_contention_verified",
+            "offset_commit_verified",
             "logs_contract_verified",
             "default_profile_verified",
         )
@@ -312,8 +318,6 @@ class ContractTest {
             "metrics_allowed_categories", "logs_allowed_categories",
             "log_detail_rate_limit",
         )
-
-        val OUTPUT_PURPOSES = listOf("metrics", "logs")
 
         /** 设计6.1示例记录，逐字保留。 */
         const val EXAMPLE_RECORD = """

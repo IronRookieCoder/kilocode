@@ -1,18 +1,11 @@
 {
   "schema_major": 1,
   "status": "pending_freeze",
-  "namespace": null,
-  "array_encoding": {
-    "description": "派生输出ID = UUIDv5(固定命名空间, 规范化数组编码)；数组元素顺序和编码固定，禁止无分隔字符串拼接；输出为36字符小写UUID（设计9.1）。命名空间常量值及数组规范化编码在阶段0随外部证据一并冻结，冻结前不得生成正式输出ID，也不得临时生成namespace或直接复用input event_id。",
-    "canonical_elements": ["input_event_id", "sink", "output_name", "mapping_version"],
-    "sink_enum": ["metrics", "logs"],
-    "charset": "UTF-8无BOM",
-    "output_id_length": 36
+  "constraints": {
+    "determinism": "同输入重放生成的输出ID及内容不变，重试与崩溃恢复不换ID",
+    "distinctness": "同事实不同sink或输出名得到不同ID；累计类输出使用持久化聚合键与输出序号（聚合键含producer/run、account_epoch、用途、指标及登记标签、映射版本）",
+    "length_limits": {"metrics_event_id_max_chars": 64, "logs_event_id_max_chars": 128},
+    "generation_owner": "cs-cloud内部实现细节，由其仓库自定并测试，不在本契约冻结"
   },
-  "length_limits": {
-    "metrics_output_id_max_chars": 64,
-    "logs_output_id_max_chars": 128
-  },
-  "pending_vectors": ["counter", "histogram", "log"],
   "vectors": []
 }
