@@ -205,7 +205,10 @@ class CsCloudMcpBridgeTest {
     fun `unresponsive bind records a failed registration`() {
         failedBind(
             MockResponse().setSocketPolicy(SocketPolicy.NO_RESPONSE),
-            OkHttpClient.Builder().readTimeout(200, TimeUnit.MILLISECONDS).build(),
+            OkHttpClient.Builder()
+                .callTimeout(0, TimeUnit.MILLISECONDS)
+                .readTimeout(0, TimeUnit.MILLISECONDS)
+                .build(),
             "failure",
             "cs_cloud",
             "ide_capability_bind_failed",

@@ -35,8 +35,10 @@ import java.nio.file.Path
 import java.security.MessageDigest
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.TimeUnit
 
 internal const val MCP_REGISTER_DEADLINE_MS = 30_000L
+private const val MCP_BIND_TIMEOUT_MS = MCP_REGISTER_DEADLINE_MS - 5_000L
 
 internal suspend fun runLease(
     ready: CompletableDeferred<IdeMcpTransport>,
@@ -143,7 +145,8 @@ class CsCloudMcpBridge(
         val url = base.toHttpUrl().newBuilder().addPathSegments("api/v1/conversations").addPathSegment(id).addPathSegments("capabilities/ide").build()
         val request = Request.Builder().url(url).header("X-Workspace-Directory", workspace)
             .put(json.encodeToString(spec).toRequestBody("application/json".toMediaType())).build()
-        runCatching { http.newCall(request).execute().close() }.fold(
+        val bounded = http.newBuilder().callTimeout(MCP_BIND_TIMEOUT_MS, TimeUnit.MILLISECONDS).build()
+        runCatching { bounded.newCall(request).execute().close() }.fold(
             onSuccess = { null },
             onFailure = {
                 log.warn("IDE MCP bind failed conversation=${hash(id)} generation=${hash(generation)}", it)
