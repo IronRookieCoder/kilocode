@@ -1,7 +1,7 @@
 package ai.kilocode.stability
 
-import com.intellij.openapi.application.PathManager
 import com.intellij.openapi.components.Service
+import java.nio.file.Files
 import java.nio.file.Path
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CoroutineScope
@@ -29,19 +29,16 @@ private const val RUN_PREFIX = "run-"
 private const val PROVIDER_CS_CLOUD = "cs-cloud"
 private const val PROVIDER_KILO_CLI = "kilo-cli"
 private const val PROVIDER_UNKNOWN = "unknown"
-private const val TELEMETRY_DIR = "costrict-telemetry"
-private const val V1_DIR = "v1"
+private const val OUTBOX_DIR = "outbox"
 private const val CONTROL_DIR = "control"
 private const val CONTROL_FILE = "jetbrains.json"
-private const val REGISTRATIONS_DIR = "registrations"
 
 /** 安全状态reason闭集（常量token，不含路径/凭据/JWT）。 */
 private const val REASON_STARTING = "starting"
 private const val REASON_OK = "ok"
-private const val REASON_NO_POLICY = "no_policy"
+private const val REASON_UNBOUNDED = "unbound"
 private const val REASON_WRITER_DISABLED = "writer_disabled"
 private const val REASON_INIT_FAILED = "init_failed"
-private const val REASON_OUTBOX_FULL = "outbox_full"
 private const val REASON_STOPPED_PREFIX = "stopped_"
 
 private const val POLICY_POLL_MS = 30_000L
@@ -81,21 +78,24 @@ data class Coverage(
 )
 
 /**
- * 稳定性采集的App级轻服务（collector plan接口表）：producer登记、采集run生命周期与后台残留清理。
+ * 稳定性采集的App级轻服务（collector plan接口表）：采集run生命周期、unclean判定与后台残留清理。
  *
  * start(side)幂等且立即返回（CAS一次，初始化全部在后台IO协程）。initialize流程：
- * 平台运行模式→控制文件读取（PolicyStore，禁采也持续轮询）→恢复持久device_id→固定环境快照→
- * 有效许可时取得writer.lock（writer.start内）→原子写producer.json与registration→
- * 记一次plugin.started。无有效许可只保留控制读取、状态与旧源残留清理，不创建任何
- * critical/diagnostic业务事实文件，也不登记；首次获许可建立新run并记一次plugin.started；
- * 公共授权撤销即结束run（不伪造plugin.shutdown——end_kind闭集只有app_close/unload），
- * 重开后以新run_id重建采集，设备ID不变。
+ * 平台运行模式→控制文件读取（PolicyStore，禁采也持续轮询）→恢复持久device_id与scope_id→
+ * 固定环境快照→有效许可时建立run：writer在`~/.costrict/telemetry/outbox/`打开本实例的
+ * 单追加文件`<scope-id>-<producer-id>.jsonl`（无登记目录、无producer.json、无锁文件、
+ * 无.open/.ready状态机，§5.2/§3.1）→按scope-id前缀判定前任run是否unclean（§7.3，
+ * 在plugin.started之前消费，检测IO失败fail open不阻塞启动）→记一次plugin.started。
+ * 无有效许可只保留控制读取、状态与残留清理，不建立采集run；首次获许可建立新run并记一次
+ * plugin.started；公共授权撤销即结束run并删除本实例待交接文件（§8，不伪造plugin.shutdown
+ * ——end_kind闭集只有app_close/unload），重开后以新run_id重建采集，设备ID与scope-id不变，
+ * 文件名跨run稳定（producerId每JVM固定，runId变化不改名）。
  *
  * mode/side唯一来源是[PlatformRunMode]（IdeProductMode，与既有单体判定同一平台来源），
  * start(side)的调用方参数只作入口标注，绝不用于身份（不按"谁先start"推断单体/split）。
- * profile：v1只绑定双方确认的默认profile路径（`~/.costrict/telemetry`），自定义
+ * profile：只绑定双方确认的默认profile路径（`~/.costrict/telemetry`），自定义
  * data-dir/auth-path的cs-cloud在该契约建立前不受支持——表现为默认控制文件缺失，
- * 按第8章首次无策略fail closed（reason=no_policy），绝不回退读其他profile。
+ * 按第8章落入unbound占位策略（reason=unbound，默认不限制采集），绝不回退读其他profile。
  *
  * stop(kind)：CAS去重；先经收尾通道（准入仍开启时）记一次plugin.shutdown（许可有效时，
  * 由writer的最终有界排空落盘），再立即关闭准入并writer.close()有界收尾——绝不先close
@@ -114,22 +114,20 @@ data class Coverage(
 class StabilityService private constructor(
     private val scope: CoroutineScope,
     private val modeSource: () -> RunMode,
-    private val logDirProvider: () -> Path,
+    private val scopeStore: ScopeIdStore,
     private val telemetryHome: Path,
     private val deviceStore: DeviceIdStore,
     private val clock: Clock,
     private val pollIntervalMs: Long,
     private val awaitActiveHook: (Writer) -> Boolean,
     private val retentionIntervalMs: Long = RETENTION_INTERVAL_MS,
-    // 过渡桥接（T6）：DEFAULT_MAX_BYTES随Retention重写删除；参数与字面值随T11一并移除。
-    private val retentionMaxBytes: Long = 10L * 1024 * 1024,
 ) {
 
     /** 平台注入入口：light service按CoroutineScope构造（KiloBackendAppService同型）。 */
     constructor(scope: CoroutineScope) : this(
         scope,
         { PlatformRunMode.current() },
-        { PathManager.getLogDir() },
+        platformScopeIdStore(),
         defaultTelemetryHome(),
         platformDeviceIdStore(),
         SystemClock,
@@ -151,8 +149,8 @@ class StabilityService private constructor(
     @Volatile private var activeHealth: Health? = null
     @Volatile private var activeWriter: Writer? = null
     @Volatile private var runActive = false
-    @Volatile private var metadataWritten = false
-    @Volatile private var outboxFull = false
+    /** IDE安装范围持久scope-id（ensureCore时经[scopeStore]载入，实例内不变；文件名前缀）。 */
+    @Volatile private var scopeId: String = ""
     @Volatile private var runFailure: String? = null
     @Volatile private var connectionProviderHint = PROVIDER_UNKNOWN
     @Volatile private var runMode: RunMode = RunMode("unknown", "unknown")
@@ -285,8 +283,8 @@ class StabilityService private constructor(
     }
 
     /** 一次许可裁决：首次获许可建run；公共撤销即结束run（不伪造退出）；随后发布安全状态。
-     * reason按状态机取值：run内=ok/outbox_full；run外=writer_disabled（启动失败粘滞，重试自愈）
-     * 优先于no_policy——存储不可验证是比"无策略"更可行动的故障。
+     * reason按状态机取值：run内=ok；run外=writer_disabled（启动失败粘滞，重试自愈）
+     * 优先于unbound——存储不可验证是比"尚无绑定策略"更可行动的故障。
      * activateRun可能在等待窗口内被stop跨越，返回后若已裁决stop则不得再发布状态
      * （stopped_*由stop协程独占发布，status与实际运行态保持一致）。 */
     private fun stepActivation() {
@@ -304,11 +302,11 @@ class StabilityService private constructor(
     private fun currentIdleReason(): String = when {
         runActive -> currentRunReason()
         runFailure != null -> runFailure!!
-        else -> REASON_NO_POLICY
+        else -> REASON_UNBOUNDED
     }
 
-    /** 新采集run：新run_id→新recorder/operations→writer持锁→（每实例一次）登记→plugin.started一次。
-     * 启动失败（存储不可验证/锁被占）时关闭准入并保持禁采，下一个watch周期自动重试。
+    /** 新采集run：新run_id→新recorder/operations→writer打开单追加文件→unclean判定→plugin.started一次。
+     * 启动失败（存储不可验证）时关闭准入并保持禁采，下一个watch周期自动重试。
      * stop竞态：入口与等待返回后都复查stoppedOnce，提交序列之后F5再复查一次——stop裁决后
      * 绝不留活跃run，未提交的writer/recorder就地关闭（writer.close有界），status交由stop协程发布。 */
     @Suppress("ReturnCount")
@@ -324,11 +322,9 @@ class StabilityService private constructor(
         // 引用即直投本run（启动窗口内的事实随writer ACTIVE后排空落盘），绝不滞留在无人
         // 排空的standby队列；启动失败路径随即断开，落回standby自身的fail-closed准入。
         standby?.first?.forwardTo = recorder
-        val root = v1Root().resolve(identity.producerId)
-        val storage = Storage(root)
-        // 过渡桥接（T5）：追加协议writer需要单一事实文件名；outbox布局与scope-id前缀命名
-        // 随T11接入（届时改为outboxDir()+fileName(identity)），当前沿用run级文件名。
-        val writer = Writer(root, identity.runId + ".jsonl", identity, recorder, store, clock, storage = storage)
+        // 追加协议布局（§5.2）：outbox下平铺单文件`<scope-id>-<producer-id>.jsonl`；
+        // producerId每JVM固定，文件名跨run稳定（runId变化不改名）。
+        val writer = Writer(outboxDir(), fileName(identity), identity, recorder, store, clock)
         writer.onDisabled = { setStatus(REASON_WRITER_DISABLED) }
         writer.start()
         // 等待轮询不可经取消打断（Thread.sleep），stop可能恰好落在此窗口内。
@@ -350,8 +346,11 @@ class StabilityService private constructor(
         runFailure = null
         activeWriter = writer
         runActive = true
-        outboxFull = false
-        writeMetadataOnce(storage, root)
+        // §7.3/M22：unclean判定先于plugin.started消费（每实例启动一次）；检测的IO失败
+        // fail open——无检出即无unclean事实，绝不阻塞采集启动（R15）。
+        runCatching { UncleanDetector(outboxDir(), scopeId, identity.producerId).detect() }
+            .getOrDefault(emptyList())
+            .forEach(recorder::record)
         recorder.record(startedDraft())
         // F5：stop落在最后预检与提交序列之间的微窗口——提交后复查裁决，命中即就地收尾
         // （recorder/writer的close幂等，与stop协程双路重入安全），绝不留下裁决后仍活跃的
@@ -368,31 +367,22 @@ class StabilityService private constructor(
         activeHealth = Health(recorder, writer, clock)
     }
 
-    /** 公共授权撤销：关准入→writer最后排空（失效事实按入盘前重判期丢弃），不记shutdown。
+    /** 公共授权撤销：关准入→writer最后排空（失效事实按入盘前重判期丢弃），不记shutdown；
+     * 随后§8清理本实例待交接文件（只删fileName(identity)命中的本实例文件，不保留补报）。
      * 已关闭的recorder保留在getter上：撤销期间业务record恒DISABLED，不得换standby重新开口；
      * standby转发随run结束断开，重开后由activateRun重新接管。 */
     private fun deactivateRun() {
         standby?.first?.forwardTo = null
         activeRecorder?.close()
-        activeWriter?.close()
+        activeWriter?.close() // 有界排空：撤销后重判期使剩余事实不入盘
         activeWriter = null
         runActive = false
-        outboxFull = false
+        // §8：用户撤销/总开关关闭/公共过期——停采并清理待交接数据，不保留补报
+        val identity = baseIdentity
+        if (identity != null) runCatching { Files.deleteIfExists(outboxDir().resolve(fileName(identity))) }
     }
 
     /** writer启动在自有IO线程完成；等待逻辑见[defaultAwaitActive]（可注入）。 */
-
-    /** producer.json与登记文件只在首个成功run写一次（pid/process_start描述本JVM实例）。 */
-    private fun writeMetadataOnce(storage: Storage, root: Path) {
-        if (metadataWritten) return
-        val identity = baseIdentity ?: return
-        runCatching {
-            val producer = Producer(identity, root, registrationsDir(), storage)
-            producer.writeProducerJson()
-            producer.writeRegistration()
-            metadataWritten = true
-        }
-    }
 
     // ---- 许可、状态与后台清理 ---------------------------------------------------
 
@@ -404,7 +394,7 @@ class StabilityService private constructor(
         return policy.permit(clock.wall(), NAME_STARTED)
     }
 
-    private fun currentRunReason(): String = if (outboxFull) REASON_OUTBOX_FULL else REASON_OK
+    private fun currentRunReason(): String = REASON_OK
 
     private fun setStatus(reason: String) {
         val purposes = purposes()
@@ -418,7 +408,7 @@ class StabilityService private constructor(
         )
     }
 
-    /** 启动即扫+每小时独立扫描（禁采也执行）；预算不足置outbox_full，由下一轮状态发布。 */
+    /** 启动即扫+每小时独立扫描（禁采也执行）：同scope超24h未追加的陈旧文件整文件删除（§7.4）。 */
     private suspend fun retentionLoop() {
         while (!stoppedOnce.get()) {
             sweepOnce()
@@ -453,12 +443,9 @@ class StabilityService private constructor(
 
     private fun sweepOnce() {
         val identity = baseIdentity ?: return
-        // 过渡桥接（T6）：陈旧清理改为同scope前缀的平铺jsonl整文件删除（§7.4）；现行布局
-        // （v1/<producer-id>/目录树）不含该形态，sweep对其为no-op；outbox布局与真实scope-id
-        // 随T11接入（届时改为Retention(outboxDir(), scopeId, outboxDir().resolve(fileName(identity)), clock)）。
-        val outbox = v1Root()
+        val outbox = outboxDir()
         runCatching {
-            Retention(outbox, identity.producerId, outbox.resolve(identity.producerId), clock).sweep()
+            Retention(outbox, scopeId, outbox.resolve(fileName(identity)), clock).sweep()
         }
     }
 
@@ -467,6 +454,7 @@ class StabilityService private constructor(
     private fun ensureCore(): ProducerIdentity = synchronized(stateLock) {
         val store = policies
             ?: PolicyStore(controlPath(), { clock.wall() }, pollIntervalMs).also { policies = it }
+        if (scopeId.isEmpty()) scopeId = scopeStore.loadOrCreate()
         val identity = baseIdentity
             ?: ProducerEnvironment.snapshot(runMode, deviceStore.loadOrCreate(), connectionProviderHint)
                 .also { baseIdentity = it }
@@ -496,9 +484,14 @@ class StabilityService private constructor(
 
     // ---- 路径与草稿 -------------------------------------------------------------
 
-    private fun v1Root(): Path = logDirProvider().resolve(TELEMETRY_DIR).resolve(V1_DIR)
+    /** 追加协议outbox目录（§5.2）：`~/.costrict/telemetry/outbox/`，平铺单层jsonl事实文件。 */
+    private fun outboxDir(): Path = telemetryHome.resolve(OUTBOX_DIR)
 
-    private fun registrationsDir(): Path = telemetryHome.resolve(REGISTRATIONS_DIR)
+    /**
+     * 单一命名入口（§5.2）：本实例事实文件`<scope-id>-<producer-id>.jsonl`。producerId每JVM
+     * 固定，故文件名跨run稳定（runId变化不改名）；deactivateRun清理与写入路径共用同一入口。
+     */
+    private fun fileName(identity: ProducerIdentity): String = "$scopeId-${identity.producerId}.jsonl"
 
     private fun controlPath(): Path = telemetryHome.resolve(CONTROL_DIR).resolve(CONTROL_FILE)
 
@@ -513,30 +506,26 @@ class StabilityService private constructor(
     )
 
     companion object {
-        /** 测试工厂（KiloBackendAppService同型）：注入路径/时钟/运行模式来源，不触平台。 */
+        /** 测试工厂（KiloBackendAppService同型）：注入路径/时钟/scope-id/运行模式来源，不触平台。 */
         @Suppress("LongParameterList")
         internal fun create(
             scope: CoroutineScope,
             modeSource: () -> RunMode,
-            logDirProvider: () -> Path,
+            scopeStore: ScopeIdStore,
             telemetryHome: Path,
             deviceStore: DeviceIdStore,
             clock: Clock,
             pollIntervalMs: Long,
             awaitActiveHook: (Writer) -> Boolean = ::defaultAwaitActive,
-            retentionIntervalMs: Long = RETENTION_INTERVAL_MS,
-            retentionMaxBytes: Long = 10L * 1024 * 1024,
         ) = StabilityService(
             scope,
             modeSource,
-            logDirProvider,
+            scopeStore,
             telemetryHome,
             deviceStore,
             clock,
             pollIntervalMs,
             awaitActiveHook,
-            retentionIntervalMs,
-            retentionMaxBytes,
         )
     }
 }

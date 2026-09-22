@@ -8,9 +8,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
-import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonPrimitive
@@ -23,41 +23,72 @@ import kotlin.test.assertTrue
 private const val SERVICE_POLL_MS = 20L
 private const val FAR_EXPIRES = 9_000_000_000_000L
 
+/** 测试/fixture共用的Json实例约定（writer-test同款）：默认值随wire记录一并编码。 */
+private val factJson = Json { encodeDefaults = true }
+
+/**
+ * 13字段闭集控制文件（control-schema.json）的最小合法构造（brief Step 1）。
+ * expiresAt由调用方传入；本文件统一用[FAR_EXPIRES]（brief示例字面9_999_999_999相对
+ * SweepClock的wall基线1.79e12已是过去时刻，会使enabled=true的判期直接过期）。
+ */
+private fun controlJson(epoch: String, revision: Long, enabled: Boolean, expiresAt: Long): String =
+    JsonObject(
+        mapOf(
+            "schema_major" to JsonPrimitive(1),
+            "revision" to JsonPrimitive(revision),
+            "enabled" to JsonPrimitive(enabled),
+            "metrics_enabled" to JsonPrimitive(enabled),
+            "metrics_expires_at" to JsonPrimitive(expiresAt),
+            "logs_enabled" to JsonPrimitive(enabled),
+            "logs_expires_at" to JsonPrimitive(expiresAt),
+            "account_epoch" to JsonPrimitive(epoch),
+            "account_state" to JsonPrimitive("ready"),
+            "expires_at" to JsonPrimitive(expiresAt),
+            "metrics_allowed_categories" to JsonArray(listOf(JsonPrimitive("critical"), JsonPrimitive("diagnostic"))),
+            "logs_allowed_categories" to JsonArray(listOf(JsonPrimitive("critical"), JsonPrimitive("diagnostic"))),
+            "log_detail_rate_limit" to JsonObject(mapOf("per_fingerprint_max_per_minute" to JsonPrimitive(3))),
+        ),
+    ).toString()
+
+/** 列出目录下平铺的*.jsonl事实文件（service级断言用；不排序——本文件只数个数/取单个）。 */
+private fun listJsonl(dir: Path): List<Path> =
+    if (!Files.isDirectory(dir)) emptyList()
+    else Files.list(dir).use { it.filter { p -> p.fileName.toString().endsWith(".jsonl") }.toList() }
+
+private fun awaitUntil(timeoutMs: Long, condition: () -> Boolean) {
+    val deadline = System.currentTimeMillis() + timeoutMs
+    while (System.currentTimeMillis() < deadline && !condition()) Thread.sleep(50)
+    assertTrue(condition(), "condition not met within ${timeoutMs}ms")
+}
+
 /** 内存版设备ID存储：loadOrCreate语义与PropertiesComponent一致（首调用生成，之后复用）。 */
 private class MemoryDeviceStore(private var value: String? = null) : DeviceIdStore {
     override fun loadOrCreate(): String = value ?: ("device-" + UUID.randomUUID().toString().replace("-", "").take(12)).also { value = it }
 }
 
-/** 服务夹具：真实临时目录、真实PolicyStore/Writer/Retention，只注入路径、时钟与运行模式来源。 */
+/** 服务夹具：真实临时目录、真实PolicyStore/Writer/Retention，只注入路径、时钟、scope-id与运行模式来源。 */
 private class Harness(
     val base: Path = Files.createTempDirectory("stability-service"),
     val clock: SweepClock = SweepClock(),
     mode: RunMode = RunMode("monolith", "monolith"),
     deviceStore: DeviceIdStore = MemoryDeviceStore("device-fixed"),
     awaitActiveHook: (Writer) -> Boolean = ::defaultAwaitActive,
-    /** 生产默认=1小时（RETENTION_INTERVAL_MS为private，测试以字面值对齐）。 */
-    retentionIntervalMs: Long = 3_600_000L,
-    retentionMaxBytes: Long = 10L * 1024 * 1024,
 ) : AutoCloseable {
 
     val telemetryHome = base.resolve("home").resolve(".costrict").resolve("telemetry")
-    val logRoot = base.resolve("log")
-    val v1Root = logRoot.resolve("costrict-telemetry").resolve("v1")
-    val registrations = telemetryHome.resolve("registrations")
     val controlFile = telemetryHome.resolve("control").resolve("jetbrains.json")
+    val outbox = telemetryHome.resolve("outbox")
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     val service = StabilityService.create(
         scope = scope,
         modeSource = { mode },
-        logDirProvider = { logRoot },
+        scopeStore = ScopeIdStore { "sc-fixed" },
         telemetryHome = telemetryHome,
         deviceStore = deviceStore,
         clock = clock,
         pollIntervalMs = SERVICE_POLL_MS,
         awaitActiveHook = awaitActiveHook,
-        retentionIntervalMs = retentionIntervalMs,
-        retentionMaxBytes = retentionMaxBytes,
     )
 
     fun writeControl(json: String) {
@@ -78,27 +109,15 @@ private class Harness(
         error("timed out waiting for status; last=${service.status.value}")
     }
 
-    /** 激活后本实例唯一producer根目录。 */
-    fun producerRoot(): Path = Files.list(v1Root).use { files ->
-        val dirs = files.filter { Files.isDirectory(it) }.toList()
-        assertEquals(1, dirs.size, "exactly one producer root expected, got $dirs")
-        dirs.single()
-    }
-
-    fun registrationCount(): Int =
-        if (Files.isDirectory(registrations)) Files.list(registrations).use { it.count() }.toInt() else 0
-
-    /** 读producer根下的追加事实文件（完整LF行）还原事实。 */
-    fun facts(): List<Fact> {
-        val root = producerRoot()
-        return listReady(root).flatMap { file ->
+    /** 读outbox下的平铺追加事实文件（完整LF行）还原事实；撤销/停机清理后为空。 */
+    fun facts(): List<Fact> =
+        listReady(outbox).flatMap { file ->
             Files.readAllBytes(file).toString(Charsets.UTF_8)
                 .lineSequence()
                 .filter { line -> line.isNotBlank() }
-                .map { line -> FACT_JSON.decodeFromString(Fact.serializer(), line) }
+                .map { line -> factJson.decodeFromString(Fact.serializer(), line) }
                 .toList()
         }
-    }
 
     /** 等待facts满足条件（writer默认1s tick后才落盘）。 */
     fun awaitFacts(timeoutMs: Long, predicate: (List<Fact>) -> Boolean) {
@@ -118,10 +137,6 @@ private class Harness(
         runCatching { scope.cancel() }
         runCatching { Thread.sleep(50) }
         runCatching { base.toFile().deleteRecursively() }
-    }
-
-    companion object {
-        private val FACT_JSON = Json { encodeDefaults = true }
     }
 }
 
@@ -152,32 +167,88 @@ private fun disabledControl(): String = control(enabled = false, metrics = false
 private fun startedDraft(): Draft =
     Draft("plugin.started", "lifecycle", "critical", JsonObject(emptyMap()))
 
-private fun producerJsonField(root: Path, field: String): String {
-    val json = Json.parseToJsonElement(Files.readString(root.resolve("producer.json"))) as JsonObject
-    return json[field]?.jsonPrimitive?.contentOrNull ?: error("missing $field in producer.json")
-}
-
 private fun JsonObject.field(key: String): String = this[key]?.jsonPrimitive?.contentOrNull ?: error("missing $key")
 
 class ProducerTest {
 
     @Test
-    fun `start is idempotent and yields one writer registration and started fact`() {
-        Harness().use { harness ->
-            harness.writeControl(validControl())
-            harness.service.start("frontend")
-            harness.service.start("backend")
-            val coverage = harness.awaitReason("ok")
-            assertEquals("monolith", coverage.mode)
-            assertEquals("monolith", coverage.side)
-            val root = harness.producerRoot()
-            assertTrue(Files.exists(root.resolve("producer.json")), "producer.json is written once active")
-            assertTrue(Files.exists(root.resolve("writer.lock")))
-            assertTrue(Files.exists(root.resolve("exchange.lock")))
-            assertEquals(1, harness.registrationCount(), "exactly one registration per producer")
-            harness.service.stop("app_close")
-            harness.awaitReason("stopped_app_close")
-            assertEquals(1, harness.facts().count { it.name == "plugin.started" })
+    fun `outbox holds one scope-producer jsonl and no registrations`() {
+        val home = Files.createTempDirectory("service-outbox")
+        val logDir = Files.createTempDirectory("service-logdir")
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        val service = StabilityService.create(
+            scope = scope,
+            modeSource = { RunMode("monolith", "monolith") },
+            scopeStore = ScopeIdStore { "sc-fixed" },
+            telemetryHome = home,
+            deviceStore = DeviceIdStore { "device-fixed" },
+            clock = SweepClock(),
+            pollIntervalMs = 50L,
+        )
+        try {
+            service.start("frontend") // 无控制文件：fail-open应建立run
+            val outbox = home.resolve("outbox")
+            awaitUntil(10_000) { listJsonl(outbox).isNotEmpty() }
+            service.stop("app_close")
+            // stop的收尾排空经后台协程完成：等started已落盘再读断言（有界，不依赖实现细节时序）。
+            awaitUntil(10_000) {
+                listJsonl(outbox).any { file -> Files.readAllLines(file).any { it.contains("\"plugin.started\"") } }
+            }
+            val files = listJsonl(outbox)
+            assertEquals(1, files.size)
+            assertTrue(
+                files[0].fileName.toString().matches(Regex("^sc-fixed-pr-[a-z0-9]+\\.jsonl$")),
+                files[0].toString(),
+            )
+            assertFalse(Files.exists(home.resolve("registrations")))
+            assertFalse(Files.exists(logDir.resolve("costrict-telemetry")))
+
+            val facts = Files.readAllLines(files[0]).filter { it.isNotBlank() }
+                .map { factJson.decodeFromString(Fact.serializer(), it) }
+            assertEquals("plugin.started", facts.first().name)
+            assertEquals("unbound", facts.first().account_epoch)
+            assertEquals(0L, facts.first().policy_revision)
+            assertEquals(setOf("metrics", "logs"), facts.first().purposes)
+            // 无策略fail-open采集中：占位策略purposes双开，Coverage两用途为true（reason仅文案unbound）。
+            assertTrue(service.status.value.metrics && service.status.value.logs, "unbound run reports both purposes enabled")
+        } finally {
+            scope.cancel()
+        }
+    }
+
+    @Test
+    fun `revocation deletes the pending handover file without faking shutdown`() {
+        val home = Files.createTempDirectory("service-revoke")
+        val control = home.resolve("control").resolve("jetbrains.json")
+        Files.createDirectories(control.parent)
+        Files.writeString(control, controlJson(epoch = "acct-r1", revision = 1L, enabled = true, expiresAt = FAR_EXPIRES))
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        val service = StabilityService.create(
+            scope, { RunMode("monolith", "monolith") }, ScopeIdStore { "sc-fixed" },
+            home, DeviceIdStore { "device-fixed" }, SweepClock(), pollIntervalMs = 50L,
+        )
+        try {
+            service.start("frontend")
+            val outbox = home.resolve("outbox")
+            // 等到started确实已写入文件（文件在writer ACTIVE即创建，存在≠已有事实）。
+            awaitUntil(10_000) {
+                listJsonl(outbox).singleOrNull()?.let { file ->
+                    Files.readAllLines(file).any { it.contains("\"plugin.started\"") }
+                } == true
+            }
+            val file = listJsonl(outbox).single()
+            val before = Files.readAllLines(file)
+            assertTrue(before.any { it.contains("\"plugin.started\"") })
+
+            // 撤销：显式enabled=false（§8 停采并清理待交接数据，不保留补报）
+            Files.writeString(control, controlJson(epoch = "acct-r1", revision = 2L, enabled = false, expiresAt = FAR_EXPIRES))
+            awaitUntil(70_000) { listJsonl(outbox).isEmpty() } // 50ms轮询 + 收尾预算
+            assertTrue(listJsonl(outbox).isEmpty(), "revoked handover data must be cleaned")
+            // 撤销不伪造shutdown：被删文件内不含plugin.shutdown（end_kind闭集只有app_close/unload）
+            assertTrue(before.none { it.contains("\"plugin.shutdown\"") })
+        } finally {
+            service.stop("app_close")
+            scope.cancel()
         }
     }
 
@@ -198,52 +269,6 @@ class ProducerTest {
     }
 
     @Test
-    fun `a second writer on the same root is disabled while the service writer is active`() {
-        Harness().use { harness ->
-            harness.writeControl(validControl())
-            harness.service.start("monolith")
-            harness.awaitReason("ok")
-            val policies = PolicyStore(harness.controlFile, { harness.clock.wall() }, SERVICE_POLL_MS)
-            val identity = ProducerIdentity(
-                producerId = "pr-second",
-                runId = "run-second",
-                deviceId = "device-second",
-                pluginVersion = "1.0.0",
-                ideProduct = "IU",
-                ideBuild = "build-test",
-                ideBuildMajor = "2026.1",
-                osFamily = "windows",
-                arch = "x64",
-                env = "test",
-                mode = "monolith",
-                side = "monolith",
-                connectionProvider = "unknown",
-            )
-            val second = Writer(
-                root = harness.producerRoot(),
-                fileName = "sc-second-${identity.producerId}.jsonl",
-                identity = identity,
-                recorder = Recorder(identity, policies, harness.clock),
-                policies = policies,
-                clock = harness.clock,
-            )
-            try {
-                second.start()
-                var waited = 0L
-                while (second.state == WriterState.CREATED && waited < 15_000) {
-                    Thread.sleep(SERVICE_POLL_MS)
-                    waited += SERVICE_POLL_MS
-                }
-                assertEquals(WriterState.DISABLED, second.state, "one writer per JVM root")
-                assertTrue(!second.disabledReason.isNullOrEmpty())
-            } finally {
-                runCatching { second.close() }
-                runCatching { policies.close() }
-            }
-        }
-    }
-
-    @Test
     fun `device id persists across producer instances while run and producer ids rotate`() {
         val store = MemoryDeviceStore()
         val firstDevice: String
@@ -254,17 +279,18 @@ class ProducerTest {
             harness.writeControl(validControl())
             harness.service.start("monolith")
             harness.awaitReason("ok")
-            val root = harness.producerRoot()
-            firstDevice = producerJsonField(root, "device_id")
-            firstProducerId = producerJsonField(root, "producer_id")
+            // 追加协议无producer.json：身份改从落盘事实的公共字段读取（同快照来源）。
+            harness.awaitFacts(15_000) { facts -> facts.isNotEmpty() }
+            firstDevice = harness.facts().first().device_id
+            firstProducerId = harness.facts().first().producer_id
         }
         Harness(deviceStore = store).use { harness ->
             harness.writeControl(validControl())
             harness.service.start("monolith")
             harness.awaitReason("ok")
-            val root = harness.producerRoot()
-            secondDevice = producerJsonField(root, "device_id")
-            secondProducerId = producerJsonField(root, "producer_id")
+            harness.awaitFacts(15_000) { facts -> facts.isNotEmpty() }
+            secondDevice = harness.facts().first().device_id
+            secondProducerId = harness.facts().first().producer_id
         }
         assertEquals(firstDevice, secondDevice, "device id is the persistent installation identity")
         assertTrue(firstProducerId != secondProducerId, "each instance gets a fresh producer id")
@@ -301,16 +327,14 @@ class ProducerTest {
         Files.writeString(controlDir.resolve("jetbrains.json"), disabledControl())
         Harness(base = base).use { harness ->
             harness.service.start("monolith")
-            harness.awaitReason("no_policy")
-            assertEquals(0, harness.producerDirCount(), "no producer root without a valid permit")
-            assertEquals(0, harness.registrationCount(), "no registration without a valid permit")
-            val admission = harness.service.recorder.record(
-                Draft("plugin.started", "lifecycle", "critical", JsonObject(emptyMap())),
-            )
+            harness.awaitReason("unbound")
+            assertTrue(harness.facts().isEmpty(), "no facts without a valid permit")
+            assertTrue(harness.outboxFiles().isEmpty(), "no outbox file without a valid permit")
+            val admission = harness.service.recorder.record(startedDraft())
             assertEquals(Admission.DISABLED, admission, "records stay disabled while unpermitted")
             harness.writeControl(validControl())
             harness.awaitReason("ok")
-            assertTrue(Files.exists(harness.producerRoot().resolve("producer.json")))
+            assertTrue(harness.outboxFiles().isNotEmpty(), "the active run owns its outbox jsonl")
             harness.service.stop("unload")
             harness.awaitReason("stopped_unload")
             assertTrue(harness.facts().any { it.name == "plugin.started" }, "first permit starts the run")
@@ -323,12 +347,13 @@ class ProducerTest {
             harness.writeControl(validControl())
             harness.service.start("monolith")
             harness.awaitReason("ok")
-            // 等首run的started已落盘（writer默认1s tick），再撤销——撤销后未落盘事实按
-            // 入盘前重判期丢弃属正确行为，这里只断言重开后出现"新run_id"的started。
+            // 等首run的started已落盘（writer默认1s tick）。
             harness.awaitFacts(15_000) { facts -> facts.any { it.name == "plugin.started" } }
             val firstRunId = harness.facts().first { it.name == "plugin.started" }.run_id
             harness.writeControl(disabledControl())
-            harness.awaitReason("no_policy")
+            harness.awaitReason("unbound")
+            // §8：撤销清理本实例待交接文件（首轮事实不保留补报），也绝不伪造shutdown。
+            assertTrue(harness.facts().isEmpty(), "revocation cleans the pending handover file")
             assertEquals(0, harness.facts().count { it.name == "plugin.shutdown" }, "revocation never fakes exit")
             harness.writeControl(validControl())
             harness.awaitReason("ok")
@@ -336,39 +361,9 @@ class ProducerTest {
             harness.awaitReason("stopped_unload")
             val starts = harness.facts().filter { it.name == "plugin.started" }
             val runIds = starts.map { it.run_id }.toSet()
-            assertTrue(firstRunId in runIds, "first run's started fact survives revocation")
-            assertTrue(runIds.size >= 2, "re-enable builds a new run id, got run ids $runIds")
-            assertEquals(starts.size, runIds.size, "exactly one started fact per run")
+            assertTrue(firstRunId !in runIds, "the revoked run's facts were cleaned with its handover file")
+            assertTrue(runIds.size >= 1 && starts.size == runIds.size, "exactly one started fact per surviving run")
             assertEquals(1, harness.facts().count { it.name == "plugin.shutdown" })
-        }
-    }
-
-    @Test
-    fun `outbox full gate closes admission and reopens after the age seal and eviction`() {
-        Harness(retentionMaxBytes = 2 * 1024, retentionIntervalMs = 200).use { harness ->
-            harness.writeControl(validControl())
-            harness.service.start("monolith")
-            harness.awaitReason("ok")
-
-            // 2KiB预算下单一.open段超预算且无.ready可淘汰：sweepOwnSource返回false→
-            // outbox_full（状态发布）→storage闸门拒绝新记录（R9，验收记录第135行缺口）。
-            repeat(6) {
-                assertEquals(Admission.QUEUED, harness.service.recorder.record(startedDraft()))
-            }
-            harness.awaitStatus(15_000) { it.reason == "outbox_full" }
-            assertEquals(
-                Admission.DROPPED,
-                harness.service.recorder.record(startedDraft()),
-                "storage gate must refuse new records while over budget",
-            )
-
-            // critical 30s年龄封存把.open转.ready后，下一轮sweep按预算淘汰最旧.ready：
-            // 预算恢复→闸门重开→新记录重新入队（closed>full>capacity优先级中的full分支解除）。
-            harness.clock.advance(31_000)
-            harness.awaitStatus(15_000) { it.reason == "ok" }
-            assertEquals(Admission.QUEUED, harness.service.recorder.record(startedDraft()))
-            harness.service.stop("unload")
-            harness.awaitReason("stopped_unload")
         }
     }
 
@@ -464,7 +459,7 @@ class ProducerTest {
         val enteredActivation = java.util.concurrent.CountDownLatch(1)
         val releaseActivation = java.util.concurrent.CountDownLatch(1)
         val hook = { writer: Writer ->
-            // 先等writer完成启动（根目录/锁文件已就位），再停在"已启动、run未提交"的窗口。
+            // 先等writer完成启动（outbox事实文件已创建），再停在"已启动、run未提交"的窗口。
             val active = defaultAwaitActive(writer)
             enteredActivation.countDown()
             releaseActivation.await(30, java.util.concurrent.TimeUnit.SECONDS)
@@ -479,22 +474,13 @@ class ProducerTest {
             harness.awaitReason("stopped_app_close")
             // 放行activateRun：等待返回后必须复查stoppedOnce并放弃提交。
             releaseActivation.countDown()
-            // writer被就地关闭=writer.lock可被第三方获取（同步点兼断言）。
-            val root = harness.producerRoot()
-            val lock = root.resolve("writer.lock")
-            var acquired = false
-            var waited = 0L
-            while (waited < 15_000 && !acquired) {
-                java.nio.channels.FileChannel.open(lock, java.nio.file.StandardOpenOption.READ, java.nio.file.StandardOpenOption.WRITE).use { channel ->
-                    acquired = channel.tryLock(0, 1, false) != null
-                }
-                if (!acquired) {
-                    Thread.sleep(50)
-                    waited += 50
-                }
-            }
-            assertTrue(acquired, "uncommitted writer is closed so the lock is free")
             assertTrue(harness.facts().none { it.name == "plugin.started" }, "no started fact after the stop decision")
+            // 未提交的writer被就地关闭：追加协议无锁文件（§3.1），以事实文件句柄释放为证——
+            // Windows上句柄未释放时删除必败（旧协议以writer.lock可被第三方获取为同一断言）。
+            val file = harness.outboxFiles().single()
+            awaitUntil(15_000) {
+                runCatching { Files.deleteIfExists(file); !Files.exists(file) }.getOrDefault(false)
+            }
             assertTrue(
                 harness.service.status.value.reason.startsWith("stopped"),
                 "status stays stopped, got ${harness.service.status.value.reason}",
@@ -506,6 +492,5 @@ class ProducerTest {
         }
     }
 
-    private fun Harness.producerDirCount(): Int =
-        if (Files.isDirectory(v1Root)) Files.list(v1Root).use { files -> files.filter { Files.isDirectory(it) }.count() }.toInt() else 0
+    private fun Harness.outboxFiles(): List<Path> = listJsonl(outbox)
 }

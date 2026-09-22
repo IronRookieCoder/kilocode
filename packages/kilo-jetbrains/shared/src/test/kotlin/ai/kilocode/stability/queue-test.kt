@@ -315,56 +315,6 @@ class QueueTest {
     }
 
     @Test
-    fun `storage full gate drops with quota reason and recovers when cleared`() {
-        val fixture = newFixture(OperationTest.controlJson())
-        val recorder = fixture.recorder
-
-        recorder.setStorageFull(true)
-        assertEquals(Admission.DROPPED, recorder.record(Draft("rpc", "operation", "critical", endData("rpc"))))
-        assertEquals(1L, recorder.health().droppedQuota, "space rejection counts as quota, not buffer_full")
-        assertEquals(0L, recorder.health().droppedCapacity)
-        assertEquals(0, fixture.depth().items)
-
-        recorder.setStorageFull(false)
-        assertEquals(Admission.QUEUED, recorder.record(Draft("rpc", "operation", "critical", endData("rpc"))))
-        assertEquals(1, fixture.depth().items)
-        assertEquals(1L, recorder.health().droppedQuota)
-    }
-
-    @Test
-    fun `closed admission wins over the storage full gate`() {
-        val fixture = newFixture(OperationTest.controlJson())
-        val recorder = fixture.recorder
-
-        recorder.close()
-        recorder.setStorageFull(true)
-        assertEquals(Admission.DISABLED, recorder.record(Draft("rpc", "operation", "critical", endData("rpc"))))
-        assertEquals(0L, recorder.health().droppedQuota, "shutdown must not be re-counted as quota")
-        assertEquals(1L, recorder.health().disabledShutdown)
-    }
-
-    @Test
-    fun `storage full gate beats queue capacity`() {
-        val fixture = newFixture(OperationTest.controlJson())
-        val recorder = fixture.recorder
-        val draft = Draft("error.reported", "diagnostic", "diagnostic", detailErrorData())
-
-        var queued = 0
-        while (queued < 2000 && recorder.record(draft) == Admission.QUEUED) queued += 1
-        assertTrue(queued < 2000, "queue must be at capacity for this test")
-        val capacityBefore = recorder.health().droppedCapacity
-
-        recorder.setStorageFull(true)
-        assertEquals(Admission.DROPPED, recorder.record(draft))
-        assertEquals(1L, recorder.health().droppedQuota)
-        assertEquals(
-            capacityBefore,
-            recorder.health().droppedCapacity,
-            "quota drop must not be counted as buffer_full",
-        )
-    }
-
-    @Test
     fun `concurrent record and end keep event ids and per channel seq unique`() {
         val fixture = newFixture(OperationTest.controlJson())
         val recorder = fixture.recorder

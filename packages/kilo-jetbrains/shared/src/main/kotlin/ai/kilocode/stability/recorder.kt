@@ -1,7 +1,6 @@
 package ai.kilocode.stability
 
 import java.util.UUID
-import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
@@ -56,7 +55,6 @@ data class RecorderHealth(
     val droppedInvalid: Long,
     val droppedContention: Long,
     val droppedCapacity: Long,
-    val droppedQuota: Long,
     val disabledPolicy: Long,
     val disabledShutdown: Long,
     val evictedDiagnostic: Long,
@@ -74,16 +72,12 @@ internal data class BeginSnapshot(val epoch: String?, val revision: Long?, val p
  * 无有效策略时该快照为unbound占位策略（设计第8章默认不限制采集），DISABLED只来自显式策略
  * 关闭两用途（含撤销、公共/用途过期）；3) [Dictionary.violations]结构性违规即DROPPED
  * （请求用途为空除外——它交给许可交集判为DISABLED）；4) 三方用途交集（Policy.permit ∩
- * Draft自带purposes ∩ Dictionary.purposes形态出口）为空即DISABLED；5) 空间闸门置位即
- * DROPPED并计quota（见文末，先于容量）；6) 生产者锁只tryLock，争用即DROPPED；7) seq按
- * run/channel在准入前递增（丢弃也产生seq空洞，不复用）；8) 双维容量由[StabilityQueue]原子判定。
+ * Draft自带purposes ∩ Dictionary.purposes形态出口）为空即DISABLED；5) 生产者锁只tryLock，
+ * 争用即DROPPED；6) seq按run/channel在准入前递增（丢弃也产生seq空洞，不复用）；
+ * 7) 双维容量由[StabilityQueue]原子判定。
  *
- * 健康计数全部走AtomicLong，丢弃不递归调用自身record。
- *
- * 空间闸门（设计7.4"仍无空间则拒绝新写入并计数"，R9）：retention清理后仍超出未交接预算时，
- * 服务经[setStorageFull]置位闸门；置位后record返回DROPPED并按quota计数（metrics 3.2丢弃
- * 原因），绝不计入buffer_full。裁决顺序：closed（DISABLED）优先于storage-full，
- * storage-full优先于队列容量；结构性校验仍在闸门之前（无效草稿不占空间，不冒充quota）。
+ * 健康计数全部走AtomicLong，丢弃不递归调用自身record。磁盘占用不设准入闸门：事实文件
+ * 预算由writer写前的容量重写兜底（§7.4），超限行为被淘汰最旧行而非拒绝新记录。
  */
 class Recorder(
     private val identity: ProducerIdentity,
@@ -109,7 +103,6 @@ class Recorder(
      */
     @Volatile internal var forwardTo: Recorder? = null
 
-    private val storageFull = AtomicBoolean(false)
     private val criticalSeq = AtomicLong(0)
     private val diagnosticSeq = AtomicLong(0)
 
@@ -117,7 +110,6 @@ class Recorder(
     private val droppedInvalid = AtomicLong(0)
     private val droppedContention = AtomicLong(0)
     private val droppedCapacity = AtomicLong(0)
-    private val droppedQuota = AtomicLong(0)
     private val disabledPolicy = AtomicLong(0)
     private val disabledShutdown = AtomicLong(0)
     private val evictedDiagnostic = AtomicLong(0)
@@ -158,10 +150,6 @@ class Recorder(
             disabledPolicy.incrementAndGet()
             return Admission.DISABLED
         }
-        if (storageFull.get()) {
-            droppedQuota.incrementAndGet()
-            return Admission.DROPPED
-        }
 
         val channel = draft.channel
         // 生产者临界区=队列锁：seq分配、Fact构建、字节估算与准入判定在同一tryLock内完成，
@@ -190,14 +178,9 @@ class Recorder(
         return admission
     }
 
-    /** 停止准入：shutdown后record一律DISABLED（优先于空间闸门）；已排队事实留给writer按A4流程处理。 */
+    /** 停止准入：closed后record一律DISABLED；已排队事实留给writer按A4流程处理。 */
     fun close() {
         closed = true
-    }
-
-    /** 空间闸门（R9）：retention按未交接预算置位/复位；与[close]独立，closed时闸门无效果。 */
-    internal fun setStorageFull(full: Boolean) {
-        storageFull.set(full)
     }
 
     /** 健康累计快照；供health.kt生成telemetry.health，本类不递归记录自身丢弃。 */
@@ -206,7 +189,6 @@ class Recorder(
         droppedInvalid = droppedInvalid.get(),
         droppedContention = droppedContention.get(),
         droppedCapacity = droppedCapacity.get(),
-        droppedQuota = droppedQuota.get(),
         disabledPolicy = disabledPolicy.get(),
         disabledShutdown = disabledShutdown.get(),
         evictedDiagnostic = evictedDiagnostic.get(),

@@ -48,7 +48,7 @@ private data class HealthSample(
 /**
  * 采集健康（设计7.1/11.2，M16；§6.2增量协议）：把损失与队列积压转成telemetry.health事实。
  *
- * [sample]读取本run的原始累计drop（准入丢弃按原因累计：invalid/contention/capacity/quota，
+ * [sample]读取本run的原始累计drop（准入丢弃按原因累计：invalid/contention/capacity，
  * 加writer入盘前丢弃：expired/oversize/容量重写淘汰evicted）、累计write_error（writer磁盘
  * 失败）与depth_bytes/oldest_age_ms；落盘事实的drop/write_error是**自上一条health事实以来
  * 的增量**（§6.2），cs-cloud直接求和；run重启后增量自然从零起算（新Health实例基线为零）。
@@ -110,7 +110,7 @@ class Health(
         val counters = recorder.health()
         val stats = writer.stats()
         val drop = counters.droppedInvalid + counters.droppedContention + counters.droppedCapacity +
-            counters.droppedQuota + stats.droppedPolicy + stats.droppedOversize + stats.droppedEvicted
+            stats.droppedPolicy + stats.droppedOversize + stats.droppedEvicted
         val depth = recorder.depth()
         return HealthSample(drop, stats.writeErrors, depth.bytes, oldestAgeMs(clock.mono(), depth.items))
     }

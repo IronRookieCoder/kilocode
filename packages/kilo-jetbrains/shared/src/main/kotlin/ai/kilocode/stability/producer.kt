@@ -5,12 +5,8 @@ import com.intellij.ide.util.PropertiesComponent
 import com.intellij.openapi.application.ApplicationInfo
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.platform.ide.productMode.IdeProductMode
-import java.nio.file.Files
-import java.nio.file.Path
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
-import kotlinx.serialization.json.buildJsonObject
-import kotlinx.serialization.json.put
 
 private const val MODE_MONOLITH = "monolith"
 private const val MODE_SPLIT = "split"
@@ -32,7 +28,6 @@ private const val SCOPE_PREFIX = "sc-"
 private const val RANDOM_ID_CHARS = 12
 private const val DEVICE_SETTING_KEY = "ai.kilocode.stability.device.id"
 private const val SCOPE_SETTING_KEY = "ai.kilocode.stability.scope.id"
-private const val REGISTRATION_SCHEMA_MAJOR = 1
 
 /** 内部随机短ID：UUID去连字符取前12个十六进制字符。 */
 internal fun randomId(): String = UUID.randomUUID().toString().replace("-", "").take(RANDOM_ID_CHARS)
@@ -121,7 +116,7 @@ class WorkspaceIds {
 }
 
 /**
- * 生产者环境快照（设计5.2/6.1）：producer.json与ProducerIdentity公共字段的共同来源。
+ * 生产者环境快照（设计5.2/6.1）：ProducerIdentity公共字段的共同来源。
  * 全部平台读取经runCatching，取不到的值固定"unknown"（枚举闭集内绝不留空）；快照在run内不变。
  */
 internal object ProducerEnvironment {
@@ -182,56 +177,5 @@ internal object ProducerEnvironment {
         PROVIDER_CS_CLOUD -> PROVIDER_CS_CLOUD
         PROVIDER_KILO_CLI -> PROVIDER_KILO_CLI
         else -> PROVIDER_UNKNOWN
-    }
-}
-
-/**
- * 一个JVM采集实例的登记载体（设计5.2）：持有固定环境快照与producer根目录，负责
- * producer.json（环境元数据）与`~/.costrict/telemetry/registrations/<producer-id>.json`
- * （发现与所有权校验登记）的原子落盘。pid/process_start/created_at在实例构造时固定，run内不变。
- */
-class Producer(
-    val identity: ProducerIdentity,
-    val root: Path,
-    private val registrationsDir: Path,
-    private val storage: Storage,
-) {
-    private val pid: Long = runCatching { ProcessHandle.current().pid() }.getOrDefault(0L)
-    private val processStart: Long = runCatching {
-        ProcessHandle.current().info().startInstant().map { it.toEpochMilli() }.orElse(0L)
-    }.getOrDefault(0L)
-    private val createdAt: Long = System.currentTimeMillis()
-
-    fun writeProducerJson() {
-        val json = buildJsonObject {
-            put("producer_id", identity.producerId)
-            put("device_id", identity.deviceId)
-            put("plugin_version", identity.pluginVersion)
-            put("ide_product", identity.ideProduct)
-            put("ide_build", identity.ideBuild)
-            put("ide_build_major", identity.ideBuildMajor)
-            put("os_family", identity.osFamily)
-            put("arch", identity.arch)
-            put("mode", identity.mode)
-            put("side", identity.side)
-            put("env", identity.env)
-            put("connection_provider", identity.connectionProvider)
-        }
-        storage.atomicWrite(root.resolve("producer.json"), json.toString().encodeToByteArray())
-    }
-
-    fun writeRegistration(): Path {
-        Files.createDirectories(registrationsDir)
-        val json = buildJsonObject {
-            put("schema_major", REGISTRATION_SCHEMA_MAJOR)
-            put("outbox_path", root.toAbsolutePath().toString())
-            put("producer_id", identity.producerId)
-            put("pid", pid)
-            put("process_start", processStart)
-            put("created_at", createdAt)
-        }
-        val target = registrationsDir.resolve(identity.producerId + ".json")
-        storage.atomicWrite(target, json.toString().encodeToByteArray())
-        return target
     }
 }
