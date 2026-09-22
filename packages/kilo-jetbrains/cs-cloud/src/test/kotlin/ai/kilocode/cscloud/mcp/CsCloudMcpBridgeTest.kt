@@ -3,6 +3,7 @@ package ai.kilocode.cscloud.mcp
 import ai.kilocode.backend.app.CapabilityResult
 import ai.kilocode.cscloud.CsCloudEndpoint
 import ai.kilocode.cscloud.CsCloudRequestException
+import ai.kilocode.cscloud.CsCloudRoute
 import ai.kilocode.log.KiloLog
 import ai.kilocode.stability.Fixture
 import kotlinx.coroutines.CancellationException
@@ -201,12 +202,43 @@ class CsCloudMcpBridgeTest {
     }
 
     @Test
-    fun `failed bind opens no registration denominator`() {
+    fun `unresponsive bind records a failed registration`() {
+        failedBind(
+            MockResponse().setSocketPolicy(SocketPolicy.NO_RESPONSE),
+            OkHttpClient.Builder().readTimeout(200, TimeUnit.MILLISECONDS).build(),
+            "failure",
+            "cs_cloud",
+            "ide_capability_bind_failed",
+        )
+    }
+
+    @Test
+    fun `502 bind records a failed registration`() {
+        failedBind(
+            MockResponse().setResponseCode(502).setBody("""{"error":{"code":"capability_bind_failed","message":"csc IDE capability request failed: HTTP 502"}}"""),
+            OkHttpClient.Builder().addInterceptor(CsCloudRoute.responseInterceptor()).build(),
+            "failure",
+            "cs_cloud",
+            "ide_capability_bind_failed",
+        )
+    }
+
+    @Test
+    fun `unsupported bind records a blocked registration`() {
+        failedBind(
+            MockResponse().setResponseCode(404).setBody("""{"error":{"code":"capability_bind_failed","message":"csc IDE capability request failed: HTTP 404"}}"""),
+            OkHttpClient.Builder().addInterceptor(CsCloudRoute.responseInterceptor()).build(),
+            "blocked",
+            "environment",
+            "ide_capability_unsupported",
+        )
+    }
+
+    private fun failedBind(response: MockResponse, http: OkHttpClient, result: String, cause: String, code: String) {
         val server = MockWebServer()
         server.dispatcher = object : Dispatcher() {
             override fun dispatch(request: RecordedRequest): MockResponse = when {
-                // PUT的传输级失败（响应永不到达 → 读超时）：bind的真实失败分支（HTTP错误码不在其裁决内）。
-                request.method == "PUT" -> MockResponse().setSocketPolicy(SocketPolicy.NO_RESPONSE)
+                request.method == "PUT" -> response
                 request.path == "/global/health" -> MockResponse().setBody("""{"capabilities":["conversation_ide_capability_v1"]}""")
                 else -> MockResponse().setResponseCode(404)
             }
@@ -218,7 +250,7 @@ class CsCloudMcpBridgeTest {
             val bridge = CsCloudMcpBridge(
                 scope,
                 endpoint = { CsCloudEndpoint(server.url("/").toString().trimEnd('/'), null) },
-                client = { OkHttpClient.Builder().readTimeout(200, TimeUnit.MILLISECONDS).build() },
+                client = { http },
                 epoch = { 1 },
                 factory = FakeIdeMcpSessionFactory(),
                 log = TestLog(),
@@ -226,11 +258,21 @@ class CsCloudMcpBridgeTest {
                 operations = fixture.operations,
             )
             try {
-                // 绑定失败：ensure返回Unavailable，注册在成功分支内——不产任何ide.operation事实。
                 val down = runBlocking { bridge.ensure("conv-1", workspace) }
-                assertEquals("ide_capability_bind_failed", assertIs<CapabilityResult.Unavailable>(down).reason)
+                assertEquals(code, assertIs<CapabilityResult.Unavailable>(down).reason)
+                assertEquals(1, server.drain().count { it.method == "PUT" })
                 fixture.flush()
-                assertEquals(0, fixture.facts().count { it.name == "ide.operation" })
+                val ide = fixture.facts().filter { it.name == "ide.operation" }
+                val starts = ide.filter { it.data["phase"]?.jsonPrimitive?.content == "start" }
+                val ends = ide.filter { it.data["phase"]?.jsonPrimitive?.content == "end" }
+                assertEquals(1, starts.size)
+                assertEquals(1, ends.size)
+                assertEquals("mcp_register", starts.single().data.getValue("operation").jsonPrimitive.content)
+                assertEquals(result, ends.single().data.getValue("result").jsonPrimitive.content)
+                assertEquals("bind", ends.single().data.getValue("stage").jsonPrimitive.content)
+                assertEquals(cause, ends.single().data.getValue("cause").jsonPrimitive.content)
+                assertEquals(code, ends.single().data.getValue("error_code").jsonPrimitive.content)
+                assertEquals(starts.single().context["operation_id"], ends.single().context["operation_id"])
             } finally {
                 scope.cancel()
                 server.shutdown()

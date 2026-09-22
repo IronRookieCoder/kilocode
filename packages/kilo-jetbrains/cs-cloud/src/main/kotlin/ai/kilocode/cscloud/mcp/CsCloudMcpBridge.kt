@@ -102,25 +102,27 @@ class CsCloudMcpBridge(
             job.cancel()
             return@withLock CapabilityResult.Unavailable(code(it))
         }
+        val operation = operations?.begin(
+            "ide.operation",
+            MCP_REGISTER_DEADLINE_MS,
+            buildJsonObject { put("operation", "mcp_register") },
+        )
         val failure = bind(id, workspace, generation, transport, tools)
         if (failure != null) {
+            val blocked = failure == "ide_capability_unsupported"
+            operation?.end(
+                if (blocked) "blocked" else "failure",
+                "bind",
+                if (blocked) "environment" else "cs_cloud",
+                failure,
+            )
             job.cancel()
             return@withLock CapabilityResult.Unavailable(failure)
         }
+        operation?.end("success", "bind")
         val old = leases.put(id, Lease(workspace, generation, tools, job, currentEpoch))
         old?.job?.cancel()
         old?.let { clear(id, it.generation, it.workspace) }
-        // M23 mcp_register（C5）：仅新绑定成功计一次注册（CapabilityResult.Ready返回之前结算）；
-        // 缓存lease复用绝不是注册（分母不增），绑定失败不开分母。begin与end都在实际处理器
-        // （ensure的新绑定成功分支）完成，调用方与backend实现绝不双计。
-        operations?.let { ops ->
-            val operation = ops.begin(
-                "ide.operation",
-                MCP_REGISTER_DEADLINE_MS,
-                buildJsonObject { put("operation", "mcp_register") },
-            )
-            operation.end("success", "bind")
-        }
         CapabilityResult.Ready(generation, tools)
     }
 
