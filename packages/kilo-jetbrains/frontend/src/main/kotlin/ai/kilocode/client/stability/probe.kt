@@ -3,6 +3,7 @@ package ai.kilocode.client.stability
 import ai.kilocode.stability.Clock
 import ai.kilocode.stability.Draft
 import ai.kilocode.stability.Operations
+import ai.kilocode.stability.StallMerger
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.components.Service
 import java.util.UUID
@@ -52,6 +53,8 @@ private class PendingSample(val seq: Long, val scheduledMono: Long, val observat
  *   一律忽略，绝不在新观测区间按valid计（brief Step 3）。
  * - [interrupt]/[enabled](false)以给定validity作废当前pending（每条实际投递的样本
  *   恰好产出一条事实）并更换observation_id——每次失效都是连续观测区间的终点。
+ * - 可选[stall]（设计10.3）：valid样本经finalize喂给合并器；作废路径先发观测终点标记
+ *   再轮换observation_id，由它本机合并出edt.stall事实（仅valid样本参与，作废不喂）。
  * 线程纪律：全部状态为短原子切换，无锁、无EDT等待；offer/作废来自后台，complete来自EDT。
  * 时间取[Clock.mono]（本run相对单调毫秒）；purposes仅metrics（字典METRICS_ONLY_NAMES）。
  */
@@ -59,6 +62,7 @@ class Probe(
     private val clock: Clock,
     private val emit: (Draft) -> Unit,
     private val finalize: (() -> Unit) -> Unit = { it() },
+    private val stall: StallMerger? = null,
 ) {
     private val enabledFlag = AtomicBoolean(false)
     private val pending = AtomicReference<PendingSample?>()
@@ -89,7 +93,10 @@ class Probe(
     fun complete(seq: Long) {
         val completedMono = clock.mono()
         val taken = takePending(seq) ?: return
-        finalize { emit(sampleDraft(taken, completedMono, VALIDITY_VALID)) }
+        finalize {
+            emit(sampleDraft(taken, completedMono, VALIDITY_VALID))
+            stall?.onValidSample(taken.observationId, taken.seq, taken.scheduledMono, completedMono)
+        }
     }
 
     /** CAS摘取同序号样本；无pending或序号不符（已作废区间的迟到回调）返回null。 */
@@ -107,6 +114,8 @@ class Probe(
     }
 
     private fun invalidate(validity: String) {
+        // 中断标记先于observation_id轮换（设计10.3）：终结当前stall窗口，缺失部分不推断卡顿。
+        stall?.onObservationEnded()
         val taken = pending.getAndSet(null)
         // 作废方在后台线程（consumer/loop）；Draft就地构造后经emit record（非阻塞）。
         if (taken != null) emit(sampleDraft(taken, clock.mono(), validity))
@@ -163,7 +172,9 @@ internal class EdtProbeService internal constructor(
     /** Platform constructor — resolves collaborators from the service container. */
     constructor(cs: CoroutineScope) : this(cs, FrontendClock, ::defaultOperations)
 
-    private val probe = Probe(clock, ::emit, post)
+    /** stall窗口终结时的产出通道：与edt.delay同一operations出口（record非阻塞）。 */
+    private val stall = StallMerger { draft -> operations()?.record(draft) }
+    private val probe = Probe(clock, ::emit, post, stall)
     private val contributors = HashSet<Any>()
     private var loopJob: Job? = null
 

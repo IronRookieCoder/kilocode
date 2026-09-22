@@ -275,6 +275,47 @@ class ProbeTest {
         }
     }
 
+    /** 两次重叠valid样本（同obs、seq连续、首尾相接合计≥2s）在观测终点合并产出一条edt.stall。 */
+    @Test fun `overlapping valid samples merge into one stall fact when the observation ends`() {
+        Fixture().use { fixture ->
+            val clock = MutableClock()
+            val coroutines = TestCoroutines()
+            try {
+                val delivered = mutableListOf<() -> Unit>()
+                val host = newHost(fixture, clock, coroutines) { delivered.add(it) }
+                val owner = Any()
+                host.setActive(owner, true)
+                host.tick() // 样本1：scheduled=0
+                clock.now = 1_500
+                delivered.removeAt(0).invoke() // 窗口0..1_500（1.5s）
+                host.tick() // 样本2：scheduled=1_500（首尾相接）
+                clock.now = 3_000
+                delivered.removeAt(0).invoke() // 合并窗口0..3_000（3s）
+                host.setActive(owner, false) // 观测终点：终结stall窗口并产出edt.stall
+                fixture.flush()
+
+                val delays = edtFacts(fixture)
+                assertEquals(2, delays.size)
+                assertEquals(
+                    listOf(1_500L, 1_500L),
+                    delays.map { it.data.getValue("duration_ms").jsonPrimitive.long },
+                )
+                val stalls = fixture.facts().filter { it.name == "edt.stall" }
+                assertEquals(1, stalls.size)
+                assertEquals("sample", stalls.single().kind)
+                assertEquals("critical", stalls.single().channel)
+                assertEquals(setOf("metrics"), stalls.single().purposes)
+                assertEquals(3_000L, stalls.single().data.getValue("duration_ms").jsonPrimitive.long)
+                assertEquals(
+                    delays[0].data.getValue("observation_id").jsonPrimitive.content,
+                    stalls.single().data.getValue("observation_id").jsonPrimitive.content,
+                )
+            } finally {
+                coroutines.close {}
+            }
+        }
+    }
+
     @Test fun `edt violation draft carries registered operation and fixed evidence only`() {
         Fixture().use { fixture ->
             // operation=session是字典已登记token（API_GROUPS的session组，M19同词表）

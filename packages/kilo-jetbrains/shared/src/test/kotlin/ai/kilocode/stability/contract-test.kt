@@ -306,7 +306,7 @@ class ContractTest {
             "credentials.ready", "cli.download", "migration.required", "session.open",
             "session.restore", "action", "availability", "error.uncaught", "error.reported",
             "protocol.error", "telemetry.health", "session.dispose_risk", "rpc",
-            "edt.delay", "edt.violation", "render.apply", "ide.operation", "resource.snapshot",
+            "edt.delay", "edt.violation", "edt.stall", "render.apply", "ide.operation", "resource.snapshot",
         )
 
         /** 设计第8章控制文件字段。 */

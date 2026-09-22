@@ -176,6 +176,7 @@
         "rpc",
         "edt.delay",
         "edt.violation",
+        "edt.stall",
         "render.apply",
         "ide.operation",
         "resource.snapshot"

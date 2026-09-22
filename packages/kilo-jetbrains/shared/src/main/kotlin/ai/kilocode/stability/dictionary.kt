@@ -52,7 +52,7 @@ private val ERROR_DETAIL_KEYS = setOf("message", "frames", "fingerprint", "count
  * 生命周期、关键操作start/end、连接退化/恢复、安装与凭据、协议错误与violation证据、health摘要可含logs。
  */
 private val METRICS_ONLY_NAMES = setOf(
-    "rpc", "render.apply", "edt.delay", "resource.snapshot",
+    "rpc", "render.apply", "edt.delay", "edt.stall", "resource.snapshot",
     "availability", "migration.required", "session.dispose_risk",
 )
 private val DUAL_PURPOSE_NAMES = setOf(
@@ -519,6 +519,14 @@ object Dictionary {
             "edt.violation", "diagnostic",
             keys = listOf(key("operation", FieldType.STRING), key("evidence", FieldType.STRING, maxBytes = ID_BYTES)),
             required = setOf("operation", "evidence"),
+        )
+        spec(
+            "edt.stall", "sample",
+            keys = listOf(
+                key("duration_ms", FieldType.INTEGER),
+                key("observation_id", FieldType.STRING, maxBytes = ID_BYTES),
+            ),
+            required = setOf("duration_ms", "observation_id"),
         )
         spec(
             "render.apply", "sample",
