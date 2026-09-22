@@ -5,23 +5,29 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.long
+import kotlinx.serialization.json.put
 
 /**
- * 采集健康（任务A6，设计7.1/11.2）。
+ * 采集健康（任务A6，设计7.1/11.2；§6.2增量协议）。
  *
- * health摘要按本run累计drop/write_error与depth_bytes/oldest_age_ms输出；只在后台生成，
- * 每30秒及损失变化（drop计数增量）时各一次；写盘失败向独立KiloLog限频输出安全模板，
- * 绝不重新record；恢复后快照仍为累计值，consumer取差值；Health不收集业务内容。
+ * health事实的drop/write_error是自上一条health事实以来的增量（cs-cloud直接求和），
+ * 基线随Health实例（run重启=新实例，增量自然从零起算）；depth_bytes/oldest_age_ms是
+ * 当前积压读数。只在后台生成，每30秒及损失变化（增量>0）时各一次；写盘失败向独立
+ * KiloLog限频输出安全模板，绝不重新record；Health不收集业务内容。
  */
 class HealthTest {
+
+    /** 夹具辅助：沿用既有三参构造；两次调用得到两个实例——基线随实例、不随源计数走。 */
+    private fun Fixture.health(): Health = Health(recorder, writer, clock)
 
     @Test
     fun `snapshot carries cumulative counters and queue gauges`() {
         Fixture().use { fixture ->
             queueStarted(fixture)
-            val health = Health(fixture.recorder, fixture.writer, fixture.clock)
+            val health = fixture.health()
             val snapshot = health.snapshot()
             assertEquals(0L, snapshot["drop"]?.jsonPrimitive?.long)
             assertEquals(0L, snapshot["write_error"]?.jsonPrimitive?.long)
@@ -37,7 +43,7 @@ class HealthTest {
     @Test
     fun `background generation waits for the interval without losses`() {
         Fixture().use { fixture ->
-            val health = Health(fixture.recorder, fixture.writer, fixture.clock)
+            val health = fixture.health()
             assertFalse(health.poll(), "no fact before the 30s interval and without losses")
             fixture.advanceClock(30_000L)
             assertTrue(health.poll(), "interval due generates the first snapshot")
@@ -51,7 +57,7 @@ class HealthTest {
     @Test
     fun `loss change generates the health fact immediately`() {
         Fixture().use { fixture ->
-            val health = Health(fixture.recorder, fixture.writer, fixture.clock)
+            val health = fixture.health()
             assertFalse(health.poll())
             injectWriteFailure(fixture)
             assertTrue(health.poll(), "a loss delta must generate without waiting for the interval")
@@ -65,7 +71,7 @@ class HealthTest {
     fun `write failures emit the rate limited safe template without re-recording`() {
         Fixture().use { fixture ->
             val warnings = mutableListOf<String>()
-            val health = Health(fixture.recorder, fixture.writer, fixture.clock) { message -> warnings += message }
+            val health = fixture.health(warnings)
 
             injectWriteFailure(fixture)
             assertTrue(health.poll())
@@ -92,7 +98,7 @@ class HealthTest {
             val writeErrors = facts
                 .filter { it.name == "telemetry.health" }
                 .map { it.data["write_error"]?.jsonPrimitive?.long }
-            assertEquals(listOf(1L, 2L, 3L), writeErrors, "snapshots stay cumulative for consumer deltas")
+            assertEquals(listOf(1L, 1L, 1L), writeErrors, "facts carry the write_error delta since the previous health fact")
         }
     }
 
@@ -100,7 +106,7 @@ class HealthTest {
     fun `a fresh health instance starts from zero for a new run`() {
         Fixture().use { fixture ->
             val warnings = mutableListOf<String>()
-            val health = Health(fixture.recorder, fixture.writer, fixture.clock) { message -> warnings += message }
+            val health = fixture.health(warnings)
             injectWriteFailure(fixture)
             assertTrue(health.poll())
 
@@ -123,16 +129,67 @@ class HealthTest {
     }
 
     @Test
-    fun `storage full quota drops surface in the health drop total`() {
+    fun `dictionary violations surface in the health drop delta`() {
         Fixture().use { fixture ->
-            fixture.recorder.setStorageFull(true)
-            assertEquals(Admission.DROPPED, fixture.recorder.record(startedDraft()))
-            assertEquals(1L, fixture.recorder.health().droppedQuota)
-            val health = Health(fixture.recorder, fixture.writer, fixture.clock)
-            assertEquals(1L, health.snapshot()["drop"]?.jsonPrimitive?.long)
+            assertEquals(Admission.DROPPED, fixture.recorder.record(invalidDraft()))
+            assertEquals(1L, fixture.recorder.health().droppedInvalid)
+            val health = fixture.health()
+            assertTrue(health.poll(), "a nonzero drop delta generates immediately")
             fixture.flush()
+            val fact = fixture.facts().single { it.name == "telemetry.health" }
+            assertEquals(1L, fact.data.getValue("drop").jsonPrimitive.long)
         }
     }
+
+    @Test
+    fun `health facts carry the delta since the previous health fact`() {
+        Fixture(tickMs = 50L).use { fixture ->
+            val health = fixture.health()
+            repeat(2) { fixture.recorder.record(invalidDraft()) }   // 结构性违规 → droppedInvalid
+            assertTrue(health.poll())
+            repeat(3) { fixture.recorder.record(invalidDraft()) }
+            assertTrue(health.poll())
+
+            fixture.flush()
+            val healths = fixture.facts().filter { it.name == "telemetry.health" }
+            assertEquals(2, healths.size)
+            assertEquals(2L, healths[0].data.getValue("drop").jsonPrimitive.long) // 首条=自本实例起算的增量
+            assertEquals(3L, healths[1].data.getValue("drop").jsonPrimitive.long) // 距上一条的增量，不是累计5
+        }
+    }
+
+    @Test
+    fun `baseline is per-health-instance so a new run starts from zero`() {
+        Fixture(tickMs = 50L).use { fixture ->
+            repeat(2) { fixture.recorder.record(invalidDraft()) }
+            assertTrue(fixture.health().poll())                     // 实例1基线0，报2
+            assertTrue(fixture.health().poll())                     // 实例2基线0（新run），再报2
+            fixture.flush()
+            val healths = fixture.facts().filter { it.name == "telemetry.health" }
+            assertEquals(listOf(2L, 2L), healths.map { it.data.getValue("drop").jsonPrimitive.long })
+        }
+    }
+
+    @Test
+    fun `evicted lines count toward the drop delta`() {
+        Fixture(tickMs = 50L, maxFileBytes = 2L * 1024).use { fixture ->
+            repeat(40) { fixture.recorder.record(wideCriticalDraft()) }
+            fixture.flush()
+            // 采样基线取poll前读数：写入health事实自身的追加还可能触发重写淘汰，
+            // 那部分按增量协议归入下一条health事实（writeLine先采样后追加）。
+            val evictedBeforePoll = fixture.writer.stats().droppedEvicted
+            assertTrue(evictedBeforePoll > 0, "fixture precondition: capacity rewrite evicted whole lines")
+            fixture.health().poll()
+            fixture.flush()
+            val drop = fixture.facts().filter { it.name == "telemetry.health" }
+                .last().data.getValue("drop").jsonPrimitive.long
+            assertTrue(drop >= evictedBeforePoll, "eviction must be visible in health")
+        }
+    }
+
+    /** health构造辅助（告警出口可注入）：统一走夹具的recorder/writer/clock三参构造。 */
+    private fun Fixture.health(warnings: MutableList<String>): Health =
+        Health(recorder, writer, clock) { message -> warnings += message }
 
     /** 真实故障注入：下一次写入前关闭通道，flush时该记录丢失并计write_error。 */
     private fun injectWriteFailure(fixture: Fixture) {
@@ -146,6 +203,34 @@ class HealthTest {
     }
 
     private fun startedDraft() = Draft("plugin.started", "lifecycle", "critical", JsonObject(emptyMap()))
+
+    /**
+     * 结构性违规草稿：基础结构完全合法（rpc end相的五终态键与api_group词表内取值），
+     * 仅携带一个任何name白名单都不含的键，Dictionary.violations只由它判违规
+     * → record返回DROPPED并计入droppedInvalid（recorder.kt准入序：违规先于策略），
+     * 无需生产侧测试钩子。
+     */
+    private fun invalidDraft(): Draft = Draft("rpc", "operation", "critical", buildJsonObject {
+        put("phase", "end")
+        put("result", "success")
+        put("duration_ms", 1)
+        put("stage", "unknown")
+        put("cause", "unknown")
+        put("error_code", "none")
+        put("api_group", "session")
+        put("zzz_not_in_any_whitelist", 1)
+    })
+
+    /** 更宽的critical载荷：error_code取64字节内长值，在小预算下更快触发容量重写淘汰（与writer-test同型）。 */
+    private fun wideCriticalDraft(): Draft = Draft("rpc", "operation", "critical", buildJsonObject {
+        put("phase", "end")
+        put("result", "success")
+        put("duration_ms", 1)
+        put("stage", "unknown")
+        put("cause", "unknown")
+        put("error_code", "x".repeat(60))
+        put("api_group", "session")
+    }, purposes = setOf("metrics", "logs"))
 
     /** 新run的身份（run重置语义：新recorder的累计计数从零开始）。 */
     private val NEXT_RUN_IDENTITY = ProducerIdentity(

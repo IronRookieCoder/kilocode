@@ -30,7 +30,7 @@ private fun defaultWarn(message: String) {
     runCatching { fallbackLog?.warn(message) }
 }
 
-/** 一次采样得到的累计快照（字段=telemetry.health的data闭集，设计第9章）。 */
+/** 一次采样得到的原始累计读数（字段=telemetry.health的data闭集，设计第9章）；[Health.poll]把drop/write_error折算为自上一条事实的增量落盘。 */
 private data class HealthSample(
     val drop: Long,
     val writeError: Long,
@@ -46,15 +46,15 @@ private data class HealthSample(
 }
 
 /**
- * 采集健康（设计7.1/11.2，M16）：把本run累计的损失与队列积压转成telemetry.health事实。
+ * 采集健康（设计7.1/11.2，M16；§6.2增量协议）：把损失与队列积压转成telemetry.health事实。
  *
- * [snapshot]输出本run累计drop（准入丢弃按原因累计：invalid/contention/capacity/quota，
- * 加writer入盘前丢弃：expired/oversize）、累计write_error（writer磁盘失败）与
- * depth_bytes/oldest_age_ms。计数永远是累计值（跨恢复不清零），consumer取相邻快照差值；
- * 首快照与重放规则由外部验证负责（brief Step 4）。
+ * [sample]读取本run的原始累计drop（准入丢弃按原因累计：invalid/contention/capacity/quota，
+ * 加writer入盘前丢弃：expired/oversize/容量重写淘汰evicted）、累计write_error（writer磁盘
+ * 失败）与depth_bytes/oldest_age_ms；落盘事实的drop/write_error是**自上一条health事实以来
+ * 的增量**（§6.2），cs-cloud直接求和；run重启后增量自然从零起算（新Health实例基线为零）。
  *
  * 生成只在后台：[poll]由服务后台循环周期调用——距上次生成满[intervalMs]（默认30秒）
- * 生成一次；drop/write_error计数增量（损失变化）立即生成。写盘失败增量向独立KiloLog
+ * 生成一次；drop/write_error增量非零（损失变化）立即生成。写盘失败增量向独立KiloLog
  * 限频输出固定模板（[WARN_INTERVAL_MS]内至多一次），绝不重新record自身错误（无递归）。
  *
  * oldest_age_ms是轮询下界估计：队列持续非空的时长（清空即归零）；recorder/queue不暴露
@@ -73,22 +73,32 @@ class Health(
     private var lastWarnMonoMs = -WARN_INTERVAL_MS
     private var nonEmptySinceMonoMs = -1L
 
-    /** 本run累计快照（telemetry.health的data形状）；一次观测，同时推进积压年龄采样。 */
+    /** 原始累计读数（观测用；data键集与telemetry.health一致，落盘事实则是[poll]折算的增量）；一次观测，同时推进积压年龄采样。 */
     fun snapshot(): JsonObject = sample().toJson()
 
     /**
-     * 后台生成入口：采样→（写盘失败增量时）限频告警→到期或损失变化时记录累计事实。
-     * 返回是否生成了一条事实。只读计数器与深度，绝不从告警路径调用record。
+     * 后台生成入口：采样→折算自上一条事实的增量→（写盘失败增量时）限频告警→到期或损失
+     * 变化时记录增量事实。返回是否生成了一条事实。只读计数器与深度，绝不从告警路径调用record。
      */
     internal fun poll(): Boolean {
         val nowMono = clock.mono()
         val sample = sample()
+        val dropDelta = sample.drop - lastDrop
         val writeDelta = sample.writeError - lastWriteError
         if (writeDelta > 0) maybeWarn(writeDelta, sample.writeError, nowMono)
-        val lossChanged = sample.drop > lastDrop || writeDelta > 0
+        val lossChanged = dropDelta > 0 || writeDelta > 0
         if (!lossChanged && nowMono - lastGenerateMonoMs < intervalMs) return false
         recorder.record(
-            Draft(NAME_HEALTH, KIND_HEALTH, CHANNEL_CRITICAL, sample.toJson(), emptyMap(), null, DUAL_PURPOSES),
+            Draft(
+                NAME_HEALTH, KIND_HEALTH, CHANNEL_CRITICAL,
+                buildJsonObject {
+                    put("drop", dropDelta)          // 增量：cs-cloud直接求和（§6.2）
+                    put("write_error", writeDelta)
+                    put("depth_bytes", sample.depthBytes)
+                    put("oldest_age_ms", sample.oldestAgeMs)
+                },
+                emptyMap(), null, DUAL_PURPOSES,
+            ),
         )
         lastDrop = sample.drop
         lastWriteError = sample.writeError
@@ -100,7 +110,7 @@ class Health(
         val counters = recorder.health()
         val stats = writer.stats()
         val drop = counters.droppedInvalid + counters.droppedContention + counters.droppedCapacity +
-            counters.droppedQuota + stats.droppedPolicy + stats.droppedOversize
+            counters.droppedQuota + stats.droppedPolicy + stats.droppedOversize + stats.droppedEvicted
         val depth = recorder.depth()
         return HealthSample(drop, stats.writeErrors, depth.bytes, oldestAgeMs(clock.mono(), depth.items))
     }

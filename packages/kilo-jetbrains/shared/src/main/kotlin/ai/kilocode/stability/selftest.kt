@@ -19,8 +19,8 @@ private const val SELFTEST_FAULT_UNCAUGHT = "fault-selftest-uncaught"
  * 范围（30 name中排除3个）：
  *  - `plugin.started`/`plugin.shutdown`是服务级每run恰一条的 lifecycle 单发
  *    （stability-service activateRun/stop 独占），自检重复发会破坏"唯一终态"口径；
- *  - `telemetry.health`携带run内累计快照（drop/write_error），伪造快照会污染M16的
- *  相邻差值推导；真实IDE由Health后台周期产出，不经自检驱动。
+ *  - `telemetry.health`的drop/write_error是自上一条health事实以来的增量（§6.2，cs-cloud
+ *  直接求和），伪造事实会向下游损失总和注入虚假增量；真实IDE由Health后台周期产出，不经自检驱动。
  * 其余27个name（含error族计数/详情两形态、7种kind全部）在此驱动；真实端到端会话中
  * 被排除的3个由服务自身自然产出，全集覆盖由验收断言把关。
  *
