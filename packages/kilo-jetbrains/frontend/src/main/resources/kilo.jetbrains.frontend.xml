@@ -162,6 +162,11 @@
     </applicationListeners>
 
     <actions>
+        <!-- 采集链路自检（隐藏动作：不注册进任何菜单组，仅集成测试经 invokeAction 触发；
+             默认 no-op，需 -Dcostrict.stability.selftest=true 才执行，生产 IDE 不产事实）。 -->
+        <action id="Kilo.StabilitySelfTest"
+                class="ai.kilocode.client.stability.StabilitySelfTestAction"/>
+
         <action id="Kilo.Restart"
                 class="ai.kilocode.client.actions.RestartKiloAction"/>
 
