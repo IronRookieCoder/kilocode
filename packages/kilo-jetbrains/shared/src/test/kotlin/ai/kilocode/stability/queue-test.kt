@@ -289,14 +289,29 @@ class QueueTest {
     }
 
     @Test
-    fun `no valid policy admits nothing`() {
+    fun `unknown major falls open to the unbound placeholder`() {
         val dir = Files.createTempDirectory("stability-queue").also { tempDirs.add(it) }
         val file = dir.resolve("jetbrains.json").apply { writeText(OperationTest.controlJson(major = 2)) }
         val store = PolicyStore(file, { 2_000L }).also { stores.add(it) }
         val recorder = Recorder(PRODUCER_IDENTITY, store, SYSTEM_CLOCK)
 
-        assertEquals(Admission.DISABLED, recorder.record(Draft("rpc", "operation", "critical", endData("rpc"))))
-        assertEquals(1L, recorder.health().disabledPolicy)
+        // fail open（设计§8）：未知schema_major视为无有效策略，unbound占位策略放行全部登记name
+        // （默认不限制采集），不再默认关闭；准入的用途交集仍由Dictionary形态出口收窄。
+        val rpc = Draft("rpc", "operation", "critical", endData("rpc"))
+        val started = Draft("plugin.started", "lifecycle", "critical", JsonObject(emptyMap()))
+        assertEquals(Admission.QUEUED, recorder.record(rpc))
+        assertEquals(Admission.QUEUED, recorder.record(started))
+        assertEquals(0L, recorder.health().disabledPolicy)
+
+        val claim = assertNotNull(recorder.tryClaim(MAX_ITEMS, MAX_BYTES))
+        val facts = try {
+            claim.records.map { record -> record.fact }
+        } finally {
+            claim.release()
+        }
+        assertEquals(listOf(EPOCH_UNBOUND, EPOCH_UNBOUND), facts.map { fact -> fact.account_epoch })
+        assertEquals(listOf(0L, 0L), facts.map { fact -> fact.policy_revision })
+        assertEquals(listOf(setOf("metrics"), setOf("metrics", "logs")), facts.map { fact -> fact.purposes })
     }
 
     @Test

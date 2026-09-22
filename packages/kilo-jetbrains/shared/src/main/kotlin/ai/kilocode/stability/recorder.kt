@@ -71,7 +71,8 @@ internal data class BeginSnapshot(val epoch: String?, val revision: Long?, val p
  *
  * record全路径不等待、不序列化完整JSON、不做文件/网络IO，可在EDT直接调用：
  * 1) closed即DISABLED；2) 取[PolicyStore.current]新鲜快照（每条记录重判，绝不缓存过期结论），
- * 无有效策略即DISABLED（fail closed）；3) [Dictionary.violations]结构性违规即DROPPED
+ * 无有效策略时该快照为unbound占位策略（设计第8章默认不限制采集），DISABLED只来自显式策略
+ * 关闭两用途（含撤销、公共/用途过期）；3) [Dictionary.violations]结构性违规即DROPPED
  * （请求用途为空除外——它交给许可交集判为DISABLED）；4) 三方用途交集（Policy.permit ∩
  * Draft自带purposes ∩ Dictionary.purposes形态出口）为空即DISABLED；5) 空间闸门置位即
  * DROPPED并计quota（见文末，先于容量）；6) 生产者锁只tryLock，争用即DROPPED；7) seq按
@@ -135,6 +136,8 @@ class Recorder(
             return Admission.DISABLED
         }
         val policy = policies.current()
+        // 防御分支：current()契约永非null（无有效策略时返回unbound占位策略、permit为登记名全集，
+        // 不会走到这里）；DISABLED只来自显式策略关闭两用途或撤销（见下方purposes为空集）。
         if (policy == null) {
             disabledPolicy.incrementAndGet()
             return Admission.DISABLED

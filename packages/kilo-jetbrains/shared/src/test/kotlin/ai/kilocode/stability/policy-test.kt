@@ -25,9 +25,13 @@ import kotlinx.serialization.json.putJsonObject
 /**
  * 许可、用途和账户代际（任务A2，设计第8章/8.1）。
  *
- * 公共策略缺失／过期／未知major关闭两用途；各用途到期独立判断；
- * 不可读或畸形文件立即fail closed，不等待下一次轮询；
- * 任何已观察到的epoch更替都永久退役旧epoch，时钟回跳不得复活已失效许可。
+ * fail open（设计第8章）：控制文件缺失、为空、畸形或未知schema_major时默认不限制采集，
+ * [PolicyStore.current]返回unbound占位策略（全用途、revision=0、epoch=`unbound`），
+ * 读文件与判定同样在构造时同步发生，不等待下一次轮询。
+ * 限制只能来自当前有效的显式策略：显式`enabled=false`、公共`expires_at`过期、
+ * 某用途显式关闭或过期一律停止对应采集（不fall open）；各用途到期独立判断。
+ * 占位epoch不绑定账户代际、永不退役；任何已观察到的真实epoch更替都永久退役旧epoch，
+ * 时钟回跳不得复活已失效许可。
  */
 class PolicyTest {
 
@@ -96,29 +100,34 @@ class PolicyTest {
         val file = writeControl(controlJson())
         var now = 2_000L
         val store = newStore(file) { now }
-        assertEquals(setOf("metrics", "logs"), store.current()?.permit(now, "action"))
-        assertEquals(12L, store.current()?.revision)
+        assertEquals(setOf("metrics", "logs"), store.current().permit(now, "action"))
+        assertEquals(12L, store.current().revision)
 
         replaceControl(file, controlJson(revision = 13, logsEnabled = false))
         store.refresh()
-        assertEquals(13L, store.current()?.revision)
-        assertEquals(setOf("metrics"), store.current()?.permit(now, "action"))
+        assertEquals(13L, store.current().revision)
+        assertEquals(setOf("metrics"), store.current().permit(now, "action"))
     }
 
     @Test
-    fun `unreadable control file fails closed at construction`() {
+    fun `unreadable control file falls open at construction`() {
         val file = tempDir().resolve("jetbrains.json")
-        assertNull(newStore(file) { 2_000L }.current())
+        val policy = assertNotNull(newStore(file) { 2_000L }.current())
+        assertEquals(EPOCH_UNBOUND, policy.epoch)
+        assertEquals(0L, policy.revision)
+        assertEquals(setOf("metrics", "logs"), policy.permit(2_000L, "plugin.started"))
     }
 
     @Test
-    fun `unknown schema major fails closed immediately`() {
+    fun `unknown schema major falls open immediately`() {
         val file = writeControl(controlJson(major = 2))
-        assertNull(newStore(file) { 2_000L }.current())
+        val policy = assertNotNull(newStore(file) { 2_000L }.current())
+        assertEquals(EPOCH_UNBOUND, policy.epoch)
+        assertEquals(0L, policy.revision)
     }
 
     @Test
-    fun `malformed control file fails closed immediately`() {
+    fun `malformed control file falls open immediately`() {
         val broken = listOf(
             "",
             "{\"schema_major\": 1,",
@@ -134,16 +143,20 @@ class PolicyTest {
         val dir = tempDir()
         broken.forEachIndexed { index, text ->
             val file = writeControl(dir, text)
-            assertNull(newStore(file) { 2_000L }.current(), "broken case $index must fail closed")
+            val policy = assertNotNull(newStore(file) { 2_000L }.current(), "broken case $index must fall open")
+            assertEquals(EPOCH_UNBOUND, policy.epoch, "broken case $index must yield the unbound placeholder")
+            assertEquals(0L, policy.revision, "broken case $index must yield revision 0")
         }
     }
 
     @Test
-    fun `unknown top level key fails closed`() {
+    fun `unknown top level key falls open`() {
         val dir = tempDir()
         val base = Json.parseToJsonElement(controlJson()).jsonObject
         val poisoned = JsonObject(LinkedHashMap(base).apply { put("extra_field", JsonPrimitive(1)) })
-        assertNull(newStore(writeControl(dir, poisoned.toString())) { 2_000L }.current())
+        val policy = assertNotNull(newStore(writeControl(dir, poisoned.toString())) { 2_000L }.current())
+        assertEquals(EPOCH_UNBOUND, policy.epoch)
+        assertEquals(0L, policy.revision)
     }
 
     @Test
@@ -157,8 +170,8 @@ class PolicyTest {
         assertEquals(setOf("logs"), policy.permit(2_000, "action"))
 
         val partial = newStore(writeControl(tempDir(), controlJson(metricsExpires = null))) { 2_000L }
-        assertNull(partial.current()?.metrics)
-        assertEquals(setOf("logs"), partial.current()?.permit(2_000, "action"))
+        assertNull(partial.current().metrics)
+        assertEquals(setOf("logs"), partial.current().permit(2_000, "action"))
     }
 
     @Test
@@ -176,12 +189,12 @@ class PolicyTest {
         val file = writeControl(controlJson())
         var now = 2_000L
         val store = newStore(file) { now }
-        assertEquals(setOf("metrics", "logs"), store.current()?.permit(now, "action"))
+        assertEquals(setOf("metrics", "logs"), store.current().permit(now, "action"))
         now = 3_000L
-        assertEquals(setOf("metrics"), store.current()?.permit(now, "action"))
+        assertEquals(setOf("metrics"), store.current().permit(now, "action"))
         now = 8_000L
-        assertEquals(emptySet(), store.current()?.permit(now, "action"))
-        assertEquals(12L, store.current()?.revision)
+        assertEquals(emptySet(), store.current().permit(now, "action"))
+        assertEquals(12L, store.current().revision)
     }
 
     @Test
@@ -189,7 +202,7 @@ class PolicyTest {
         val file = writeControl(controlJson())
         val now = 2_000L
         val store = newStore(file) { now }
-        assertEquals(setOf("metrics", "logs"), store.current()?.permit(now, "action"))
+        assertEquals(setOf("metrics", "logs"), store.current().permit(now, "action"))
 
         replaceControl(file, controlJson(enabled = false))
         store.refresh()
@@ -199,7 +212,7 @@ class PolicyTest {
 
         replaceControl(file, controlJson())
         store.refresh()
-        assertEquals(setOf("metrics", "logs"), store.current()?.permit(now, "action"))
+        assertEquals(setOf("metrics", "logs"), store.current().permit(now, "action"))
     }
 
     @Test
@@ -207,17 +220,17 @@ class PolicyTest {
         val file = writeControl(controlJson(epoch = "acct-a"))
         val now = 2_000L
         val store = newStore(file) { now }
-        assertEquals("acct-a", store.current()?.epoch)
+        assertEquals("acct-a", store.current().epoch)
 
         replaceControl(file, controlJson(epoch = "acct-b", state = "pending"))
         store.refresh()
-        assertEquals("acct-b", store.current()?.epoch)
-        assertEquals(emptySet(), store.current()?.permit(now, "action"))
+        assertEquals("acct-b", store.current().epoch)
+        assertEquals(emptySet(), store.current().permit(now, "action"))
         assertTrue("acct-a" in store.retiredEpochs)
 
         replaceControl(file, controlJson(epoch = "acct-b", state = "ready"))
         store.refresh()
-        assertEquals(setOf("metrics", "logs"), store.current()?.permit(now, "action"))
+        assertEquals(setOf("metrics", "logs"), store.current().permit(now, "action"))
     }
 
     @Test
@@ -225,16 +238,17 @@ class PolicyTest {
         val file = writeControl(controlJson(epoch = "acct-a"))
         val now = 2_000L
         val store = newStore(file) { now }
-        assertEquals("acct-a", store.current()?.epoch)
+        assertEquals("acct-a", store.current().epoch)
 
         replaceControl(file, controlJson(epoch = "acct-a2"))
         store.refresh()
-        assertEquals("acct-a2", store.current()?.epoch)
-        assertEquals(setOf("metrics", "logs"), store.current()?.permit(now, "action"))
+        assertEquals("acct-a2", store.current().epoch)
+        assertEquals(setOf("metrics", "logs"), store.current().permit(now, "action"))
 
         replaceControl(file, controlJson(epoch = "acct-a"))
         store.refresh()
-        assertNull(store.current())
+        // 已退役epoch的回写不再被收养：落回unbound占位策略（默认不限制采集），旧epoch永不复活
+        assertEquals(EPOCH_UNBOUND, store.current().epoch)
         assertTrue("acct-a" in store.retiredEpochs)
     }
 
@@ -243,15 +257,15 @@ class PolicyTest {
         val file = writeControl(controlJson())
         var now = 7_000L
         val store = newStore(file) { now }
-        assertEquals(setOf("metrics"), store.current()?.permit(now, "action"))
+        assertEquals(setOf("metrics"), store.current().permit(now, "action"))
 
         now = 1_000L
-        assertEquals(setOf("metrics"), store.current()?.permit(now, "action"))
+        assertEquals(setOf("metrics"), store.current().permit(now, "action"))
 
         now = 9_000L
-        assertEquals(emptySet(), store.current()?.permit(now, "action"))
+        assertEquals(emptySet(), store.current().permit(now, "action"))
         now = 5_000L
-        assertEquals(emptySet(), store.current()?.permit(now, "action"))
+        assertEquals(emptySet(), store.current().permit(now, "action"))
     }
 
     @Test
@@ -259,14 +273,89 @@ class PolicyTest {
         val file = writeControl(controlJson())
         val now = 2_000L
         val store = newStore(file, pollIntervalMs = 50) { now }
-        assertEquals(12L, store.current()?.revision)
+        assertEquals(12L, store.current().revision)
 
         replaceControl(file, controlJson(revision = 13))
         val deadline = System.nanoTime() + 2_000_000_000L
-        while (store.current()?.revision != 13L && System.nanoTime() < deadline) {
+        while (store.current().revision != 13L && System.nanoTime() < deadline) {
             Thread.sleep(10)
         }
-        assertEquals(13L, store.current()?.revision)
+        assertEquals(13L, store.current().revision)
+    }
+
+    // ---------- fail open：无有效策略返回unbound占位策略（设计第8章） ----------
+
+    @Test
+    fun `missing control file falls open to the unbound placeholder policy`() {
+        val dir = Files.createTempDirectory("policy-failopen").also { path -> tempDirs.add(path) }
+        val store = PolicyStore(dir.resolve("control.json"), { 1_000L }, pollIntervalMs = 60_000L)
+        try {
+            val policy = store.current()
+            assertNotNull(policy)
+            assertEquals(EPOCH_UNBOUND, policy.epoch)
+            assertEquals(0L, policy.revision)
+            assertEquals(setOf("metrics", "logs"), policy.permit(1_000L, "plugin.started"))
+            assertEquals(setOf("metrics", "logs"), policy.permit(9_999_999_999L, "edt.delay"))
+        } finally {
+            store.close()
+        }
+    }
+
+    @Test
+    fun `malformed and unknown major files also fall open`() {
+        val dir = Files.createTempDirectory("policy-failopen2").also { path -> tempDirs.add(path) }
+        val control = dir.resolve("control.json")
+        listOf("", "{", "{\"schema_major\":99}", "not json at all").forEach { text ->
+            control.writeText(text)
+            val store = PolicyStore(control, { 1_000L }, pollIntervalMs = 60_000L)
+            try {
+                assertEquals(EPOCH_UNBOUND, store.current().epoch)
+                assertEquals(0L, store.current().revision)
+            } finally {
+                store.close()
+            }
+        }
+    }
+
+    @Test
+    fun `explicit disabled and expired policies still stop collection`() {
+        val dir = Files.createTempDirectory("policy-explicit").also { path -> tempDirs.add(path) }
+        val control = dir.resolve("control.json")
+        // 有效schema、enabled=false：显式撤销，不得fall open
+        control.writeText(controlJson(enabled = false, expires = 5_000L))
+        val revoked = PolicyStore(control, { 1_000L }, pollIntervalMs = 60_000L)
+        try {
+            assertTrue(revoked.current().permit(1_000L, "plugin.started").isEmpty())
+        } finally {
+            revoked.close()
+        }
+        // 有效schema但公共expires已过：显式授权边界已过，停采
+        control.writeText(controlJson(enabled = true, expires = 500L))
+        val expired = PolicyStore(control, { 1_000L }, pollIntervalMs = 60_000L)
+        try {
+            assertTrue(expired.current().permit(1_000L, "plugin.started").isEmpty())
+        } finally {
+            expired.close()
+        }
+    }
+
+    @Test
+    fun `unbound placeholder epoch is never retired`() {
+        val dir = Files.createTempDirectory("policy-unbound-retire").also { path -> tempDirs.add(path) }
+        val control = dir.resolve("control.json")
+        control.writeText(controlJson(epoch = EPOCH_UNBOUND, enabled = true, expires = 9_999_999L))
+        val store = PolicyStore(control, { 1_000L }, pollIntervalMs = 60_000L)
+        try {
+            control.writeText(controlJson(epoch = "acct-real", enabled = true, expires = 9_999_999L))
+            store.refresh()
+            Files.delete(control)
+            store.refresh()
+            // 回到无策略：占位策略仍可用，unbound未被退役拖累
+            assertEquals(EPOCH_UNBOUND, store.current().epoch)
+            assertFalse(EPOCH_UNBOUND in store.retiredEpochs, "占位epoch永不退役")
+        } finally {
+            store.close()
+        }
     }
 
     // ---------- 夹具 ----------

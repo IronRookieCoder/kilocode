@@ -13,7 +13,7 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.longOrNull
 
-/** 设计第8章：只支持冻结的control-schema v1，未知major按无有效公共策略处理，不推定允许。 */
+/** 设计第8章：只支持冻结的control-schema v1，未知major按无有效策略处理（返回unbound占位，默认不限制）。 */
 private const val SUPPORTED_MAJOR = 1
 
 /** 设计第8章：插件后台最多每30秒读取一次控制文件。 */
@@ -90,6 +90,27 @@ private const val PURPOSE_METRICS = "metrics"
 private const val PURPOSE_LOGS = "logs"
 private const val STATE_READY = "ready"
 
+/** 无有效策略期间的占位epoch（设计8/8.1）：不绑定账户代际、永不退役。 */
+internal const val EPOCH_UNBOUND = "unbound"
+
+/**
+ * 无有效策略时的占位策略（设计第8章"默认不限制采集"）：epoch=[EPOCH_UNBOUND]、revision=0、
+ * 公共与两用途均放行全部登记name、截止为[Long.MAX_VALUE]（[Policy.permit]按名即时放行）。
+ *
+ * 全进程共享同一不可变实例，不在每次[current]调用时重建；它不表达任何账户授权，只表达
+ * "尚无有效控制文件"这一事实——事实落盘后由consumer按epoch/revision归因丢弃或保留。
+ */
+private val UNBOUND_POLICY: Policy = Policy(
+    major = SUPPORTED_MAJOR,
+    revision = 0L,
+    enabled = true,
+    epoch = EPOCH_UNBOUND,
+    state = STATE_READY,
+    expires = Long.MAX_VALUE,
+    metrics = Permit(true, Long.MAX_VALUE, REGISTERED_NAMES),
+    logs = Permit(true, Long.MAX_VALUE, REGISTERED_NAMES),
+)
+
 /**
  * 控制文件读取与原子快照（设计第8章）。
  *
@@ -97,13 +118,16 @@ private const val STATE_READY = "ready"
  * 读取一次并原子替换不可变快照；JSON解析与权限验证不发生在record热路径，record只需
  * [current]快照加[Policy.permit]即时判期，到期不等待下一次轮询，也不依赖文件mtime。
  *
- * fail closed：文件缺失、不可读、畸形、未知major或字段越界时[current]立即返回null
- * （构造时同步读取一次，不等下一次轮询）；用途块缺失或畸形只关闭该用途（设计第8章），
+ * fail open（设计第8章）：文件缺失、不可读、畸形、未知major或字段越界时[current]返回
+ * [UNBOUND_POLICY]占位策略（双用途全放行、revision=0、epoch=`unbound`，默认不限制采集；
+ * 构造时同步读取一次，不等下一次轮询）。限制只能来自当前有效的显式策略：显式`enabled=false`
+ * 或公共`expires_at`过期即停采，不fall open；用途块缺失或畸形只关闭该用途（设计第8章），
  * 公共字段与log_detail_rate_limit缺失、类型错误、越界则整份文件无效。
  *
  * 账户代际（设计8.1）：观察到epoch更替即把旧epoch永久退役（同账户重登也分配新epoch），
- * 已退役epoch回写只会继续fail closed，直到发布全新epoch；[retiredEpochs]供producer
- * 清空旧epoch的排队事实，sealed混合epoch文件由consumer逐行结算。
+ * 已退役epoch回写只会继续得到占位策略，直到发布全新epoch；占位epoch不绑定任何代际、
+ * 永不退役；[retiredEpochs]供producer清空旧epoch的排队事实，sealed混合epoch文件由
+ * consumer逐行结算。
  *
  * 时钟防护：[current]与[refresh]维护单调上调的时钟下沿（租期上界），已观测到到期的
  * 许可在时钟回跳后不会复活；回跳之外的判期仍以调用方传入的[now]为准。
@@ -132,13 +156,15 @@ class PolicyStore(
     val retiredEpochs: Set<String> get() = synchronized(lock) { retired.toSet() }
 
     /**
-     * 最新策略快照；无有效策略时为null（公共策略缺失、过期或未知major，关闭两种上传用途）。
+     * 最新策略快照，**永非null**：无有效策略（公共策略缺失、不可读、畸形、未知major或
+     * 已观测过期）时返回[UNBOUND_POLICY]占位策略（设计第8章默认不限制采集）。
      * 每条记录与每次入盘前都必须重新调用：本方法即时推进时钟下沿并对已到期用途做禁用快照，
      * 到期判定不等下一次轮询。
      */
-    fun current(): Policy? {
+    fun current(): Policy {
         raiseFloor()
-        return visible(snapshot ?: return null, floorMs.get())
+        val policy = snapshot ?: return UNBOUND_POLICY
+        return visible(policy, floorMs.get())
     }
 
     /** 立即重读控制文件并原子替换快照；后台轮询之外的显式刷新入口。 */
@@ -167,7 +193,7 @@ class PolicyStore(
         }
     }
 
-    /** 读文件、解析并按代际规则收养；必须在[lock]内调用，任何失败都fail closed为null。 */
+    /** 读文件、解析并按代际规则收养；必须在[lock]内调用，任何失败都返回null（由[current]兜底为占位策略）。 */
     private fun adoptParsed(): Policy? {
         val parsed = readControlText()
             ?.let { text -> parsePolicy(text) }
@@ -185,10 +211,11 @@ class PolicyStore(
         null
     }
 
-    /** 观察到epoch更替即永久退役旧epoch（设计8.1），producer据此清空旧epoch内存。 */
+    /** 观察到epoch更替即永久退役旧epoch（设计8.1），producer据此清空旧epoch内存。
+     * 占位epoch[EPOCH_UNBOUND]不绑定任何账户代际，永不退役。 */
     private fun retirePrevious(parsed: Policy) {
         val previous = currentEpoch
-        if (previous != null && parsed.epoch != previous) retired.add(previous)
+        if (previous != null && parsed.epoch != previous && previous != EPOCH_UNBOUND) retired.add(previous)
     }
 
     /** 时钟下沿只升不降：作为租期上界，保证时钟回跳不复活已观测到期的许可。 */

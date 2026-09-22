@@ -291,8 +291,14 @@ class ProducerTest {
 
     @Test
     fun `collection stays off without permit and activates on the first permit`() {
-        Harness().use { harness ->
-            harness.writeControl(disabledControl())
+        // 显式撤销必须先于服务构造落盘（设计§8 fail open：无有效策略时默认不限制采集，
+        // 预热若先读到"文件尚不存在"，会先按占位策略建run，随后轮询才读到撤销）。
+        // 本用例覆盖的是"自首个观察点起就是显式撤销"，因此控制文件必须先写。
+        val base = Files.createTempDirectory("stability-service")
+        val controlDir = base.resolve("home").resolve(".costrict").resolve("telemetry").resolve("control")
+        Files.createDirectories(controlDir)
+        Files.writeString(controlDir.resolve("jetbrains.json"), disabledControl())
+        Harness(base = base).use { harness ->
             harness.service.start("monolith")
             harness.awaitReason("no_policy")
             assertEquals(0, harness.producerDirCount(), "no producer root without a valid permit")
@@ -372,11 +378,13 @@ class ProducerTest {
             val capturedOperations = harness.service.operations
             val capturedRecorder = harness.service.recorder
             val capturedFaults = harness.service.faults
-            // 任何策略之前：fail closed不变。
+            // 任何策略之前：fail open（设计§8）——unbound占位策略默认不限制采集，早捕获的
+            // standby自身队列接收该事实（standby无writer，事实留在队列不落盘）；显式撤销
+            // 才会DISABLED。激活后新事实经forwardTo直投活跃run，不再进入standby队列。
             assertEquals(
-                Admission.DISABLED,
+                Admission.QUEUED,
                 capturedRecorder.record(Draft("plugin.started", "lifecycle", "critical", JsonObject(emptyMap()))),
-                "records before any policy stay disabled",
+                "unbound placeholder admits collection before any policy",
             )
             harness.writeControl(validControl())
             harness.service.start("monolith")
@@ -389,7 +397,11 @@ class ProducerTest {
                 "early-captured reference queues into the active run after activation",
             )
             capturedFaults.report(IllegalStateException("captured standby"), "frontend", handled = true, fault = "f-cap")
-            assertEquals(0, capturedRecorder.depth().items, "standby queue stays empty while forwarding")
+            assertEquals(
+                1,
+                capturedRecorder.depth().items,
+                "standby queue holds only the pre-activation fact; post-activation facts are forwarded",
+            )
             harness.service.stop("unload")
             harness.awaitReason("stopped_unload")
             val facts = harness.facts()
