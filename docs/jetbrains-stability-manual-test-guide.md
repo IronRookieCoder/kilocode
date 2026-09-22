@@ -3,7 +3,7 @@
 - 依据：[稳定性设计与采集协议](./jetbrains-stability-design.md)（下称"设计文档"，章节号 §x 均指该文）。
 - 范围：**插件端全流程**——从控制文件许可、IDE 启动登记、结构化事实采集，到 outbox 追加式 NDJSON 落盘与优雅关闭。cs-cloud 消费端（文件消费、指标/日志转换和发送）尚未交付，不在本指南范围内；测试验证到“事实已写入 outbox、可供消费”为止。
 - 方式：真实 IDE、真实用户环境（不隔离 home），测试者**手工扮演 cs-cloud 发布控制文件**，操作 IDE 触发业务，检查磁盘产物。
-- 全类型口径：**30 个登记事件名、7 种 kind、critical/diagnostic 两个通道、metrics-only / logs-only / dual 三类用途投影**全部落盘核对（场景 E）。
+- 全类型口径：**31 个登记事件名、7 种 kind、critical/diagnostic 两个通道、metrics-only / logs-only / dual 三类用途投影**全部落盘核对（场景 E）。
 
 ## 0. 十分钟快速通道
 
@@ -186,7 +186,7 @@ $(( $(date +%s%3N) + 7200000 ))
 - MCP 绑定 HTTP 502 必须观察到 `mcp_register` 的 start 与 failure；绑定本身在边界内结束。
 - 双用途事实仅有一个输入 `event_id` 和一条落盘记录；用途分流属于消费端，不能用两条插件记录替代。
 
-RPC 终态复测：测试 RPC 时须保持 metrics 许可至少超过其 deadline；同一 `operation_id` 应有且仅有一条 `start` 与一条 `end(result=timeout)`。撤权或策略停止期间缺少终态由最近一条 `telemetry.health` 的 `disabled_policy` 增量表达，不能仅凭缺少 `end` 判定 RPC 生命周期故障。
+RPC 终态复测：测试 RPC 时须保持 metrics 许可至少超过其 deadline；同一 `operation_id` 应有且仅有一条 `start` 与一条 `end(result=timeout)`。若仅撤销一个用途且另一用途仍获准、run 未被整体停用，缺少终态可由最近一条 `telemetry.health` 的 `disabled_policy` 增量表达；公共关闭、双用途到期等全停采会结束 run 并清理文件，不要求随后仍有该 health 增量，不能仅凭缺少 `end` 判定 RPC 生命周期故障。
 
 ## 6. 场景 C：策略生命周期（运行中改控制文件）
 
@@ -200,8 +200,8 @@ RPC 终态复测：测试 RPC 时须保持 metrics 许可至少超过其 deadlin
 | C4 | 改回 `enabled=true`（revision+1） | 新 `run_id`：新 run 记 1 条 `plugin.started`；新旧 run 的 `producer_id`/`device_id`/追加文件不变（同一 producer）；新 run 的 seq 从 1 重新起算 |
 | C5 | 改 `logs_enabled=false` | 指标用途继续：`rpc`/`edt.delay` 等 metrics-only 事实照常；dual 用途事实落盘 `purposes=["metrics"]`；diagnostic 通道无新文件；error 计数（critical/metrics）照常 |
 | C6 | 恢复 logs、改 `metrics_enabled=false` | 对称：diagnostic 通道恢复；metrics-only 事实消失；dual 事实 `purposes=["logs"]` |
-| C7 | 把三个 `expires_at` 改为过去时间 | ≤ 45 秒内停采（到期判定不依赖轮询，实际更快）；表现同 C3 |
-| C8 | 换 `account_epoch=acct-manual-02`（revision+1） | 同一 run 存续，之后新事实 `account_epoch` 变为新值；换出后旧 epoch 事实不再增加。再把 `account_epoch` 改回 `acct-manual-01`：旧 epoch 已永久退役 → fail closed 停采（同 C3 表现），无 revival |
+| C7 | 把三个 `expires_at` 改为过去时间 | ≤ 45 秒内停采（到期判定不依赖轮询，实际更快）；表现同 C3。继续 C8 前，先重新发布一份三个期限均在未来的有效 §3.1 控制文件 |
+| C8 | 恢复未来有效期限后换 `account_epoch=acct-manual-02`（revision+1） | 同一 run 存续，之后新事实 `account_epoch` 变为新值；换出后旧 epoch 事实不再增加。再把 `account_epoch` 改回已退役的 `acct-manual-01`：策略被拒绝，后续按无有效策略使用 `account_epoch=unbound`、`policy_revision=0` 默认采集；旧 epoch 不复活 |
 | C9 | 依次写入：`schema_major=2` / 加一个多余键 `"foo":1` / 写成 `{坏json` | 每种都回到无有效策略：`unbound` 占位并默认采集；恢复合法文件后按新 revision 执行显式策略 |
 
 ## 7. 场景 D：崩溃、追加文件与残留
@@ -209,13 +209,13 @@ RPC 终态复测：测试 RPC 时须保持 metrics 许可至少超过其 deadlin
 | # | 操作 | 预期 |
 |---|---|---|
 | D1 | IDE 运行中强杀：从任务管理器取得 PID 后 `taskkill /PID <pid> /F` | 可能留下无 LF 的残缺尾行；无 `plugin.shutdown`，不把强杀误记为插件主动退出 |
-| D2 | 重新启动 IDE | 新 `producer_id` 和新追加文件；旧文件不由新 writer 接管，`device_id` 保持安装身份；读取端应跳过残缺尾行并计入 health |
+| D2 | 重新启动 IDE | 新 `producer_id` 和新追加文件；旧文件不由新 writer 接管，`device_id` 保持安装身份；插件启动时 `UncleanDetector` 扫描同 scope 的旧文件，若前任 run 有 `plugin.started` 但无同 run `plugin.shutdown`，新文件应追加一条 `plugin.unclean`，核对 `previous_run_id` 和受控 `evidence=no_shutdown_after_started`；读取端仍应跳过残缺尾行并计入 health |
 | D3 | （可选）把旧 `.jsonl` 修改时间回拨到 25 小时前，保持 IDE 运行或重启 IDE | 同 scope 后续实例按保留期清理陈旧文件；不误删活跃 producer 文件 |
 | D4 | 容量（一般跳过） | 每 producer 事实文件上限 10MiB；超限淘汰计入 `health.drop`，不阻塞 IDE 操作 |
 
 ## 8. 场景 E：全字典覆盖（所有类型的指标与日志）
 
-目标：**30 个登记事件名、7 种 kind、两通道、三类用途投影全部在盘上出现**。自然业务流只能稳定产生约 20 个名字（迁移、协议错误、异常族、释放风险等需要特定故障），其余经插件自检动作补齐。自检走与业务观测完全相同的采集管线（准入→队列→writer→追加 outbox），不是旁路写入。
+目标：**31 个登记事件名、7 种 kind、两通道、三类用途投影全部在盘上出现**。自然业务流只能稳定产生约 20 个名字（迁移、协议错误、异常族、释放风险等需要特定故障），其余经插件自检动作补齐。自检走与业务观测完全相同的采集管线（准入→队列→writer→追加 outbox），不是旁路写入。
 
 ### 8.1 准备
 
@@ -246,22 +246,23 @@ RPC 终态复测：测试 RPC 时须保持 metrics 许可至少超过其 deadlin
 自检事实统一带 `context.workspace_id="ws-selftest"`；error 族用显式 `fault_id`（`fault-selftest-reported`/`fault-selftest-uncaught`）辨识，可与自然事实区分。
 
 1. 触发后等 ≤ 40 秒（入队 + flush），按 §9 汇总 name 分布；
-2. 对照 §8.4 清单：27 个自检名字全部出现；`plugin.started`/`plugin.shutdown` 由会话自然产出，`telemetry.health` 由后台 30 秒节奏自然产出——合计 30/30；
-3. 7 种 kind 齐备；critical/diagnostic 两通道事实都出现在同一追加文件中；
-4. 三类用途投影齐备：metrics-only（如 `rpc`）、logs-only（error 详情形态）、dual（如 `connection`）；
-5. error 族两形态分道：`error.reported`/`error.uncaught` 的**计数形态**在 critical 通道、`purposes=["metrics"]`；**详情形态**（`message`/`frames`/`count`）在 diagnostic 通道、`purposes=["logs"]`；两者经同一 `fault_id` 关联；
-6. 正常关闭后：追加文件最后有 1 条 `plugin.shutdown(app_close)`；
-7. 全量跑一遍 §9 线格式校验。
+2. 对照 §8.4 清单：28 个自检名字全部出现；`plugin.started`/`plugin.shutdown`/`telemetry.health` 由服务和后台自然产出——合计 31/31；
+3. 明确核对 `edt.stall`：由真实 `StallMerger` 合并首尾相接样本产出，`duration_ms` 达到至少 2 秒，不能用手写 Draft 代替；
+4. 7 种 kind 齐备；critical/diagnostic 两通道事实都出现在同一追加文件中；
+5. 三类用途投影齐备：metrics-only（如 `rpc`）、logs-only（error 详情形态）、dual（如 `connection`）；
+6. error 族两形态分道：`error.reported`/`error.uncaught` 的**计数形态**在 critical 通道、`purposes=["metrics"]`；**详情形态**（`message`/`frames`/`count`）在 diagnostic 通道、`purposes=["logs"]`；两者经同一 `fault_id` 关联；
+7. 正常关闭后：追加文件最后有 1 条 `plugin.shutdown(app_close)`；
+8. 全量跑一遍 §9 线格式校验。
 
-说明：`plugin.unclean` 无自然发射点（设计 §7.3 归消费端判定），自检落盘的是**登记形状验证事实**（`previous_run_id=run-prev-selftest`），不是崩溃结论；`ide.operation` 的 `apply_edit` 当前无业务入口，自检用 `vfs_refresh` 代表。
+说明：`plugin.unclean` 由插件下一实例启动时的 `UncleanDetector` 扫描前任文件生成；自检另外落盘一条**登记形状验证事实**（`previous_run_id=run-prev-selftest`），不是崩溃结论。真实启动检测须核对 `previous_run_id` 与固定 evidence token；`ide.operation` 的 `apply_edit` 当前无业务入口，自检用 `vfs_refresh` 代表。
 
-### 8.4 覆盖核对表（30 name × 形态 × 来源）
+### 8.4 覆盖核对表（31 name × 形态 × 来源）
 
 | name | kind | 通道 | 用途 | 人工来源 |
 |---|---|---|---|---|
 | plugin.started | lifecycle | critical | dual | 自然 |
 | plugin.shutdown | lifecycle | critical | dual | 自然 |
-| plugin.unclean | lifecycle | critical | dual | 自检 |
+| plugin.unclean | lifecycle | critical | dual | 自然（下一实例启动检测）+自检（形状） |
 | toolwindow.setup | operation | critical | dual | 自然（开工具窗）+自检 |
 | backend.load | operation | critical | dual | 自然+自检 |
 | plugin.readiness | operation | critical | dual | 自然+自检 |
@@ -285,6 +286,7 @@ RPC 终态复测：测试 RPC 时须保持 metrics 许可至少超过其 deadlin
 | session.dispose_risk | transition | critical | **metrics** | 自检 |
 | rpc | operation | critical | **metrics** | 自然 |
 | edt.delay | sample | critical | **metrics** | 自然 |
+| edt.stall | sample | critical | **metrics** | 自检（真实 StallMerger）+自然 |
 | edt.violation | diagnostic | critical | dual | 自检 |
 | render.apply | sample | critical | **metrics** | 自然（发消息）+自检 |
 | ide.operation | operation | critical | dual | 自然（diff 等）+自检 |
@@ -366,7 +368,7 @@ head -c 3 *.jsonl | xxd                                          # 无 ef bb bf
 | B 业务事实 | 每行操作的预期事实落盘且专项字段合规；无路径/凭据泄露 |
 | C 策略 | C1~C9 全部符合；各阶段事实 `policy_revision` 与当时控制文件一致 |
 | D 崩溃残留 | D1/D2 符合（D3 可选、D4 跳过） |
-| E 全字典 | 30/30 name、7 kind、两通道、三投影齐备；error 双形态同 fault_id；线格式校验全绿 |
+| E 全字典 | 31/31 name、28 个自检名字、7 kind、两通道、三投影齐备；包含 `edt.stall`，error 双形态同 fault_id；线格式校验全绿 |
 
 ### 10.2 记录模板
 
@@ -375,7 +377,7 @@ head -c 3 *.jsonl | xxd                                          # 无 ef bb bf
 ### 10.3 已知边界（判定时不要误报缺陷）
 
 - 强杀 IDE 不承诺零丢失；无 LF 的尾行由消费端跳过并计入 health（§7.1、§7.3）。
-- 没有 `plugin.shutdown` ≠ 崩溃；`plugin.unclean` 的判定归消费端（§7.3）。
+- 没有 `plugin.shutdown` ≠ 一定是插件崩溃；下一插件实例的 `UncleanDetector` 负责生成 `plugin.unclean`，其 `evidence` 仅说明缺少受控 shutdown 证据（§7.3）。
 - 撤销许可不写 `plugin.shutdown` 是设计行为（§8）。
 - 策略切换窗口内 seq 允许缺口；稳态丢号才是问题。
 - diagnostic 事实与 critical 事实写入同一追加文件，按 writer flush 节奏可见。

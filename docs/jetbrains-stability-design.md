@@ -560,7 +560,7 @@ attributes优先保留event_name、input_event_id、producer_id、run_id、mode�
 
 插件侧已实现本版追加式NDJSON交接、控制 schema、事实 schema、health 增量、`edt.stall`以及相应的稳定性观测修复；本轮文档同步这些已审查实现。cs-cloud侧消费、指标/日志转换和发送尚未实现，设计中的 Draft/提案只表示后续对接方向，不能写成已上线能力。下列为后续交付分期。
 
-本次已审查的插件侧实现包括：稳定性 RPC 操作以唯一 deadline 结算 `timeout`，撤权造成的终态缺口由 `telemetry.health` 增量表达；`session.status` 与 file-search 解码错误统一产出、跨层去重的 `protocol.error`；provider 预热提示和后续 run hint 均保留实际 `connection_provider`；READY 但 profile 为空以及凭据未就绪均表达为 `blocked`；真实 MCP bind 记录 `start` 及 `success`/`failure`/`blocked` 终态，bind 请求本身有界。
+本次已审查的插件侧实现包括：稳定性 RPC 操作以唯一 deadline 结算 `timeout`；仅撤销一个用途且另一用途仍获准时，终态缺口可由 `telemetry.health` 增量表达，而公共关闭或双用途到期会结束 run、清理文件，不要求随后仍有该增量；`session.status` 与 file-search 解码错误统一产出、跨层去重的 `protocol.error`；provider 预热提示和后续 run hint 均保留实际 `connection_provider`；READY 但 profile 为空以及凭据未就绪均表达为 `blocked`；真实 MCP bind 记录 `start` 及 `success`/`failure`/`blocked` 终态，bind 请求本身有界。
 
 | 阶段 | 共用设施 | 指标交付与验收 | 日志交付与验收 |
 |---|---|---|---|
