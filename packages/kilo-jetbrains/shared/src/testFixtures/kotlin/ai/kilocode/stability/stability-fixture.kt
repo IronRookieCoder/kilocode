@@ -17,25 +17,27 @@ import kotlinx.serialization.json.put
 
 /**
  * A4共享测试夹具（collector plan接口表）：真实临时目录、真实Recorder/PolicyStore/Writer，
- * 不替换I/O。可控时钟是明确的产品依赖（Clock），封存延迟阈值经它驱动；Storage故障钩子
- * 注入的是真实故障（关闭通道、占位目录），绝不伪造成功。
+ * 不替换I/O。可控时钟是明确的产品依赖（Clock），flush延迟阈值经它驱动；Storage故障钩子
+ * 注入的是真实故障（关闭通道），绝不伪造成功。
  *
- * flush()走writer的正常barrier：提交"排空+封存非空段"任务并等待完成，不暴露私有队列。
- * facts()只读取.ready文件；close()先结束writer再清理本次夹具目录。
+ * flush()走writer的正常barrier：提交"排空+flush"任务并等待完成，不暴露私有队列。
+ * facts()只读取追加事实文件的全部整行；close()先结束writer再清理本次夹具目录。
  */
 class Fixture(
     val tickMs: Long = 50L,
-    val maxSegmentBytes: Long = 1024L * 1024,
-    val batchSealBytes: Long = 64L * 1024,
+    val maxFileBytes: Long = DEFAULT_MAX_FILE_BYTES, // 10MiB，测试可注入小值
+    val batchFlushBytes: Long = 64L * 1024,
+    val maxFlushAgeMs: Long = 30_000L,
     base: Path? = null,
     private val cleanOnClose: Boolean = true,
     autoStart: Boolean = true,
 ) : AutoCloseable {
 
     val base: Path = base ?: Files.createTempDirectory("stability-writer")
-    val root: Path = this.base.resolve("outbox")
+    val outboxDir: Path = this.base.resolve("outbox")
+    val fileName: String = "sc-fx-${DEFAULT_IDENTITY.producerId}.jsonl"
     val clock: Clock = FixtureClock()
-    val storage: Storage = Storage(root)
+    val storage: Storage = Storage(outboxDir)
 
     /** 控制文件必须先于PolicyStore落盘：其构造时同步读取，缺失即永久fail closed。 */
     private val controlFile: Path = this.base.resolve("control.json").apply { writeText(defaultControl()) }
@@ -47,15 +49,17 @@ class Fixture(
     /** M24（C5）：资源计数器与recorder同源注入真实所有者（controller/订阅/editor token）。 */
     val resources: Resources = Resources()
     val writer: Writer = Writer(
-        root = root,
+        root = outboxDir,
+        fileName = fileName,
         identity = DEFAULT_IDENTITY,
         recorder = recorder,
         policies = policies,
         clock = clock,
         storage = storage,
         tickMs = tickMs,
-        maxSegmentBytes = maxSegmentBytes,
-        batchSealBytes = batchSealBytes,
+        maxFileBytes = maxFileBytes,
+        batchFlushBytes = batchFlushBytes,
+        maxFlushAgeMs = maxFlushAgeMs,
     )
 
     private val closed = AtomicBoolean(false)
@@ -64,21 +68,24 @@ class Fixture(
         if (autoStart) writer.start()
     }
 
-    /** writer的正常停用/flush barrier：排空队列并封存全部非空段，返回即已落盘完成。 */
+    /** writer的正常停用/flush barrier：排空队列并flush未同步批次，返回即已落盘完成。 */
     fun flush() {
         writer.flush()
     }
 
-    /** 只读取.ready（已封存不可变）文件，按通道与段名排序后逐行还原事实。 */
-    fun facts(): List<Fact> = listReady(root).flatMap { file ->
-        Files.readAllBytes(file).toString(Charsets.UTF_8)
-            .lineSequence()
-            .filter { it.isNotBlank() }
-            .map { line -> factJson.decodeFromString(Fact.serializer(), line) }
-            .toList()
-    }
+    /** 读取追加文件全部整行（按行序）还原事实；文件不存在返回空列表。 */
+    fun facts(): List<Fact> =
+        outboxDir.resolve(fileName).takeIf { Files.isRegularFile(it) }
+            ?.let { file ->
+                Files.readAllBytes(file).toString(Charsets.UTF_8)
+                    .lineSequence()
+                    .filter { it.isNotBlank() }
+                    .map { line -> factJson.decodeFromString(Fact.serializer(), line) }
+                    .toList()
+            }
+            ?: emptyList()
 
-    /** 可控时钟推进（单调与wall同步推进，策略判期与封存延迟共用同一时间线）。 */
+    /** 可控时钟推进（单调与wall同步推进，策略判期与flush延迟共用同一时间线）。 */
     fun advanceClock(ms: Long) {
         (clock as FixtureClock).advance(ms)
     }
@@ -96,14 +103,6 @@ class Fixture(
         storage.beforeForce = { channel ->
             storage.beforeForce = null
             channel.close()
-        }
-    }
-
-    /** 真实故障注入：在.ready目标位置放目录，原子改名真实失败（非不支持原子改名的降级分支）。 */
-    fun failNextRename() {
-        storage.beforeMove = { _, ready ->
-            storage.beforeMove = null
-            Files.createDirectory(ready)
         }
     }
 
@@ -146,6 +145,9 @@ class Fixture(
     companion object {
         private val factJson = Json { encodeDefaults = true }
         private const val WALL_BASE = 1_790_000_000_000L
+
+        /** 事实文件预算（设计7.4）：每producer事实文件上限10MiB，测试注入小值驱动重写。 */
+        private const val DEFAULT_MAX_FILE_BYTES = 10L * 1024 * 1024
 
         private val DEFAULT_IDENTITY = ProducerIdentity(
             producerId = "pr-a4",
@@ -198,21 +200,16 @@ class Fixture(
     }
 }
 
-/** 只读.ready：按通道目录再按文件名排序，供断言顺序稳定。 */
-internal fun listReady(root: Path): List<Path> = listBySuffix(root, ".ready")
-
-/** 只读.open：故障用例据此断言.open保留未改名。 */
-internal fun listOpen(root: Path): List<Path> = listBySuffix(root, ".open")
-
-private fun listBySuffix(root: Path, suffix: String): List<Path> =
-    listOf("critical", "diagnostic").flatMap { channel ->
-        val dir = root.resolve(channel)
-        if (!Files.isDirectory(dir)) {
-            emptyList()
-        } else {
-            Files.list(dir).use { files ->
-                files.filter { path -> path.toString().endsWith(suffix) && Files.isRegularFile(path) }
-                    .sorted().toList()
-            }
+/** 列出目录下平铺的*.jsonl事实文件（追加协议无.ready/.open后缀；按文件名排序断言稳定）。 */
+internal fun listReady(root: Path): List<Path> =
+    if (!Files.isDirectory(root)) {
+        emptyList()
+    } else {
+        Files.list(root).use { files ->
+            files.filter { path ->
+                    path.fileName.toString().endsWith(".jsonl") && Files.isRegularFile(path)
+                }
+                .sorted()
+                .toList()
         }
     }

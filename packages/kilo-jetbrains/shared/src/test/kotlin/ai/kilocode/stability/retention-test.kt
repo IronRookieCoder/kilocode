@@ -30,18 +30,6 @@ private const val MIB = 1024L * 1024
 class RetentionTest {
 
     @Test
-    fun `cleanup never removes claimed files`() {
-        Fixture().use { fixture ->
-            val dir = fixture.root.resolve("diagnostic")
-            Files.createDirectories(dir)
-            val claimed = Files.writeString(dir.resolve("old.claimed"), "claimed\n")
-            Files.setLastModifiedTime(claimed, FileTime.fromMillis(0))
-            Retention(fixture.root, fixture.clock).sweep()
-            assertTrue(Files.exists(claimed))
-        }
-    }
-
-    @Test
     fun `locked old producer keeps all data until its writer lock is released`() {
         // 锁保持测试用真实FileChannel锁（同JVM语义等价：tryLock失败即跳过）。
         // 跨JVM（真实第二进程/Go consumer、进程死亡释放、休眠保留）归G1平台矩阵验证。

@@ -3,10 +3,8 @@ package ai.kilocode.stability
 import java.io.IOException
 import java.nio.ByteBuffer
 import java.nio.channels.FileChannel
-import java.nio.channels.OverlappingFileLockException
-import java.nio.file.AtomicMoveNotSupportedException
+import java.nio.file.Files
 import java.nio.file.Path
-import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.RejectedExecutionException
@@ -15,23 +13,19 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import kotlinx.serialization.json.Json
 
-private const val CHANNEL_CRITICAL = "critical"
-private const val SUFFIX_OPEN = ".open"
-private const val SUFFIX_READY = ".ready"
-
-/** 段文件名 = <run-id>-<segment-id>；segment id按通道单调，重启后新run_id天然不撞旧文件。 */
 private const val DEFAULT_TICK_MS = 1_000L
-private const val DEFAULT_MAX_SEGMENT_BYTES = 1024L * 1024
-private const val DEFAULT_BATCH_SEAL_BYTES = 64L * 1024
-private const val SEGMENT_MAX_RECORDS = 16
 
-/** 通道最长封存延迟（设计7.1）：自首条写入起critical 30秒、diagnostic 300秒，以先到为准。 */
-private const val CRITICAL_MAX_AGE_MS = 30_000L
-private const val DIAGNOSTIC_MAX_AGE_MS = 300_000L
+/** 事实文件预算（设计7.4）：每producer事实文件上限10MiB，写者后台重写淘汰最旧行。 */
+private const val DEFAULT_MAX_FILE_BYTES = 10L * 1024 * 1024
 
-/** writer单批取出上限（批内序列化完成才release预算）；队列总量约束仍由queue把守。 */
-private const val CLAIM_MAX_ITEMS = 128
-private const val CLAIM_MAX_BYTES = 512 * 1024
+/** 批flush字节阈值（设计7.1）：累计64KiB即flush。 */
+private const val DEFAULT_BATCH_FLUSH_BYTES = 64L * 1024
+
+/** 批flush条数阈值（设计7.1）：累计16条即flush，先于age deadline触发。 */
+private const val BATCH_FLUSH_RECORDS = 16
+
+/** 批flush最大延迟（设计7.1）：首条未fsync写入起30秒内flush+fsync一次。 */
+private const val MAX_FLUSH_AGE_MS = 30_000L
 
 /** 记录本体真实UTF-8编码上限（不含LF；设计6.1：writer落盘前再核对）。 */
 private const val MAX_RECORD_BYTES = 32 * 1024
@@ -43,47 +37,44 @@ private const val CLOSE_TIMEOUT_SECONDS = 10L
 /** writer生命周期状态：CREATED→ACTIVE；前提不可验证→DISABLED（禁采+本地报告）；close→CLOSED。 */
 enum class WriterState { CREATED, ACTIVE, DISABLED, CLOSED }
 
-/** writer侧健康累计（设计7.1"记健康错误"）：write_error、入盘前判期丢弃、超32KiB丢弃。 */
-data class WriterStats(val writeErrors: Long, val droppedPolicy: Long, val droppedOversize: Long)
-
-/** 打开中的段：bytes含LF；records只在完整LF写完后递增（半行不得计入，救援按完整行取）。 */
-private class Segment(
-    val channel: String,
-    val openPath: Path,
-    val readyPath: Path,
-    val file: FileChannel,
-) {
-    var records = 0
-    var bytes = 0L
-    var firstMonoMs = 0L
-}
+/** writer侧健康累计（设计7.1/7.4）：write_error、入盘前判期丢弃、超32KiB丢弃、容量重写淘汰行。 */
+data class WriterStats(
+    val writeErrors: Long,
+    val droppedPolicy: Long,
+    val droppedOversize: Long,
+    val droppedEvicted: Long,
+)
 
 /**
- * 专用后台单writer（设计7.1/7.2）：消费Recorder队列、按当前Policy入盘前重判期、
- * 序列化为UTF-8无BOM、LF结尾的NDJSON并按阈值原子封存。
+ * 专用后台单writer（设计6.1/7.1/7.4）：消费Recorder队列、按当前Policy入盘前重判期、
+ * 追加为UTF-8无BOM、LF结尾的单文件NDJSON（每producer事实文件`<scope-id>-<producer-id>.jsonl`）。
  *
  * 单writer纪律：全部文件操作只在自有IO线程执行；EDT永不触碰本类。后台定时器只唤醒
- * （tryLock去重），不直接多线程写；flush()提交同一IO线程并等待，封存全部非空段，
- * 仅限后台线程调用。writer.lock字节范围[0,1)持整个生命周期，锁文件不unlink/recreate。
+ * （tryLock去重），不直接多线程写；flush()提交同一IO线程并等待，排空并force未同步批次，
+ * 仅限后台线程调用。无登记、无锁文件、无.open/.ready状态机（设计5.2/§3.1）。
  *
- * 封存阈值（设计7.1，具体值按真实事件率校准）：单文件预算[maxSegmentBytes]（下一条将
- * 突破时先封存旧文件再开新段）、[batchSealBytes]累计或16条（写入后判）、首条起
- * critical 30秒/diagnostic 300秒（定时唤醒时判）；空段不参与定时封存（段文件按首条
- * 成功写入才创建，天然无空文件）。
+ * flush阈值（设计7.1/7.4）：累计16条或64KiB即flush；首条未fsync写入起最迟30秒flush+fsync
+ * 一次，只有非空批次参与定时flush；diagnostic随critical同批写出，不设更长延迟。
+ * 事实文件预算[maxFileBytes]：写前预检超限即后台重写——按完整行从尾部保留至预算内、
+ * 原子替换后重开追加，被淘汰行计入[WriterStats.droppedEvicted]；文件被删时下次追加
+ * 按原名重建，不视为错误。
  */
-// 参数列表 = 依赖（root/identity/recorder/policies/clock/storage）+ 校准旋钮（tick/两字节阈值）；
-// 与设计7.1"阈值用真实事件率校准"一致，不拆分参数对象。
+// 参数列表 = 依赖（root/fileName/identity/recorder/policies/clock/storage）+ 校准旋钮
+// （tick/16条/两字节阈值/30秒）；与设计7.1"阈值用真实事件率校准"一致，不拆分参数对象。
 @Suppress("TooManyFunctions", "LongParameterList")
 class Writer(
-    root: Path,
+    private val root: Path,
+    private val fileName: String,
     private val identity: ProducerIdentity,
     private val recorder: Recorder,
     private val policies: PolicyStore,
     private val clock: Clock,
     private val storage: Storage = Storage(root),
     private val tickMs: Long = DEFAULT_TICK_MS,
-    private val maxSegmentBytes: Long = DEFAULT_MAX_SEGMENT_BYTES,
-    private val batchSealBytes: Long = DEFAULT_BATCH_SEAL_BYTES,
+    private val maxFileBytes: Long = DEFAULT_MAX_FILE_BYTES,
+    private val batchFlushBytes: Long = DEFAULT_BATCH_FLUSH_BYTES,
+    private val maxFlushAgeMs: Long = MAX_FLUSH_AGE_MS,
+    private val batchFlushRecords: Int = BATCH_FLUSH_RECORDS,
 ) {
     /** 禁采回调：A6接入Faults做本地限频报告；本类只保证每次禁用恰好通知一次。 */
     @Volatile var onDisabled: ((String) -> Unit)? = null
@@ -97,8 +88,7 @@ class Writer(
     private val writeErrors = AtomicLong(0)
     private val droppedPolicy = AtomicLong(0)
     private val droppedOversize = AtomicLong(0)
-    private val segments = ConcurrentHashMap<String, Segment>()
-    private val segmentIds = ConcurrentHashMap<String, AtomicLong>()
+    private val droppedEvicted = AtomicLong(0)
     private val waking = AtomicBoolean(false)
     private val started = AtomicBoolean(false)
     private val stopping = AtomicBoolean(false)
@@ -112,16 +102,22 @@ class Writer(
         Thread(task, TICK_THREAD_NAME).apply { isDaemon = true }
     }
 
-    private var lockChannel: FileChannel? = null
+    private val file: Path = root.resolve(fileName)
 
-    /** 启动：校验目录与权限、创建exchange锁文件、取得writer锁后才进入ACTIVE；失败即禁采。 */
+    // 以下写会话状态只在writer自有IO线程访问（单写者纪律），无需同步。
+    private var channel: FileChannel? = null
+    private var fileBytes = 0L           // 本会话已写字节（重写/重开后对齐为当前文件大小）
+    private var pendingSinceMonoMs = -1L // 首条未fsync写入的时刻；-1=无积压
+    private var pendingRecords = 0
+    private var pendingBytes = 0L
+
+    /** 启动：校验目录与权限、打开追加句柄后才进入ACTIVE；失败即禁采。无锁、无exchange.lock。 */
     fun start() {
         if (!started.compareAndSet(false, true)) return
         io.execute {
             try {
                 storage.verifyLayout()
-                storage.ensureExchangeLock()
-                lockChannel = storage.acquireWriterLock()
+                reopen()
                 state = WriterState.ACTIVE
                 // F6（终审）：close的shutdownNow可能先于本启动任务到达——停机后不再排定时器；
                 // 检查与调度之间的残余竞态按RejectedExecutionException就地吞掉（ticker已停，
@@ -135,8 +131,6 @@ class Writer(
                 }
             } catch (unverified: StorageUnverifiedException) {
                 disable(unverified.reason)
-            } catch (_: OverlappingFileLockException) {
-                disable("writer.lock is already held inside this JVM")
             } catch (_: IOException) {
                 disable("writer storage unavailable (io error during startup)")
             } finally {
@@ -146,7 +140,7 @@ class Writer(
     }
 
     /**
-     * 封存全部非空段并排空队列的barrier；仅在writer自有IO线程之外的后台线程调用
+     * 排空队列并force未同步批次的barrier；仅在writer自有IO线程之外的后台线程调用
      * （设计7.1：EDT不写文件、不等待锁）。启动未完成或已停用时为no-op。
      */
     fun flush() {
@@ -154,28 +148,29 @@ class Writer(
         startup.await(STARTUP_TIMEOUT_SECONDS, TimeUnit.SECONDS)
         if (state != WriterState.ACTIVE) return
         try {
-            io.submit { if (state == WriterState.ACTIVE) cycle(sealAll = true) }.get()
+            io.submit { if (state == WriterState.ACTIVE) drainAndFlush() }.get()
         } catch (_: RejectedExecutionException) {
-            // 与close竞态：writer已停用即无事可封存。
+            // 与close竞态：writer已停用即无事可排空。
         }
     }
 
-    /** 有界收尾：停定时器→最后一次排空+封存→关IO线程→释放锁通道（锁文件保留在盘上）。 */
+    /** 有界收尾：停定时器→最后一次排空+force→关IO线程→关追加句柄。 */
     fun close() {
         if (!stopping.compareAndSet(false, true)) return
         ticker.shutdownNow()
         if (started.get()) startup.await(STARTUP_TIMEOUT_SECONDS, TimeUnit.SECONDS)
         runCatching {
-            io.submit { if (state == WriterState.ACTIVE) cycle(sealAll = true) }
+            io.submit { if (state == WriterState.ACTIVE) drainAndFlush() }
                 .get(CLOSE_TIMEOUT_SECONDS, TimeUnit.SECONDS)
         }
         io.shutdownNow()
-        runCatching { lockChannel?.close() }
+        runCatching { channel?.close() }
         state = WriterState.CLOSED
     }
 
     /** writer健康累计快照。 */
-    fun stats(): WriterStats = WriterStats(writeErrors.get(), droppedPolicy.get(), droppedOversize.get())
+    fun stats(): WriterStats =
+        WriterStats(writeErrors.get(), droppedPolicy.get(), droppedOversize.get(), droppedEvicted.get())
 
     /** 定时器只唤醒：tryLock去重避免积压任务排队，实际循环仍在唯一IO线程执行。 */
     private fun wake() {
@@ -183,7 +178,7 @@ class Writer(
         runCatching {
             io.execute {
                 try {
-                    if (state == WriterState.ACTIVE) cycle(sealAll = false)
+                    if (state == WriterState.ACTIVE) cycle()
                 } finally {
                     waking.set(false)
                 }
@@ -191,23 +186,32 @@ class Writer(
         }.onFailure { waking.set(false) }
     }
 
-    /** 唯一循环体：到期段封存→排空队列→（flush时）封存全部非空段。 */
-    private fun cycle(sealAll: Boolean) {
-        sealExpired()
+    /** 唯一定时循环体：文件被删即重建→排空队列→30秒积压到期flush。 */
+    private fun cycle() {
+        maybeReopenIfDeleted()
         drainQueue()
-        if (sealAll) sealAllNonEmpty()
+        maybeFlushByAge()
     }
 
-    /** 首条写入起超过通道最长延迟即封存；空段不参与（records==0）。 */
-    private fun sealExpired() {
-        val now = clock.mono()
-        segments.values.toList().forEach { segment ->
-            val maxAge = if (segment.channel == CHANNEL_CRITICAL) CRITICAL_MAX_AGE_MS else DIAGNOSTIC_MAX_AGE_MS
-            if (segment.records > 0 && now - segment.firstMonoMs > maxAge) sealSegment(segment)
-        }
+    /** flush/close屏障体：排空队列后force未同步批次（有积压才force，空批次不同步）。 */
+    private fun drainAndFlush() {
+        maybeReopenIfDeleted()
+        drainQueue()
+        if (pendingRecords > 0) doFlush()
     }
 
-    /** 取批→逐条编码落盘→批完成后release预算（恰好一次）；通道故障时放弃本批其余记录。 */
+    /** 测试驱动：同步执行一次定时循环（屏障返回即本轮已完整执行）；生产不可达。 */
+    internal fun wakeForTest() {
+        if (!started.get()) return
+        startup.await(STARTUP_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+        if (state != WriterState.ACTIVE) return
+        runCatching { io.submit { if (state == WriterState.ACTIVE) cycle() }.get() }
+    }
+
+    /** 测试观测（R3可证伪flush用例）：当前是否存在已写入但未fsync的记录。 */
+    internal fun pendingForTest(): Boolean = pendingRecords > 0
+
+    /** 取批→逐条编码落盘→批完成后release预算（恰好一次）；写故障时放弃本批其余记录。 */
     private fun drainQueue() {
         while (state == WriterState.ACTIVE) {
             val claim = recorder.tryClaim(CLAIM_MAX_ITEMS, CLAIM_MAX_BYTES) ?: return
@@ -220,7 +224,7 @@ class Writer(
         }
     }
 
-    /** 逐条写入；返回true表示当前通道故障，本批剩余记录不再尝试（逐条计入write_error）。 */
+    /** 逐条写入；返回true表示当前写会话故障，本批剩余记录不再尝试（逐条计入write_error）。 */
     private fun recordsAborted(records: List<QueuedRecord>): Boolean {
         var failed = false
         records.forEach { record ->
@@ -229,7 +233,7 @@ class Writer(
                 return@forEach
             }
             val line = encodeLine(record.fact) ?: return@forEach
-            if (!writeLine(record.channel, line)) failed = true
+            if (!writeLine(line)) failed = true
         }
         return failed
     }
@@ -264,92 +268,112 @@ class Writer(
         return bytes
     }
 
-    /** 单条落盘：1MiB预算预检（先封存旧段）→写循环→计数→16条/64KiB后检。失败保留.open。 */
-    private fun writeLine(channel: String, bytes: ByteArray): Boolean {
-        val segment = openSegmentFor(channel, bytes.size) ?: return false
+    /**
+     * 单条落盘：写入前预检文件预算（超限先重写淘汰最旧行）→一行（含LF）一次write→
+     * pending计数→16条/64KiB即flush。存储不可验证→禁用采集；磁盘故障→计数并丢弃本条
+     * （句柄就地作废，下一条写入时按原名重建）。
+     */
+    private fun writeLine(bytes: ByteArray): Boolean {
         return try {
-            storage.writeAll(segment.file, ByteBuffer.wrap(bytes))
-            segment.bytes += bytes.size
-            segment.records += 1
-            if (segment.records == 1) segment.firstMonoMs = clock.mono()
-            if (segment.records >= SEGMENT_MAX_RECORDS || segment.bytes >= batchSealBytes) sealSegment(segment)
+            if (fileBytes + bytes.size > maxFileBytes) rewrite(bytes.size)
+            if (channel == null) reopen()
+            val target = channel ?: return false // reopen已计数，本条放弃
+            storage.writeAll(target, ByteBuffer.wrap(bytes))
+            fileBytes += bytes.size
+            if (pendingSinceMonoMs < 0) pendingSinceMonoMs = clock.mono()
+            pendingRecords += 1
+            pendingBytes += bytes.size
+            if (pendingRecords >= batchFlushRecords || pendingBytes >= batchFlushBytes) doFlush()
             true
+        } catch (unverified: StorageUnverifiedException) {
+            disable(unverified.reason)
+            false
         } catch (_: IOException) {
-            failSegment(segment)
+            writeErrors.incrementAndGet()
+            runCatching { channel?.close() }
+            channel = null
             false
         }
     }
 
-    /** 打开（或复用）当前段；无法验证→禁用采集，磁盘故障→计数；两种失败都不写本条。 */
-    private fun openSegmentFor(channel: String, incomingBytes: Int): Segment? = try {
-        segmentFor(channel, incomingBytes)
-    } catch (unverified: StorageUnverifiedException) {
-        disable(unverified.reason)
-        null
-    } catch (_: IOException) {
-        writeErrors.incrementAndGet()
-        null
+    /** 打开（或重开）追加句柄并把[fileBytes]对齐为当前文件大小（重建后为0）。 */
+    private fun reopen() {
+        runCatching { channel?.close() }
+        val open = storage.openAppend(file)
+        channel = open
+        fileBytes = runCatching { open.size() }.getOrDefault(0L)
     }
 
-    /** 当前段容纳不下下一条时先封存旧段，再开新段；无段时创建。 */
-    private fun segmentFor(channel: String, incomingBytes: Int): Segment {
-        val current = segments[channel]
-        if (current != null) {
-            if (current.bytes + incomingBytes > maxSegmentBytes) sealSegment(current) else return current
+    /** 文件被外部删除（§7.4）时关旧句柄；下次写入按原名重建，不视为错误。仅IO线程调用。 */
+    private fun maybeReopenIfDeleted() {
+        if (Files.exists(file)) return
+        reopen()
+    }
+
+    /** 首条未fsync写入起[maxFlushAgeMs]内flush一次；只有非空批次参与（§7.1）。 */
+    private fun maybeFlushByAge() {
+        val since = pendingSinceMonoMs
+        if (since < 0) return
+        if (clock.mono() - since < maxFlushAgeMs) return
+        doFlush()
+    }
+
+    /** fsync当前批次：force(true)成功才清零pending；失败计write_error并保留积压待下轮重试。 */
+    private fun doFlush() {
+        val open = channel ?: return
+        try {
+            storage.force(open)
+            pendingRecords = 0
+            pendingBytes = 0L
+            pendingSinceMonoMs = -1L
+        } catch (_: IOException) {
+            writeErrors.incrementAndGet()
+            runCatching { open.close() }
+            channel = null
         }
-        return createSegment(channel)
-    }
-
-    private fun createSegment(channel: String): Segment {
-        val dir = storage.channelDirectory(channel)
-        val id = segmentIds.computeIfAbsent(channel) { AtomicLong() }.getAndIncrement()
-        val open = dir.resolve(identity.runId + "-" + id + SUFFIX_OPEN)
-        val file = storage.openSegment(open)
-        val segment = Segment(
-            channel,
-            open,
-            open.resolveSibling(open.fileName.toString().removeSuffix(SUFFIX_OPEN) + SUFFIX_READY),
-            file,
-        )
-        segments[channel] = segment
-        return segment
     }
 
     /**
-     * brief Step 3顺序（不可交换）：force(true)→close→同目录原子改名.open→.ready。
-     * 任一步失败都保留.open并记write_error；AtomicMoveNotSupportedException不降级为
-     * 普通rename假装封存成功。
+     * 容量重写（§7.4）：按完整行从尾部保留至[maxFileBytes]预算内（预留[reserveBytes]给
+     * 紧随其后的追加行，保证本条写入后仍在预算内），经atomicWrite原子替换后重开追加；
+     * 被淘汰的整行计入[droppedEvicted]，保留行内容绝不改写。尾部无LF的崩溃残页不参与
+     * 保留（读取方§7.2本就跳过不完整行）。先行关旧句柄——Windows下打开中的文件无法被
+     * 原子替换。替换失败由调用方按写故障计数，下次写入按现存文件重建句柄。
      */
-    private fun sealSegment(segment: Segment) {
-        segments.remove(segment.channel, segment)
-        try {
-            storage.force(segment.file)
-            segment.file.close()
-            storage.seal(segment.openPath, segment.readyPath)
-        } catch (_: AtomicMoveNotSupportedException) {
-            writeErrors.incrementAndGet()
-            closeSegmentFile(segment)
-        } catch (_: IOException) {
-            writeErrors.incrementAndGet()
-            closeSegmentFile(segment)
+    private fun rewrite(reserveBytes: Int) {
+        val (kept, evicted) = tailWithinBudget(reserveBytes)
+        runCatching { channel?.close() }
+        channel = null
+        storage.atomicWrite(file, kept)
+        droppedEvicted.addAndGet(evicted.toLong())
+        reopen()
+    }
+
+    /** 读全部字节，从最后一段完整行起向首部按预算收纳；返回(保留字节, 淘汰整行数)。 */
+    private fun tailWithinBudget(reserveBytes: Int): Pair<ByteArray, Int> {
+        if (!Files.exists(file)) return ByteArray(0) to 0
+        val all = Files.readAllBytes(file)
+        val starts = ArrayList<Int>()
+        var start = 0
+        for (index in all.indices) {
+            if (all[index] == LF_BYTE) {
+                starts.add(start)
+                start = index + 1
+            }
         }
-    }
-
-    /** 写失败：计数、停用该段（半行留在.open内，救援只取完整行），绝不计入records。 */
-    private fun failSegment(segment: Segment) {
-        writeErrors.incrementAndGet()
-        segments.remove(segment.channel, segment)
-        closeSegmentFile(segment)
-    }
-
-    private fun closeSegmentFile(segment: Segment) {
-        runCatching { segment.file.close() }
-    }
-
-    private fun sealAllNonEmpty() {
-        segments.values.toList().forEach { segment ->
-            if (segment.records > 0) sealSegment(segment)
+        if (starts.isEmpty()) return ByteArray(0) to 0 // 无完整行：空文件或残页
+        val budget = (maxFileBytes - reserveBytes).coerceAtLeast(0L)
+        var keepFrom = starts.size
+        var keptBytes = 0L
+        for (position in starts.indices.reversed()) {
+            val lineEnd = if (position + 1 < starts.size) starts[position + 1] else start
+            val lineBytes = (lineEnd - starts[position]).toLong()
+            if (keptBytes + lineBytes > budget) break
+            keepFrom = position
+            keptBytes += lineBytes
         }
+        if (keepFrom == starts.size) return ByteArray(0) to starts.size
+        return all.copyOfRange(starts[keepFrom], all.size) to keepFrom
     }
 
     /** 禁用采集：原因固定可见并通知一次（A6在回调里做本地限频报告），绝不静默继续。 */
@@ -360,3 +384,9 @@ class Writer(
         onDisabled?.invoke(reason)
     }
 }
+
+/** writer单批取出上限（批内序列化完成才release预算）；队列总量约束仍由queue把守。 */
+private const val CLAIM_MAX_ITEMS = 128
+private const val CLAIM_MAX_BYTES = 512 * 1024
+
+private const val LF_BYTE = '\n'.code.toByte()

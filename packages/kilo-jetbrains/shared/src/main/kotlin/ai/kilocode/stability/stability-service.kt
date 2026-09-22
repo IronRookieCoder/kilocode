@@ -325,7 +325,9 @@ class StabilityService private constructor(
         standby?.first?.forwardTo = recorder
         val root = v1Root().resolve(identity.producerId)
         val storage = Storage(root)
-        val writer = Writer(root, identity, recorder, store, clock, storage = storage)
+        // 过渡桥接（T5）：追加协议writer需要单一事实文件名；outbox布局与scope-id前缀命名
+        // 随T11接入（届时改为outboxDir()+fileName(identity)），当前沿用run级文件名。
+        val writer = Writer(root, identity.runId + ".jsonl", identity, recorder, store, clock, storage = storage)
         writer.onDisabled = { setStatus(REASON_WRITER_DISABLED) }
         writer.start()
         // 等待轮询不可经取消打断（Thread.sleep），stop可能恰好落在此窗口内。

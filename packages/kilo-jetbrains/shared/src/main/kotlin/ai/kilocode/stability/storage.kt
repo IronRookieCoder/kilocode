@@ -3,7 +3,6 @@ package ai.kilocode.stability
 import java.io.IOException
 import java.nio.ByteBuffer
 import java.nio.channels.FileChannel
-import java.nio.channels.OverlappingFileLockException
 import java.nio.file.AtomicMoveNotSupportedException
 import java.nio.file.FileAlreadyExistsException
 import java.nio.file.Files
@@ -23,17 +22,11 @@ import java.util.EnumSet
 
 private const val POSIX = "posix"
 private const val ACL = "acl"
-private const val WRITER_LOCK_NAME = "writer.lock"
-private const val EXCHANGE_LOCK_NAME = "exchange.lock"
-private const val LOCK_RANGE_OFFSET = 0L
-private const val LOCK_RANGE_SIZE = 1L
-private const val CHANNEL_CRITICAL = "critical"
-private const val CHANNEL_DIAGNOSTIC = "diagnostic"
 
 /** Windows本地系统账户（服务侧），保留其访问以便后台服务消费；查无此名（本地化系统）则省略。 */
 private const val SYSTEM_PRINCIPAL = "SYSTEM"
 
-/** 数据文件与锁文件的POSIX权限（0600）；目录为0700。Windows走ACL校验分支。 */
+/** 数据文件的POSIX权限（0600）；目录为0700。Windows走ACL校验分支。 */
 private val DIRECTORY_PERMISSIONS = PosixFilePermissions.fromString("rwx------")
 private val FILE_PERMISSIONS = PosixFilePermissions.fromString("rw-------")
 
@@ -44,8 +37,9 @@ private val FILE_PERMISSIONS = PosixFilePermissions.fromString("rw-------")
 class StorageUnverifiedException(val reason: String, cause: Throwable? = null) : RuntimeException(reason, cause)
 
 /**
- * 存储原语（设计5.2/7.1/7.2）：安全目录校验与创建、段文件与锁文件、原子封存改名、
- * 供A5登记文件复用的原子写入。所有方法只在writer的IO线程调用（atomicWrite由A5后台调用）。
+ * 存储原语（设计5.2/6.1/7.1/7.4）：安全目录校验与创建、事实文件追加打开、原子替换写入。
+ * 无登记目录、无锁文件、无.open/.ready状态机——追加协议只有一个平铺jsonl事实文件，
+ * 全部方法只在writer的IO线程调用（atomicWrite供writer容量重写使用）。
  *
  * 权限模型：POSIX文件系统显式置0700/0600并回读核验；Windows经AclFileAttributeView核验
  * 所有者为当前用户且存在对当前用户的ALLOW条目（含读/写数据权限，继承自父目录的实际权限）。
@@ -94,25 +88,12 @@ class Storage(private val root: Path) {
         return real
     }
 
-    /** 通道目录（critical/diagnostic）按需创建并核验0700/ACL；失败按不可验证处理。 */
-    fun channelDirectory(channel: String): Path {
-        require(channel == CHANNEL_CRITICAL || channel == CHANNEL_DIAGNOSTIC) { "unknown channel '$channel'" }
-        val dir = root.resolve(channel)
-        try {
-            Files.createDirectories(dir)
-        } catch (exception: IOException) {
-            throw StorageUnverifiedException("channel directory cannot be created: ${exception.message}", exception)
-        }
-        verifyPermissions(dir, isDirectory = true)
-        return dir
-    }
-
-    /** 打开段文件（存在则追加，绝不truncate既有数据）并核验0600/ACL。 */
-    fun openSegment(path: Path): FileChannel {
+    /** 追加打开事实文件（存在则追加，绝不truncate；不存在则创建）并核验0600/ACL。 */
+    fun openAppend(path: Path): FileChannel {
         val channel = try {
             FileChannel.open(path, StandardOpenOption.CREATE, StandardOpenOption.WRITE, StandardOpenOption.APPEND)
         } catch (exception: IOException) {
-            throw StorageUnverifiedException("segment file cannot be opened: ${exception.message}", exception)
+            throw StorageUnverifiedException("outbox file cannot be opened: ${exception.message}", exception)
         }
         return try {
             verifyPermissions(path, isDirectory = false)
@@ -135,51 +116,14 @@ class Storage(private val root: Path) {
         return written
     }
 
-    /** force(true)：数据与元数据一并同步（brief Step 3顺序第一步，不可与close交换）。 */
+    /** force(true)：数据与元数据一并同步（flush=force一步，不可与close交换）。 */
     fun force(channel: FileChannel) {
         beforeForce?.invoke(channel)
         channel.force(true)
     }
 
     /**
-     * 原子封存：同目录.open→.ready。文件系统不支持原子改名时抛出
-     * [AtomicMoveNotSupportedException]——调用方保留.open并记write_error，绝不降级普通rename。
-     */
-    fun seal(open: Path, ready: Path) {
-        beforeMove?.invoke(open, ready)
-        Files.move(open, ready, StandardCopyOption.ATOMIC_MOVE)
-    }
-
-    /**
-     * writer.lock：FileChannel字节范围[0,1)独占锁（G0建议的JVM侧），持有整个采集生命周期。
-     * 锁文件只创建一次，从不unlink/recreate（第7.4章：他人可能持有或打开它）。
-     */
-    @Suppress("ThrowsCount")
-    fun acquireWriterLock(): FileChannel {
-        val lockChannel = openLockFile(root.resolve(WRITER_LOCK_NAME))
-        return try {
-            // 同JVM已有writer持锁→OverlappingFileLockException；跨进程持锁→tryLock返回null。
-            lockChannel.tryLock(LOCK_RANGE_OFFSET, LOCK_RANGE_SIZE, false)
-                ?: throw IOException("writer.lock is held by another writer")
-            lockChannel
-        } catch (locked: OverlappingFileLockException) {
-            runCatching { lockChannel.close() }
-            throw locked
-        } catch (exception: IOException) {
-            runCatching { lockChannel.close() }
-            throw exception
-        }
-    }
-
-    /** exchange.lock只保证文件存在（消费端/清理端在A5后续任务使用），writer从不锁它。 */
-    fun ensureExchangeLock(): Path {
-        val path = root.resolve(EXCHANGE_LOCK_NAME)
-        openLockFile(path).close()
-        return path
-    }
-
-    /**
-     * 原子写任意文件（producer.json等登记元数据的落盘原语）：同目录临时文件写入并force后
+     * 原子写任意文件（容量重写与登记元数据的落盘原语）：同目录临时文件写入并force后
      * 原子改名到目标；不支持原子改名时删除临时文件并失败，不降级普通rename假装成功。
      */
     fun atomicWrite(target: Path, bytes: ByteArray) {
@@ -283,10 +227,6 @@ private fun verifyPosix(path: Path, isDirectory: Boolean) {
  * Windows ACL核验（设计5.2：不能把chmod数值当作Windows权限实现）：所有者必须是当前用户，
  * 且ACL存在对当前用户的ALLOW条目（继承后的实际权限）授予读/写数据。
  */
-/**
- * Windows ACL核验（设计5.2：不能把chmod数值当作Windows权限实现）：所有者必须是当前用户，
- * 且ACL存在对当前用户的ALLOW条目（继承后的实际权限）授予读/写数据。
- */
 @Suppress("ThrowsCount")
 private fun verifyAcl(path: Path) {
     val view = Files.getFileAttributeView(path, AclFileAttributeView::class.java)
@@ -367,11 +307,4 @@ private fun principalMatches(name: String, user: String): Boolean {
     if (name.equals(user, ignoreCase = true)) return true
     val shortName = name.substringAfterLast('\\').substringAfterLast('/')
     return shortName.equals(user, ignoreCase = true)
-}
-
-/** 锁文件只创建一次：不存在则CREATE_NEW，已存在则原样打开，绝不unlink/recreate。 */
-private fun openLockFile(path: Path): FileChannel = try {
-    FileChannel.open(path, StandardOpenOption.CREATE_NEW, StandardOpenOption.READ, StandardOpenOption.WRITE)
-} catch (_: FileAlreadyExistsException) {
-    FileChannel.open(path, StandardOpenOption.READ, StandardOpenOption.WRITE)
 }

@@ -1,5 +1,6 @@
 package ai.kilocode.stability
 
+import java.nio.ByteBuffer
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.attribute.AclEntry
@@ -13,207 +14,168 @@ import kotlin.test.assertNotEquals
 import kotlin.test.assertTrue
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
-import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
-import kotlinx.serialization.json.jsonObject
-import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 
 /**
- * 安全目录、单writer与原子封存（任务A4，设计5.2/7.1/7.2）。
+ * Storage追加原语与追加式单writer（任务4/5，设计5.2/6.1/7.1/7.4）。
  *
- * 全部用例走真实文件与真实Recorder：临时目录、真实writer锁、真实NDJSON落盘；
+ * 全部用例走真实文件与真实Recorder：临时目录、真实NDJSON追加落盘；
  * 唯一注入口是Storage故障钩子（注入真实故障——关闭通道、占位目录，绝不伪造成功）。
- * 封存的字节阈值为构造参数（设计7.1：阈值按真实事件率校准），默认1MiB/64KiB不变，
- * 测试以校准值驱动同一代码路径获得确定性；30秒/300秒延迟经可控时钟驱动，不等待真实时间。
+ * flush阈值为构造参数（设计7.1：阈值按真实事件率校准），30秒延迟经可控时钟驱动；
+ * R3要求flush时序用例可证伪：经writer的internal pending观测面断言
+ * "deadline未到/不足16条时pending>0，越过deadline或第16条后pending==0"，
+ * 不保留只数行数的永真断言。
  */
 class WriterTest {
 
-    // ---------- Step 1 verbatim：封存数据的UTF-8 NDJSON与不可变 ----------
+    // ---------- Task 4：Storage追加原语直测（追加不截断、删除后按原名重建） ----------
 
     @Test
-    fun `sealed data is utf8 ndjson and immutable`() {
-        Fixture().use { fixture ->
-            assertEquals(Admission.QUEUED, fixture.recorder.record(
-                Draft("plugin.started", "lifecycle", "critical", JsonObject(emptyMap()))))
-            fixture.flush()
-            val file = Files.list(fixture.root.resolve("critical")).use { files ->
-                files.filter { it.toString().endsWith(".ready") }.findFirst().orElseThrow()
+    fun `openAppend appends and recreates without truncation`() {
+        val dir = Files.createTempDirectory("storage-append")
+        try {
+            val storage = Storage(dir)
+            storage.verifyLayout()
+            val file = dir.resolve("sc-ab12-pr-cd34.jsonl")
+            storage.openAppend(file).use { channel ->
+                storage.writeAll(channel, ByteBuffer.wrap("{\"a\":1}\n".encodeToByteArray()))
+                storage.force(channel)
             }
+            storage.openAppend(file).use { channel ->
+                storage.writeAll(channel, ByteBuffer.wrap("{\"a\":2}\n".encodeToByteArray()))
+                storage.force(channel)
+            }
+            assertEquals("{\"a\":1}\n{\"a\":2}\n", Files.readString(file))
+            // 被外部删除后按原名重建，不视为错误（§7.4）
+            Files.delete(file)
+            storage.openAppend(file).use { channel ->
+                storage.writeAll(channel, ByteBuffer.wrap("{\"a\":3}\n".encodeToByteArray()))
+                storage.force(channel)
+            }
+            assertEquals("{\"a\":3}\n", Files.readString(file))
+        } finally {
+            dir.toFile().deleteRecursively()
+        }
+    }
+
+    // ---------- 追加单文件：两通道同文件、通道seq各自连续、UTF-8无BOM LF结尾 ----------
+
+    @Test
+    fun `facts append to one jsonl file across both channels with per-channel seq`() {
+        Fixture(tickMs = 50L).use { fixture ->
+            repeat(8) { assertEquals(Admission.QUEUED, fixture.recorder.record(criticalDraft())) }
+            repeat(8) { assertEquals(Admission.QUEUED, fixture.recorder.record(diagnosticDraft())) }
+            fixture.flush()
+            val file = fixture.outboxDir.resolve(fixture.fileName)
+            assertTrue(Files.isRegularFile(file))
             val bytes = Files.readAllBytes(file)
-            assertEquals(10.toByte(), bytes.last())
-            assertFalse(bytes.take(3) == listOf(0xef.toByte(), 0xbb.toByte(), 0xbf.toByte()))
-            assertEquals("plugin.started", Json.parseToJsonElement(bytes.toString(Charsets.UTF_8).trim())
-                .jsonObject.getValue("name").jsonPrimitive.content)
+            assertEquals(10.toByte(), bytes.last(), "行以LF结尾（§6.1）")
+            assertFalse(
+                bytes.take(3) == listOf(0xef.toByte(), 0xbb.toByte(), 0xbf.toByte()),
+                "UTF-8无BOM（§6.1）",
+            )
+            val lines = Files.readAllLines(file)
+            assertEquals(16, lines.size)
+            val facts = lines.map { factJson.decodeFromString(Fact.serializer(), it) }
+            assertEquals((1L..8L).toList(), facts.filter { it.channel == "critical" }.map { it.seq })
+            assertEquals((1L..8L).toList(), facts.filter { it.channel == "diagnostic" }.map { it.seq })
         }
     }
 
-    // ---------- 16条封存：计数阈值，下一段从新文件开始 ----------
+    // ---------- R3可证伪：第16条触发批flush，不等age deadline ----------
 
     @Test
-    fun `sixteen records seal a segment and the next record starts a new file`() {
-        Fixture().use { fixture ->
-            repeat(16) { assertEquals(Admission.QUEUED, fixture.recorder.record(lifecycleDraft())) }
-            assertTrue(awaitReady(fixture, 1), "第16条写入后应立即封存出.ready")
-            assertEquals(16, countLines(readyFiles(fixture).single()))
-
-            assertEquals(Admission.QUEUED, fixture.recorder.record(lifecycleDraft()))
-            assertTrue(awaitOpen(fixture, 1), "旧段已封存，第17条应打开新段")
-            fixture.flush()
-            assertEquals(2, readyFiles(fixture).size)
-            assertEquals(17, fixture.facts().size)
+    fun `batch threshold of sixteen records flushes without waiting for the age deadline`() {
+        Fixture(tickMs = 50L).use { fixture ->
+            repeat(15) { assertEquals(Admission.QUEUED, fixture.recorder.record(criticalDraft())) }
+            assertTrue(awaitDrained(fixture), "15条应被tick循环写入（未fsync）")
+            fixture.advanceClock(5_000L)
+            fixture.writer.wakeForTest() // 同步屏障：一次tick循环已完整执行
+            assertTrue(
+                fixture.writer.pendingForTest(),
+                "不足16条且远未到30秒：批次必须保持pending（未flush）",
+            )
+            repeat(1) { assertEquals(Admission.QUEUED, fixture.recorder.record(criticalDraft())) } // 第16条
+            assertTrue(awaitDrained(fixture), "第16条应完成写入")
+            assertFalse(fixture.writer.pendingForTest(), "第16条必须立即触发批flush（pending归零）")
+            assertEquals(16, countLines(fixture.outboxDir.resolve(fixture.fileName)))
         }
     }
 
-    // ---------- 累计字节封存（默认64KiB，校准值16KiB驱动）：先于16条触发 ----------
+    // ---------- R3可证伪：首条未fsync写入起30秒内flush；deadline前一毫秒不得flush ----------
 
     @Test
-    fun `accumulated bytes seal a segment before sixteen records`() {
-        Fixture(batchSealBytes = 16 * 1024L).use { fixture ->
-            repeat(15) { assertEquals(Admission.QUEUED, fixture.recorder.record(detailDraft(it))) }
-            assertTrue(awaitReady(fixture, 1), "累计字节到阈值应立即封存")
-            fixture.flush()
-
-            val sealed = readyFiles(fixture)
-            assertTrue(sealed.size >= 2, "16KiB累计下15条大记录应跨多个段，实际${sealed.size}个")
-            sealed.dropLast(1).forEach { path ->
-                assertTrue(Files.size(path) >= 16 * 1024L, "字节封存的段应达到累计阈值")
-            }
-            sealed.forEach { path ->
-                assertTrue(countLines(path) < 16, "字节阈值应先于16条触发")
-            }
-            assertEquals(15, fixture.facts().size)
-        }
-    }
-
-    // ---------- 1MiB预封存（校准值16KiB驱动）：下一条将突破预算时先封存旧文件 ----------
-
-    @Test
-    fun `next record beyond the segment budget seals the old file first`() {
-        Fixture(maxSegmentBytes = 16 * 1024L).use { fixture ->
-            repeat(10) { assertEquals(Admission.QUEUED, fixture.recorder.record(detailDraft(it))) }
-            fixture.flush()
-            val sealed = readyFiles(fixture)
-            assertTrue(sealed.size >= 3, "预算16KiB时10条大记录应跨多个段，实际${sealed.size}个")
-            sealed.forEach { path ->
-                assertTrue(Files.size(path) <= 16 * 1024L, "任何段都不得突破字节预算")
-            }
-            assertEquals(10, fixture.facts().size)
-        }
-    }
-
-    // ---------- 可控时钟驱动延迟边界：critical 30秒 / diagnostic 300秒 ----------
-
-    @Test
-    fun `critical segment seals only after thirty seconds`() {
-        Fixture().use { fixture ->
-            assertEquals(Admission.QUEUED, fixture.recorder.record(lifecycleDraft()))
-            assertTrue(awaitDrained(fixture), "首条应已完整写入并释放预算")
-
-            fixture.advanceClock(30_000L)
-            Thread.sleep(400)
-            assertTrue(readyFiles(fixture).isEmpty(), "恰好30秒尚未超过，不得封存")
-
-            fixture.advanceClock(1L)
-            assertTrue(awaitReady(fixture, 1), "超过30秒应封存")
-            assertEquals(1, fixture.facts().size)
-        }
-    }
-
-    @Test
-    fun `diagnostic segment seals only after five minutes`() {
-        Fixture().use { fixture ->
-            assertEquals(Admission.QUEUED, fixture.recorder.record(detailDraft(0)))
+    fun `pending bytes flush at most thirty seconds after the first unwritten batch entry`() {
+        Fixture(tickMs = 50L, maxFlushAgeMs = 30_000L).use { fixture ->
+            assertEquals(Admission.QUEUED, fixture.recorder.record(criticalDraft()))
             assertTrue(awaitDrained(fixture))
-
-            fixture.advanceClock(300_000L)
-            Thread.sleep(400)
-            assertTrue(readyFiles(fixture).isEmpty(), "恰好300秒尚未超过，不得封存")
-
-            fixture.advanceClock(1L)
-            assertTrue(awaitReady(fixture, 1), "超过300秒应封存")
-            assertEquals(1, fixture.facts().size)
-            assertEquals("diagnostic", fixture.facts().single().channel)
+            assertTrue(fixture.writer.pendingForTest(), "已写入未fsync的记录必须处于pending")
+            fixture.advanceClock(29_999L)
+            fixture.writer.wakeForTest()
+            assertTrue(fixture.writer.pendingForTest(), "恰好29_999毫秒尚未超过30秒，不得flush")
+            fixture.advanceClock(2L)
+            fixture.writer.wakeForTest()
+            assertFalse(fixture.writer.pendingForTest(), "越过30秒deadline必须flush积压批次")
+            assertEquals(1, countLines(fixture.outboxDir.resolve(fixture.fileName)))
         }
     }
 
-    // ---------- 零记录：无定时封存、无空.ready、无通道目录 ----------
+    // ---------- 容量重写（§7.4）：保留尾部整行、淘汰计入droppedEvicted、重写后可继续追加 ----------
 
     @Test
-    fun `zero records never create channel directories or empty ready files`() {
-        Fixture().use { fixture ->
-            fixture.advanceClock(600_000L)
+    fun `oversize file rewrites keeping the tail and counting evicted lines`() {
+        Fixture(tickMs = 50L, maxFileBytes = 2L * 1024).use { fixture ->
+            repeat(40) { assertEquals(Admission.QUEUED, fixture.recorder.record(wideCriticalDraft())) }
             fixture.flush()
-            assertFalse(Files.exists(fixture.root.resolve("critical")))
-            assertFalse(Files.exists(fixture.root.resolve("diagnostic")))
-            assertTrue(fixture.facts().isEmpty())
-            assertEquals(WriterState.ACTIVE, fixture.writer.state)
+            val file = fixture.outboxDir.resolve(fixture.fileName)
+            assertTrue(Files.size(file) <= 2L * 1024, "重写后文件必须回到预算内")
+            val lines = Files.readAllLines(file)
+            assertTrue(lines.size in 1 until 40, "expected eviction, got ${lines.size}")
+            assertTrue(fixture.writer.stats().droppedEvicted > 0, "被淘汰行必须计入droppedEvicted")
+            // 保留行不被改写：末行仍是完整合法事实
+            factJson.decodeFromString(Fact.serializer(), lines.last())
+            // 重写后继续追加正常：新事实落盘（必要时再次淘汰旧行腾位），文件仍在预算内。
+            assertEquals(Admission.QUEUED, fixture.recorder.record(criticalDraft()))
+            fixture.flush()
+            assertTrue(Files.size(file) <= 2L * 1024, "继续追加后文件仍必须回到预算内")
+            val after = Files.readAllLines(file)
+            assertTrue(after.size <= lines.size + 1, "追加至多新增一行（淘汰只减不增）")
+            assertEquals(41L, factJson.decodeFromString(Fact.serializer(), after.last()).seq, "重写后新事实照常追加")
         }
     }
 
-    // ---------- 写入失败：保留.open、计数write_error、不伪造封存 ----------
+    // ---------- 文件被删：下次追加按原名重建，不视为错误（§7.4） ----------
 
     @Test
-    fun `write failure keeps the open segment and counts the error`() {
-        Fixture(tickMs = 60_000L).use { fixture ->
-            fixture.failNextWrite()
-            assertEquals(Admission.QUEUED, fixture.recorder.record(lifecycleDraft()))
+    fun `deleted outbox file is recreated on the next append`() {
+        Fixture(tickMs = 50L).use { fixture ->
+            assertEquals(Admission.QUEUED, fixture.recorder.record(criticalDraft()))
             fixture.flush()
-
-            assertTrue(readyFiles(fixture).isEmpty(), "写入失败不得封存")
-            assertTrue(openFiles(fixture).isNotEmpty(), ".open必须保留给consumer救援")
-            assertNotEquals(0L, fixture.writer.stats().writeErrors)
-            assertTrue(fixture.facts().isEmpty())
-            assertEquals(0, fixture.recorder.depth().items, "失败批次也必须恰好释放一次预算")
-        }
-    }
-
-    @Test
-    fun `force failure keeps the segment open and counts the error`() {
-        Fixture().use { fixture ->
-            assertEquals(Admission.QUEUED, fixture.recorder.record(lifecycleDraft()))
-            assertTrue(awaitOpen(fixture, 1))
-
-            fixture.failNextForce()
-            fixture.flush()
-
-            assertTrue(readyFiles(fixture).isEmpty(), "force失败即未同步，不得改名封存")
-            assertNotEquals(0L, fixture.writer.stats().writeErrors)
-            assertTrue(fixture.facts().isEmpty())
-        }
-    }
-
-    @Test
-    fun `rename failure keeps the open file and never fakes sealed`() {
-        Fixture().use { fixture ->
-            assertEquals(Admission.QUEUED, fixture.recorder.record(lifecycleDraft()))
-            assertTrue(awaitOpen(fixture, 1))
-            val openBefore = openFiles(fixture).single()
-
-            fixture.failNextRename()
-            fixture.flush()
-
-            assertTrue(readyFiles(fixture).isEmpty(), "原子改名失败不得声称已封存")
-            assertTrue(Files.exists(openBefore), ".open必须原样保留")
-            assertNotEquals(0L, fixture.writer.stats().writeErrors)
-            assertEquals(0, fixture.facts().size)
-        }
-    }
-
-    // ---------- 入盘前重判期：策略失效的排队事实不落盘 ----------
-
-    @Test
-    fun `policy gone before the write drops queued records without a file`() {
-        Fixture(tickMs = 60_000L).use { fixture ->
-            assertEquals(Admission.QUEUED, fixture.recorder.record(lifecycleDraft()))
-            fixture.expireControl()
-            fixture.flush()
-
-            assertFalse(Files.exists(fixture.root.resolve("critical")), "无有效许可不得创建业务文件")
-            assertEquals(1L, fixture.writer.stats().droppedPolicy)
-            assertTrue(fixture.facts().isEmpty())
-            assertEquals(0, fixture.recorder.depth().items)
+            val file = fixture.outboxDir.resolve(fixture.fileName)
+            assertTrue(Files.exists(file))
+            // Windows句柄语义（无FILE_SHARE_DELETE，见retention-test同款坑）：删除必须发生在
+            // 无打开通道的时刻——先结束本写会话再删，由下一个追加会话按原名重建（§7.4）。
+            fixture.writer.close()
+            Files.delete(file)
+            val reopened = Writer(
+                root = fixture.outboxDir,
+                fileName = fixture.fileName,
+                identity = REOPEN_IDENTITY,
+                recorder = fixture.recorder,
+                policies = fixture.policies,
+                clock = fixture.clock,
+                storage = fixture.storage,
+            )
+            reopened.start()
+            try {
+                assertEquals(Admission.QUEUED, fixture.recorder.record(criticalDraft()))
+                reopened.flush()
+                assertEquals(1, countLines(file), "重建后只应包含新事实")
+            } finally {
+                reopened.close()
+            }
         }
     }
 
@@ -221,23 +183,19 @@ class WriterTest {
 
     @Test
     fun `queued facts of a retired epoch are dropped at the write gate`() {
+        // 60s tick保证记录在换代观察前仍在队列（构造真实的"已排队未写出"窗口）。
         Fixture(tickMs = 60_000L).use { fixture ->
-            // epoch=acct-a下排队（60s tick内writer尚未取出，构造真实的"已排队未写出"窗口）
-            assertEquals(Admission.QUEUED, fixture.recorder.record(lifecycleDraft()))
-            // 直接换到新epoch（pending过渡未被观察到）：acct-a在策略层永久退役
-            fixture.rotateEpochControl("acct-b", revision = 14L)
+            assertEquals(Admission.QUEUED, fixture.recorder.record(criticalDraft()))
+            fixture.rotateEpochControl("acct-b", revision = 2L)
             fixture.flush()
-
-            assertTrue(fixture.facts().none { it.account_epoch == "acct-a" }, "退役epoch的排队事实不得落盘")
-            assertEquals(1L, fixture.writer.stats().droppedPolicy)
+            assertEquals(0, fixture.facts().size, "退役epoch的排队事实不得落盘")
+            assertEquals(1, fixture.writer.stats().droppedPolicy)
             assertEquals(0, fixture.recorder.depth().items)
-
-            // 换代后的新事实照常落盘，携带新epoch与revision（不改绑）
-            assertEquals(Admission.QUEUED, fixture.recorder.record(lifecycleDraft()))
+            assertEquals(Admission.QUEUED, fixture.recorder.record(criticalDraft()))
             fixture.flush()
-            val landed = fixture.facts()
-            assertEquals(listOf("acct-b"), landed.map { it.account_epoch })
-            assertEquals(listOf(14L), landed.map { it.policy_revision })
+            val facts = fixture.facts()
+            assertEquals(1, facts.size)
+            assertEquals("acct-b", facts[0].account_epoch)
         }
     }
 
@@ -246,7 +204,7 @@ class WriterTest {
     @Test
     fun `claimed budget is released exactly once after the batch is written`() {
         Fixture().use { fixture ->
-            repeat(5) { assertEquals(Admission.QUEUED, fixture.recorder.record(lifecycleDraft())) }
+            repeat(5) { assertEquals(Admission.QUEUED, fixture.recorder.record(criticalDraft())) }
             fixture.flush()
 
             assertEquals(0, fixture.recorder.depth().items)
@@ -255,34 +213,25 @@ class WriterTest {
         }
     }
 
-    // ---------- writer锁：文件不unlink/recreate，第二个writer拿不到锁 ----------
+    // ---------- 入盘前重判期：策略失效的排队事实不落盘 ----------
 
     @Test
-    fun `writer lock file survives close and blocks a second writer`() {
-        val first = Fixture(cleanOnClose = false)
-        try {
-            first.use { fixture ->
-                assertEquals(Admission.QUEUED, fixture.recorder.record(lifecycleDraft()))
-                fixture.flush()
-                assertTrue(Files.exists(fixture.root.resolve("writer.lock")), "锁文件不得unlink")
-                assertTrue(Files.exists(fixture.root.resolve("exchange.lock")), "exchange锁文件只创建不删除")
+    fun `policy gone before the write drops queued records without a file`() {
+        Fixture(tickMs = 60_000L).use { fixture ->
+            assertEquals(Admission.QUEUED, fixture.recorder.record(criticalDraft()))
+            fixture.expireControl()
+            fixture.flush()
 
-                Fixture(base = fixture.base, cleanOnClose = false).use { second ->
-                    assertTrue(await { second.writer.state != WriterState.CREATED }, "启动应结束于终态")
-                    assertEquals(WriterState.DISABLED, second.writer.state)
-                    assertNotEquals(null, second.writer.disabledReason)
-                }
-            }
-            assertTrue(Files.exists(first.root.resolve("writer.lock")), "close后锁文件仍不删除")
-        } finally {
-            first.base.toFile().deleteRecursively()
+            assertTrue(fixture.facts().isEmpty(), "无有效许可不得有事实落盘")
+            assertEquals(1L, fixture.writer.stats().droppedPolicy)
+            assertEquals(0, fixture.recorder.depth().items)
         }
     }
 
     @Test
     fun `unverifiable storage root disables collection`() {
         Fixture(autoStart = false).use { fixture ->
-            Files.write(fixture.root, byteArrayOf())
+            Files.write(fixture.outboxDir, byteArrayOf())
             fixture.writer.start()
 
             assertTrue(await { fixture.writer.state != WriterState.CREATED }, "启动应结束于终态")
@@ -299,9 +248,9 @@ class WriterTest {
         Fixture().use { fixture ->
             if (!await { fixture.writer.state != WriterState.CREATED }) return  // 等启动结束（根目录已建）
             if (fixture.writer.state != WriterState.ACTIVE) return  // 存储不可用场景由disable用例覆盖
-            val views = fixture.root.fileSystem.supportedFileAttributeViews()
+            val views = fixture.outboxDir.fileSystem.supportedFileAttributeViews()
             if ("posix" in views) return  // POSIX路径走0700置位回读，本断言仅适用ACL模型
-            val view = Files.getFileAttributeView(fixture.root, AclFileAttributeView::class.java)
+            val view = Files.getFileAttributeView(fixture.outboxDir, AclFileAttributeView::class.java)
                 ?: return
             val acl = view.acl
             assertTrue(acl.isNotEmpty(), "配置后的DACL不应为空")
@@ -330,34 +279,38 @@ class WriterTest {
             name.substringAfterLast('\\').substringAfterLast('/').equals(user, ignoreCase = true)
     }
 
-    // ---------- 夹具与驱动 ----------
+    // ---------- Draft辅助（data键闭集按Dictionary.SPEC_TABLE；rpc为metrics-only的
+    // operation名：end相公共终态五键+api_group；error.reported取详情分支四键） ----------
 
-    /** plugin.started仅允许空data（第9章），event_id已由recorder区分各条记录。 */
-    private fun lifecycleDraft(): Draft = Draft(
-        "plugin.started",
-        "lifecycle",
-        "critical",
-        JsonObject(emptyMap()),
-    )
+    private fun criticalDraft(): Draft = Draft("rpc", "operation", "critical", buildJsonObject {
+        put("phase", "end")
+        put("result", "success")
+        put("duration_ms", 1)
+        put("stage", "unknown")
+        put("cause", "unknown")
+        put("error_code", "none")
+        put("api_group", "session")
+    }, purposes = setOf("metrics", "logs"))
 
-    /** error.uncaught详情分支（message/frames/fingerprint/count恰好四键，设计第9章）；
-     *  message/frames用双引号字符撑满边界（合法无路径分隔符），真实UTF-8转义后逼近单条上限。 */
-    private fun detailDraft(index: Int): Draft = Draft(
-        "error.uncaught",
-        "diagnostic",
-        "diagnostic",
-        buildJsonObject {
-            put("message", "\"".repeat(511) + (index % 10))
-            put("frames", JsonArray(List(5) { JsonPrimitive("\"".repeat(256)) }))
-            put("fingerprint", "p".repeat(64) + index)
-            put("count", 1)
-        },
-        purposes = setOf("logs"),
-    )
+    private fun diagnosticDraft(): Draft = Draft("error.reported", "diagnostic", "diagnostic", buildJsonObject {
+        put("message", "diagnostic channel payload")
+        put("frames", JsonArray(listOf(JsonPrimitive("frame.one"), JsonPrimitive("frame.two"))))
+        put("fingerprint", "fp-diagnostic-1")
+        put("count", 1)
+    }, purposes = setOf("logs"))
 
-    private fun readyFiles(fixture: Fixture): List<Path> = listReady(fixture.root)
+    /** 更宽的critical载荷：error_code取64字节内长值，在小预算下更快触发容量重写。 */
+    private fun wideCriticalDraft(): Draft = Draft("rpc", "operation", "critical", buildJsonObject {
+        put("phase", "end")
+        put("result", "success")
+        put("duration_ms", 1)
+        put("stage", "unknown")
+        put("cause", "unknown")
+        put("error_code", "x".repeat(60))
+        put("api_group", "session")
+    }, purposes = setOf("metrics", "logs"))
 
-    private fun openFiles(fixture: Fixture): List<Path> = listOpen(fixture.root)
+    // ---------- 驱动 ----------
 
     private fun countLines(file: Path): Int =
         Files.readAllBytes(file).count { byte -> byte == 10.toByte() }
@@ -371,14 +324,26 @@ class WriterTest {
         return condition()
     }
 
-    private fun awaitReady(fixture: Fixture, count: Int): Boolean =
-        await { readyFiles(fixture).size >= count }
-
-    private fun awaitOpen(fixture: Fixture, count: Int): Boolean =
-        await { openFiles(fixture).size >= count }
-
-    /** 记录已完整写入并释放预算（claim后release）的确定性barrier；避免时钟推进与首条写入竞态。 */
+    /** 记录已完整写入并释放预算（claim后release）的确定性barrier；避免与tick排空竞态。 */
     private fun awaitDrained(fixture: Fixture): Boolean =
         await { fixture.recorder.depth().items == 0 }
-}
 
+    private val factJson = Json { encodeDefaults = true }
+
+    /** 重建用例的第二写会话身份（文件名沿用夹具同名，writer身份不参与文件命名）。 */
+    private val REOPEN_IDENTITY = ProducerIdentity(
+        producerId = "pr-a4",
+        runId = "run-reopen",
+        deviceId = "device-a4",
+        pluginVersion = "1.0.0",
+        ideProduct = "IU",
+        ideBuild = "build-a4",
+        ideBuildMajor = "2026.1",
+        osFamily = "windows",
+        arch = "x64",
+        env = "test",
+        mode = "monolith",
+        side = "monolith",
+        connectionProvider = "cs-cloud",
+    )
+}

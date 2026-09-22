@@ -108,6 +108,7 @@ class HealthTest {
             val nextRecorder = Recorder(NEXT_RUN_IDENTITY, fixture.policies, fixture.clock)
             val nextWriter = Writer(
                 fixture.base.resolve("outbox-next"),
+                "sc-fx-${NEXT_RUN_IDENTITY.producerId}.jsonl",
                 NEXT_RUN_IDENTITY,
                 nextRecorder,
                 fixture.policies,

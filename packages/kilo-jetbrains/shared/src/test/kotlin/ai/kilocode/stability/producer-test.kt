@@ -88,10 +88,10 @@ private class Harness(
     fun registrationCount(): Int =
         if (Files.isDirectory(registrations)) Files.list(registrations).use { it.count() }.toInt() else 0
 
-    /** 读.ready与.open（writer只统计完整LF行，.open内容在此测试场景中是完整行）还原事实。 */
+    /** 读producer根下的追加事实文件（完整LF行）还原事实。 */
     fun facts(): List<Fact> {
         val root = producerRoot()
-        return (listReady(root) + listOpen(root)).flatMap { file ->
+        return listReady(root).flatMap { file ->
             Files.readAllBytes(file).toString(Charsets.UTF_8)
                 .lineSequence()
                 .filter { line -> line.isNotBlank() }
@@ -221,6 +221,7 @@ class ProducerTest {
             )
             val second = Writer(
                 root = harness.producerRoot(),
+                fileName = "sc-second-${identity.producerId}.jsonl",
                 identity = identity,
                 recorder = Recorder(identity, policies, harness.clock),
                 policies = policies,
