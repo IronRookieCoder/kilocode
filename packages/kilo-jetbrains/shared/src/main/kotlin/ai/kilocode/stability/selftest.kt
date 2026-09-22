@@ -16,12 +16,13 @@ private const val SELFTEST_FAULT_UNCAUGHT = "fault-selftest-uncaught"
  * 走与业务观测完全相同的[Recorder]/[Operations]/[Faults]/[Resources]入口——准入、队列、
  * 封存与outbox落盘全部经过真实管线，不做任何旁路写入。
  *
- * 范围（30 name中排除3个）：
+ * 范围（31 name中排除3个）：
  *  - `plugin.started`/`plugin.shutdown`是服务级每run恰一条的 lifecycle 单发
  *    （stability-service activateRun/stop 独占），自检重复发会破坏"唯一终态"口径；
  *  - `telemetry.health`的drop/write_error是自上一条health事实以来的增量（§6.2，cs-cloud
  *  直接求和），伪造事实会向下游损失总和注入虚假增量；真实IDE由Health后台周期产出，不经自检驱动。
- * 其余27个name（含error族计数/详情两形态、7种kind全部）在此驱动；真实端到端会话中
+ * 其余28个name（含error族计数/详情两形态、7种kind全部；edt.stall经真实[StallMerger]
+ * 喂合成样本序列产出，不伪造Draft形状）在此驱动；真实端到端会话中
  * 被排除的3个由服务自身自然产出，全集覆盖由验收断言把关。
  *
  * 安全约定：值全部取自字典受控词表（与dictionary-sweep-test同一套已验证形状）；
@@ -124,6 +125,16 @@ fun emitDictionarySweep(
             context = selftestContext(),
         ),
     )
+    // edt.stall经真实StallMerger驱动：同一观测区间内两枚首尾相接样本（seq 1→2，scheduled
+    // 与上一窗口end相接于11_800）合并为2.5秒窗口，onObservationEnded终结后达标产出——
+    // Draft形状由合并器产出，自检不伪造（该形状不带workspace上下文，与生产一致）。
+    val stalls = mutableListOf<Draft>()
+    val merger = StallMerger { stalls.add(it) }
+    merger.onValidSample("obs-selftest", 1, 10_000, 11_800)
+    merger.onValidSample("obs-selftest", 2, 11_800, 12_500)
+    merger.onObservationEnded()
+    stalls.forEach(recorder::record)
+
     resources.acquire("subscription").use { }
     resourceSnapshotDrafts(resources.snapshot()).forEach { recorder.record(it) }
 
@@ -143,7 +154,8 @@ fun emitDictionarySweep(
         ),
     )
 
-    // ---- lifecycle：unclean登记形状（无插件发射点，设计7.3属消费端判定）----
+    // ---- lifecycle：unclean登记形状（生产由UncleanDetector于启动时判定——Task 7已交付；
+    //      自检仍以占位previous_run_id直投字典形状）----
     recorder.record(
         Draft(
             "plugin.unclean", "lifecycle", "critical",

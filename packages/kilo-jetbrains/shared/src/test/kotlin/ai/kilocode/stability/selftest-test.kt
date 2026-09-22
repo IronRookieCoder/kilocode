@@ -1,5 +1,7 @@
 package ai.kilocode.stability
 
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.long
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
@@ -18,10 +20,19 @@ class SelfTestTest {
             fixture.flush()
             val facts = fixture.facts()
 
-            // —— 覆盖：30个登记name中除plugin.started/plugin.shutdown/telemetry.health
+            // —— 覆盖：31个登记name中除plugin.started/plugin.shutdown/telemetry.health
             //    （服务级单发与真实快照，见selftest.kt KDoc）外全部落盘 ——
             val expectedNames = Dictionary.names.toSet() - setOf("plugin.started", "plugin.shutdown", "telemetry.health")
             assertEquals(expectedNames, facts.map { it.name }.toSet(), "sweep驱动的每个name都必须经.ready落盘")
+
+            // —— edt.stall：必须经真实StallMerger产出——同观测区间两枚首尾相接样本（seq 1→2）
+            //    合并为2.5秒窗口，onObservationEnded终结后达标；驱动面不得伪造stall Draft形状 ——
+            val stalls = facts.filter { it.name == "edt.stall" }
+            assertEquals(1, stalls.size, "sweep应经StallMerger产出恰一条edt.stall")
+            assertTrue(
+                (stalls.single().data["duration_ms"]?.jsonPrimitive?.long ?: 0L) >= 2_000L,
+                "edt.stall duration_ms必须≥2000（合并窗口10_000→12_500=2500ms）",
+            )
 
             // —— 形态：kind/channel/purposes与Dictionary投影逐条一致 ——
             val violations = facts.mapNotNull { fact ->
@@ -52,11 +63,12 @@ class SelfTestTest {
                 "计数与详情经同一组fault_id关联",
             )
 
-            // —— 自检标记：驱动面事实带workspace_id=ws-selftest（error族经显式fault_id辨识）——
+            // —— 自检标记：驱动面事实带workspace_id=ws-selftest（error族经显式fault_id辨识；
+            //    edt.stall由真实StallMerger产出，其Draft形状不带workspace上下文，与生产一致）——
             assertTrue(
-                facts.filter { it.name !in setOf("error.reported", "error.uncaught", "resource.snapshot") }
+                facts.filter { it.name !in setOf("error.reported", "error.uncaught", "resource.snapshot", "edt.stall") }
                     .all { it.context["workspace_id"] == "ws-selftest" },
-                "全部自检事实（error与resource.snapshot除外）都携带ws-selftest标记",
+                "全部自检事实（error、resource.snapshot与StallMerger产出的edt.stall除外）都携带ws-selftest标记",
             )
 
             // —— seq按通道从1连续（与自然事件交错时由writer保证，此处验证sweep自身不破坏）——
@@ -77,7 +89,7 @@ class SelfTestTest {
         "connection.state_changed", "migration.required", "session.dispose_risk" -> "transition"
         "plugin.unclean" -> "lifecycle"
         "availability" -> "interval"
-        "edt.delay", "render.apply", "resource.snapshot" -> "sample"
+        "edt.delay", "edt.stall", "render.apply", "resource.snapshot" -> "sample"
         "protocol.error", "edt.violation" -> "diagnostic"
         else -> "operation"
     }
@@ -87,7 +99,7 @@ class SelfTestTest {
     private fun expectedPurposes(fact: Fact): Set<String> = when {
         fact.name.startsWith("error.") -> if (fact.channel == "critical") setOf("metrics") else setOf("logs")
         fact.name in setOf(
-            "rpc", "render.apply", "edt.delay", "resource.snapshot", "availability",
+            "rpc", "render.apply", "edt.delay", "edt.stall", "resource.snapshot", "availability",
             "migration.required", "session.dispose_risk",
         ) -> setOf("metrics")
         else -> setOf("metrics", "logs")
