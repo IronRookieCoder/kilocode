@@ -43,9 +43,9 @@ class EdtStallTest {
     fun `sequence gap breaks the merge`() {
         val (m, out) = merger()
         m.onValidSample("obs-1", 1, 10_000, 12_500) // 2.5s窗口
-        // seq缺失（2丢失）→打断合并；起点12_600也在上一窗口end（12_500）之后不相接。
-        // 两个打断条件任一即开新窗口，缺失部分不推断卡顿：旧窗口2.5s达标产出，新窗口0.1s丢弃。
-        m.onValidSample("obs-1", 3, 12_600, 12_700)
+        // 只钉住序号谓词：scheduled==12_500与上一窗口end首尾相接、obs相同，唯seq缺失（2丢失）
+        // 打断合并；缺失部分不推断卡顿——旧窗口2.5s达标产出，新窗口0.2s丢弃。
+        m.onValidSample("obs-1", 3, 12_500, 12_700)
         m.onObservationEnded()
         assertEquals(1, out.size)
         assertEquals(2_500, out[0].data["duration_ms"]?.jsonPrimitive?.long)
@@ -55,7 +55,9 @@ class EdtStallTest {
     fun `observation change breaks the merge and ends the current window`() {
         val (m, out) = merger()
         m.onValidSample("obs-1", 1, 10_000, 12_500) // 2.5s窗口
-        m.onValidSample("obs-2", 1, 12_600, 12_700) // 换观测区间：终结上一窗口并开新窗口
+        // 只钉住observation_id谓词：scheduled==12_500首尾相接且seq连续（1→2），唯换观测区间
+        // 打断合并——终结上一窗口（产出obs-1的2.5s）并开新窗口（0.2s不足阈值丢弃）。
+        m.onValidSample("obs-2", 2, 12_500, 12_700)
         m.onObservationEnded()
         assertEquals(1, out.size)
         assertEquals(2_500, out[0].data["duration_ms"]?.jsonPrimitive?.long)
