@@ -129,8 +129,11 @@ class CsCloudSseClient(
         val rootPath = workspace?.toAbsolutePath()?.normalize() ?: return Acceptance(accepted = true)
         val eventPath = runCatching { Path.of(dir).toAbsolutePath().normalize() }.getOrNull() ?: run {
             // M15（C2）：host事件的directory违反可解析路径约束（apply违规）；既有丢弃行为不变。
-            operations?.protocolError(ProtocolTransport.SSE, ProtocolStage.APPLY, ProtocolCode.APPLY_VIOLATION)
-            return Acceptance(accepted = false, observed = true)
+            val observed = operations?.let {
+                it.protocolError(ProtocolTransport.SSE, ProtocolStage.APPLY, ProtocolCode.APPLY_VIOLATION)
+                true
+            } ?: false
+            return Acceptance(accepted = false, observed = observed)
         }
         return Acceptance(accepted = eventPath == rootPath || eventPath.startsWith(rootPath))
     }
