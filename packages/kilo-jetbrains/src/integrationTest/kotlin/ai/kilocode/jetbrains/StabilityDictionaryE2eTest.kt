@@ -20,18 +20,20 @@ import java.util.concurrent.TimeUnit
  * 全字典真实IDE落盘验收（设计第9章/第14章"插件端所有类型"口径）：
  *
  * 真实 Starter IDE（隔离home）+ 双用途有效控制文件 → 隐藏自检动作
- * `Kilo.StabilitySelfTest`（经 `-Dcostrict.stability.selftest=true` 开启）对除
+ * `Kilo.StabilitySelfTest`（经 `-Dcostrict.stability.selftest=true` 开关）对除
  * plugin.started/plugin.shutdown/telemetry.health（服务级单发与真实快照）外的全部登记
- * name各产出一条字典合法事实，走真实准入→队列→writer→封存→outbox管线；优雅关闭排空
- * 后从.ready/.claimed还原并断言：
+ * name各产出至少一条字典合法事实，走真实准入→队列→writer→单文件追加→outbox管线；
+ * 优雅关闭排空后从唯一的 `<scope-id>-<producer-id>.jsonl` 还原并断言：
  *
- *  - **30个登记name全部落盘**（27个经自检 + started/shutdown/health由服务自然产出）；
+ *  - **31个登记name全部落盘**（28个经自检 + started/shutdown/health由服务自然产出）；
  *  - 每个name的kind/channel/purposes与事件字典投影一致（含error族计数critical/metrics与
- *    详情diagnostic/logs两形态分道）；7种kind齐备；两通道目录均有封存文件；
+ *    详情diagnostic/logs两形态分道）；7种kind齐备；
+ *  - **critical/diagnostic两通道行在同一追加文件内，seq按通道各自连续**（追加协议无封存
+ *    节奏断言——通道不再是目录，唯一的线格式节律由seq连续性与优雅关闭末条shutdown表达）；
  *  - 自检事实带workspace_id=ws-selftest标记，与自然事实可区分（人工检查入口）；
  *  - 完整§6.1线格式校验（独立副本契约，同StabilityE2eTest原则：不依赖插件模块类）；
- *  - **落盘文件保留**：outbox全树+登记+控制文件复制到`out/stability-evidence/dictionary/`
- *    供人工检查（沙箱目录同名重跑会被清空，evidence目录才是稳定保留点）。
+ *  - **落盘文件保留**：outbox全树+控制文件复制到`out/stability-evidence/dictionary/`
+ *    供人工检查（telemetry home随tearDown清除，evidence目录才是稳定保留点）。
  */
 class StabilityDictionaryE2eTest : IntegrationTestBase() {
 
@@ -42,6 +44,9 @@ class StabilityDictionaryE2eTest : IntegrationTestBase() {
     private val accountEpoch = "acct-e2e-dict"
 
     private val uuidRegex = Regex("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+
+    /** 平铺追加文件名（§5.2）：`<scope-id>-<producer-id>.jsonl`，两段id各12个十六进制字符。 */
+    private val outboxFileRegex = Regex("^sc-[0-9a-f]{12}-pr-[0-9a-f]{12}\\.jsonl$")
 
     private val factFieldNames = setOf(
         "schema_version", "event_id", "timestamp", "producer_id", "run_id", "channel", "seq",
@@ -61,9 +66,9 @@ class StabilityDictionaryE2eTest : IntegrationTestBase() {
     private val phaseValues = setOf("start", "progress", "end")
     private val endKinds = setOf("app_close", "unload")
 
-    /** 30个登记name（设计§9字典）。 */
+    /** 31个登记name（设计§9字典，含经真实StallMerger驱动的edt.stall）。 */
     private val registeredNames = setOf(
-        "rpc", "render.apply", "edt.delay", "resource.snapshot", "availability",
+        "rpc", "render.apply", "edt.delay", "edt.stall", "resource.snapshot", "availability",
         "migration.required", "session.dispose_risk",
         "plugin.started", "plugin.shutdown", "plugin.unclean", "toolwindow.setup", "backend.load",
         "plugin.readiness", "connection", "connection.attempt", "connection.state_changed", "connection.recovery",
@@ -84,23 +89,24 @@ class StabilityDictionaryE2eTest : IntegrationTestBase() {
     }
 
     private val metricsOnlyNames = setOf(
-        "rpc", "render.apply", "edt.delay", "resource.snapshot", "availability", "migration.required", "session.dispose_risk",
+        "rpc", "render.apply", "edt.delay", "edt.stall", "resource.snapshot", "availability",
+        "migration.required", "session.dispose_risk",
     )
 
     private fun kindOf(name: String): String = when (name) {
         "connection.state_changed", "migration.required", "session.dispose_risk" -> "transition"
         "plugin.started", "plugin.shutdown", "plugin.unclean" -> "lifecycle"
         "availability" -> "interval"
-        "edt.delay", "render.apply", "resource.snapshot" -> "sample"
+        "edt.delay", "edt.stall", "render.apply", "resource.snapshot" -> "sample"
         "protocol.error", "edt.violation" -> "diagnostic"
         "telemetry.health" -> "health"
         else -> "operation"
     }
 
-    /** 只有自检动作会产出的事实（轮询触发成功的确定性判据）。 */
+    /** 只有自检动作会产出的事实（轮询触发成功的确定性判据；edt.stall经真实StallMerger产出）。 */
     private val sweepExclusiveNames = setOf(
         "plugin.unclean", "migration.required", "csc.install", "csc.start", "cli.download",
-        "session.dispose_risk", "protocol.error", "edt.violation", "render.apply",
+        "session.dispose_risk", "protocol.error", "edt.violation", "render.apply", "edt.stall",
     )
 
     private val json = Json
@@ -113,50 +119,50 @@ class StabilityDictionaryE2eTest : IntegrationTestBase() {
     fun `every registered fact type lands on disk in a real ide and files are preserved`() {
         writeControlFile()
         val launchMs = System.currentTimeMillis()
-        lateinit var registration: Registration
+        lateinit var jsonl: Path
 
         runPluginIde(
             testName = "stabilityE2eDictionary",
             extraSystemProperties = mapOf("costrict.stability.selftest" to "true"),
         ) {
             awaitColdStartReady()
-            registration = awaitRegistration()
-            val outbox = registration.outboxPath
-            println("[dict] registration: ${registration.producerId}")
+            jsonl = awaitOutboxFile(timeoutMs = 75_000)
+            println("[dict] outbox file: ${jsonl.fileName}")
 
-            // run活跃且封存已在工作（自然事实流：started/readiness/connection/availability/
-            // rpc/edt.delay/toolwindow.setup/backend.load/health/resource.snapshot）
-            awaitFirstSealed(outbox, timeoutMs = 75_000)
-
-            // —— 全字典自检：隐藏动作经真实管线入队27个登记name ——
+            // —— 全字典自检：隐藏动作经真实管线入队28个登记name ——
             invokeAction("Kilo.StabilitySelfTest")
-            awaitSweepFacts(outbox, timeoutMs = 90_000)
+            awaitSweepFacts(timeoutMs = 90_000)
             println("[dict] sweep facts visible after ${System.currentTimeMillis() - launchMs}ms")
 
             // 健康摘要（服务自然产出，30秒节奏）至少一份后收尾
-            awaitHealthFact(outbox, timeoutMs = 60_000)
+            awaitHealthFact(timeoutMs = 60_000)
             Thread.sleep(5_000) // 排空余量
         }
         val closeMs = System.currentTimeMillis()
-        val outbox = registration.outboxPath
 
-        // —— 优雅关闭排空：无.open残留，两通道都留有封存文件 ——
-        assertTrue(segmentFiles(outbox, setOf("open")).isEmpty(), "no .open segment may remain after a graceful close")
-        val sealedByChannel = segmentFiles(outbox, setOf("ready", "claimed"))
-            .groupBy { it.parent.fileName.toString() }
-        assertTrue(sealedByChannel["critical"].orEmpty().isNotEmpty(), "critical channel must keep sealed files")
-        assertTrue(
-            sealedByChannel["diagnostic"].orEmpty().isNotEmpty(),
-            "diagnostic channel must keep sealed files (error details)",
-        )
+        // —— 追加协议布局：优雅关闭后唯一平铺jsonl，critical/diagnostic两通道行同文件 ——
+        val jsonlFiles = outboxJsonlFiles()
+        assertEquals(1, jsonlFiles.size, "exactly one producer fact file must remain after a graceful close")
+        assertEquals(jsonl.fileName.toString(), jsonlFiles.single().fileName.toString(), "the file name must be stable")
+        assertNoForeignEntries()
 
-        // —— 全量线格式 + 字典形态校验 ——
-        val facts = readFacts(segmentFiles(outbox, setOf("ready", "claimed")))
-        assertTrue(facts.isNotEmpty(), "facts must be sealed on disk")
+        // —— 全量线格式 + 字典形态校验（seq按通道各自连续是校验的一部分）——
+        val facts = readFacts(listOf(jsonl))
+        assertTrue(facts.isNotEmpty(), "facts must be recorded on disk")
         val failures = validateFacts(facts, launchMs - 10_000, closeMs + 10_000)
         assertTrue(failures.isEmpty(), "violations:\n${failures.joinToString("\n")}")
 
-        // —— 30个登记name全部落盘（27自检 + started/shutdown/health自然）——
+        // —— critical/diagnostic两通道行均在同一文件且seq各自连续（封存节奏断言的替代）——
+        val criticalRows = facts.filter { it.channel == "critical" }
+        val diagnosticRows = facts.filter { it.channel == "diagnostic" }
+        assertTrue(criticalRows.isNotEmpty(), "critical channel rows must be present")
+        assertTrue(diagnosticRows.isNotEmpty(), "diagnostic channel rows must be present in the SAME file")
+        assertTrue(
+            diagnosticRows.all { it.file == criticalRows.first().file },
+            "both channels' rows must live in the single append file",
+        )
+
+        // —— 31个登记name全部落盘（28自检 + started/shutdown/health自然）——
         val missing = registeredNames - facts.map { it.name }.toSet()
         assertTrue(missing.isEmpty(), "every registered name must land on disk; missing: $missing")
 
@@ -172,12 +178,11 @@ class StabilityDictionaryE2eTest : IntegrationTestBase() {
         }
         assertTrue(formViolations.isEmpty(), "dictionary form violations:\n${formViolations.joinToString("\n")}")
 
-        // —— 7种kind齐备；purposes三类投影齐备（metrics-only/logs-only/dual）——
+        // —— 7种kind齐备；purposes两类投影齐备（metrics-only/dual；logs-only仅error详情）——
         assertEquals(kinds, facts.map { it.kind }.toSet(), "all 7 kinds must appear on disk")
         assertTrue(
-            facts.any { it.purposes == metricsOnly } && facts.any { it.purposes == setOf("logs") } &&
-                facts.any { it.purposes == dual },
-            "metrics-only, logs-only and dual purposes projections must all be present",
+            facts.any { it.purposes == metricsOnly } && facts.any { it.purposes == dual },
+            "metrics-only and dual purposes projections must be present",
         )
 
         // —— error族两形态分道且同一fault_id关联 ——
@@ -194,11 +199,12 @@ class StabilityDictionaryE2eTest : IntegrationTestBase() {
             "a detail fact must reference the same fault_id as its count fact",
         )
 
-        // —— M22 lifecycle：恰1条started、1条shutdown(app_close) ——
+        // —— M22 lifecycle：恰1条started、1条shutdown(app_close)且为物理末行 ——
         assertEquals(1, facts.count { it.name == "plugin.started" })
         val shutdowns = facts.filter { it.name == "plugin.shutdown" }
         assertEquals(1, shutdowns.size)
         assertEquals("app_close", shutdowns.single().obj["data"]!!.jsonObject["end_kind"]!!.jsonPrimitive.content)
+        assertEquals(facts.size, shutdowns.single().lineNo, "the graceful close must append plugin.shutdown as the final record")
 
         // —— 自检标记：sweep事实带ws-selftest（人工检查时可与自然事实区分）——
         assertTrue(
@@ -208,17 +214,17 @@ class StabilityDictionaryE2eTest : IntegrationTestBase() {
             "the self-test sweep must tag its facts with workspace_id=ws-selftest",
         )
 
-        // —— 人工检查留档：outbox全树 + telemetry home（登记+控制文件）——
-        preserveEvidence(registration, facts)
+        // —— 人工检查留档：outbox全树 + telemetry home（控制文件）——
+        preserveEvidence(jsonl, facts)
     }
 
     // ------------------------------------------------------------------
-    // Control file (§8) & registration (§5.2) — same wire shape as StabilityE2eTest
+    // Control file (§8) — same wire shape as StabilityE2eTest
     // ------------------------------------------------------------------
 
-    private fun controlFile(): Path = cloud.parent.resolve("telemetry").resolve("control").resolve("jetbrains.json")
+    private fun telemetryHome(): Path = cloud.parent.resolve("telemetry")
 
-    private fun registrationsDir(): Path = cloud.parent.resolve("telemetry").resolve("registrations")
+    private fun controlFile(): Path = telemetryHome().resolve("control").resolve("jetbrains.json")
 
     private fun writeControlFile() {
         val expiresAt = System.currentTimeMillis() + TimeUnit.HOURS.toMillis(2)
@@ -245,52 +251,45 @@ class StabilityDictionaryE2eTest : IntegrationTestBase() {
         )
     }
 
-    private data class Registration(val producerId: String, val outboxPath: Path)
+    // ------------------------------------------------------------------
+    // Append outbox layout & facts
+    // ------------------------------------------------------------------
 
-    private fun awaitRegistration(timeoutMs: Long = 75_000): Registration {
-        val deadline = System.currentTimeMillis() + timeoutMs
-        while (System.currentTimeMillis() < deadline) {
-            val dir = registrationsDir()
-            val file = if (Files.isDirectory(dir)) {
-                Files.list(dir).use { stream ->
-                    stream.filter { it.fileName.toString().endsWith(".json") }.findFirst().orElse(null)
-                }
-            } else {
-                null
+    private fun outboxDir(): Path = telemetryHome().resolve("outbox")
+
+    private fun outboxJsonlFiles(): List<Path> =
+        if (Files.isDirectory(outboxDir())) {
+            Files.list(outboxDir()).use { stream ->
+                stream.filter { file ->
+                    Files.isRegularFile(file) && outboxFileRegex.matches(file.fileName.toString())
+                }.toList()
             }
-            if (file != null) {
-                val root = json.parseToJsonElement(Files.readString(file)).jsonObject
-                assertTrue(
-                    root["outbox_path"] != null && root["producer_id"] != null,
-                    "registration must carry outbox_path and producer_id",
-                )
-                return Registration(
-                    producerId = root["producer_id"]!!.jsonPrimitive.content,
-                    outboxPath = Path.of(root["outbox_path"]!!.jsonPrimitive.content),
-                )
-            }
-            Thread.sleep(1_000)
+        } else {
+            emptyList()
         }
-        throw AssertionError("no producer registration appeared within ${timeoutMs}ms")
+
+    /** 追加布局守卫：无登记目录、无producer.json、无锁文件与状态机后缀（§5.2/§3.1）。 */
+    private fun assertNoForeignEntries() {
+        val home = telemetryHome()
+        assertFalse(Files.exists(home.resolve("registrations")), "the append protocol keeps no registrations directory")
+        val names = if (Files.isDirectory(outboxDir())) {
+            Files.list(outboxDir()).use { it.map { p -> p.fileName.toString() }.toList() }
+        } else {
+            emptyList()
+        }
+        names.forEach { name ->
+            assertTrue(outboxFileRegex.matches(name), "unexpected outbox entry (locks/registries are gone): $name")
+        }
     }
 
-    // ------------------------------------------------------------------
-    // Segment files & facts
-    // ------------------------------------------------------------------
-
-    private fun segmentFiles(outbox: Path, suffixes: Set<String> = setOf("ready", "claimed", "open")): List<Path> =
-        channels.flatMap { channel ->
-            val dir = outbox.resolve(channel)
-            if (Files.isDirectory(dir)) {
-                Files.list(dir).use { stream ->
-                    stream.filter { file ->
-                        Files.isRegularFile(file) && suffixes.any { file.fileName.toString().endsWith(it) }
-                    }.toList()
-                }
-            } else {
-                emptyList()
-            }
+    private fun awaitOutboxFile(timeoutMs: Long): Path {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < deadline) {
+            outboxJsonlFiles().firstOrNull()?.let { return it }
+            Thread.sleep(1_000)
         }
+        throw AssertionError("no producer jsonl appeared within ${timeoutMs}ms")
+    }
 
     private data class FactLine(
         val file: Path,
@@ -342,7 +341,7 @@ class StabilityDictionaryE2eTest : IntegrationTestBase() {
         return facts
     }
 
-    /** §6.1 wire invariants（独立副本，同StabilityE2eTest口径）。 */
+    /** §6.1 wire invariants（独立副本，同StabilityE2eTest口径；seq按run+channel各自连续）。 */
     private fun validateFacts(facts: List<FactLine>, windowStartMs: Long, windowEndMs: Long): List<String> {
         val failures = mutableListOf<String>()
         fun fail(message: String) {
@@ -364,7 +363,6 @@ class StabilityDictionaryE2eTest : IntegrationTestBase() {
             if (!uuidRegex.matches(fact.eventId)) fail("$where: event_id is not a UUID")
             if (fact.timestamp < windowStartMs || fact.timestamp > windowEndMs) fail("$where: timestamp outside window")
             if (fact.channel !in channels) fail("$where: channel ${fact.channel}")
-            if (fact.file.parent.fileName.toString() != fact.channel) fail("$where: channel field disagrees with directory")
             if (fact.seq < 1) fail("$where: seq must start at 1")
             if (obj["account_epoch"]?.jsonPrimitive?.content != accountEpoch) fail("$where: unexpected account_epoch")
             if (obj["policy_revision"]?.jsonPrimitive?.longOrNull != 1L) fail("$where: policy_revision must be 1")
@@ -412,11 +410,11 @@ class StabilityDictionaryE2eTest : IntegrationTestBase() {
     }
 
     // ------------------------------------------------------------------
-    // Polls (tolerant mid-run scan of .open + sealed files)
+    // Polls (tolerant mid-run scan of the live append file)
     // ------------------------------------------------------------------
 
-    private fun tolerantNames(outbox: Path): Set<String> =
-        segmentFiles(outbox).flatMap { file ->
+    private fun tolerantNames(): Set<String> =
+        outboxJsonlFiles().flatMap { file ->
             val bytes = Files.readAllBytes(file)
             if (bytes.isEmpty()) return@flatMap emptyList()
             val text = bytes.toString(Charsets.UTF_8)
@@ -429,47 +427,38 @@ class StabilityDictionaryE2eTest : IntegrationTestBase() {
                 .toList()
         }.toSet()
 
-    private fun awaitSweepFacts(outbox: Path, timeoutMs: Long) {
+    private fun awaitSweepFacts(timeoutMs: Long) {
         val deadline = System.currentTimeMillis() + timeoutMs
         while (System.currentTimeMillis() < deadline) {
-            val names = tolerantNames(outbox)
+            val names = tolerantNames()
             val missing = sweepExclusiveNames - names
             if (missing.isEmpty()) return
             Thread.sleep(1_000)
         }
         throw AssertionError(
-            "self-test sweep facts not visible within ${timeoutMs}ms; missing: ${sweepExclusiveNames - tolerantNames(outbox)}",
+            "self-test sweep facts not visible within ${timeoutMs}ms; missing: ${sweepExclusiveNames - tolerantNames()}",
         )
     }
 
-    private fun awaitHealthFact(outbox: Path, timeoutMs: Long) {
+    private fun awaitHealthFact(timeoutMs: Long) {
         val deadline = System.currentTimeMillis() + timeoutMs
         while (System.currentTimeMillis() < deadline) {
-            if ("telemetry.health" in tolerantNames(outbox)) return
+            if ("telemetry.health" in tolerantNames()) return
             Thread.sleep(1_000)
         }
         throw AssertionError("telemetry.health never appeared within ${timeoutMs}ms")
-    }
-
-    private fun awaitFirstSealed(outbox: Path, timeoutMs: Long): Path {
-        val deadline = System.currentTimeMillis() + timeoutMs
-        while (System.currentTimeMillis() < deadline) {
-            segmentFiles(outbox, setOf("ready")).firstOrNull()?.let { return it }
-            Thread.sleep(1_000)
-        }
-        throw AssertionError("no .ready segment appeared within ${timeoutMs}ms")
     }
 
     // ------------------------------------------------------------------
     // Evidence retention (manual inspection)
     // ------------------------------------------------------------------
 
-    private fun preserveEvidence(registration: Registration, facts: List<FactLine>) {
+    private fun preserveEvidence(jsonl: Path, facts: List<FactLine>) {
         val evidenceRoot = Path.of("out", "stability-evidence", "dictionary").toAbsolutePath()
         evidenceRoot.toFile().deleteRecursively()
         val outboxCopy = Files.createDirectories(evidenceRoot.resolve("outbox"))
-        copyTree(registration.outboxPath, outboxCopy)
-        val home = cloud.parent.resolve("telemetry")
+        copyTree(outboxDir(), outboxCopy)
+        val home = telemetryHome()
         if (Files.isDirectory(home)) copyTree(home, Files.createDirectories(evidenceRoot.resolve("telemetry-home")))
 
         println("[dict] evidence kept at $evidenceRoot (outbox + telemetry-home)")
@@ -499,7 +488,7 @@ class StabilityDictionaryE2eTest : IntegrationTestBase() {
                 }
             },
         )
-        println("[dict] per-name samples: $samples")
+        println("[dict] per-name samples (31 names incl. edt.stall): $samples")
     }
 
     private fun copyTree(source: Path, dest: Path) {

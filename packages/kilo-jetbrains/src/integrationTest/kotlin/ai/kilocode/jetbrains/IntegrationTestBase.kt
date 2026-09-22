@@ -28,6 +28,7 @@ import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.BeforeEach
 import org.kodein.di.DI
 import org.kodein.di.bindSingleton
+import kotlinx.coroutines.runBlocking
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.Paths
@@ -162,6 +163,7 @@ abstract class IntegrationTestBase {
     protected fun runPluginIde(
         testName: String,
         extraSystemProperties: Map<String, String> = emptyMap(),
+        hardKill: Boolean = false,
         driverAssertions: Driver.() -> Unit,
     ): IDEStartResult {
         val zipPath = requireNotNull(System.getProperty("path.to.build.plugin")) {
@@ -185,7 +187,25 @@ abstract class IntegrationTestBase {
         // the IDE run (ExecTimeoutException "due to a dialog being shown").
         context.ide.vmOptions.addSystemProperty("evaluation.feedback.enabled", "false")
         extraSystemProperties.forEach { (name, value) -> context.ide.vmOptions.addSystemProperty(name, value) }
-        return context.runIdeWithDriver().useDriverAndCloseIde { driverAssertions() }
+        // hardKill=true ends the launch by force-killing the IDE process instead of the driver's
+        // graceful exitApplication: plugin.stop never runs, so no plugin.shutdown is recorded —
+        // the append-protocol unclean scenario needs a predecessor run that died without a
+        // shutdown. expectedKill/expectedExitCode=1 tell Starter that destroyForcibly's exit
+        // code 1 is the expected outcome rather than a launch failure.
+        val run = context.runIdeWithDriver(
+            expectedKill = hardKill,
+            expectedExitCode = if (hardKill) 1 else 0,
+        )
+        return if (hardKill) {
+            try {
+                run.driver.withContext { driverAssertions() }
+            } finally {
+                if (run.process.isAlive) run.forceKill()
+            }
+            runBlocking { run.startResult.await() }
+        } else {
+            run.useDriverAndCloseIde { driverAssertions() }
+        }
     }
 
     /**
