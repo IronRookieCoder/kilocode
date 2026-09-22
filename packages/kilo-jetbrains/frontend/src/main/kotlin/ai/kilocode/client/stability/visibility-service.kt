@@ -23,6 +23,11 @@ import java.awt.event.HierarchyEvent
 import java.awt.event.HierarchyListener
 import java.util.UUID
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.emptyFlow
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -51,12 +56,13 @@ internal fun interface PanelVisibilitySource {
 }
 
 /**
- * consumer事件：refresh携带EDT读取的UI快照（可见性并集、IDE前台、最新状态），[tick]
+ * consumer事件：refresh携带EDT读取的UI快照；app状态事件的可见性/前台为null，复用
+ * consumer已收到的UI快照。两者经同一FIFO处理，[tick]
  * 标记30秒切片事件；[pause]是挂起/休眠/调度中断信号（丢弃在途区间，不产出事实）。
  */
 private class Event(
-    val visible: Boolean,
-    val foreground: Boolean,
+    val visible: Boolean?,
+    val foreground: Boolean?,
     val state: String,
     val tick: Boolean,
     val pause: Boolean,
@@ -73,6 +79,7 @@ private class Event(
  * - [ToolWindowManagerListener]公开[stateChanged]（只覆盖单参公开重载，不碰internal
  *   带事件类型参数的重载）：工具窗显示/隐藏。
  * - 已有组件的[HierarchyListener]：挂接在工具窗根组件上，补齐showing层级变化。
+ * - app状态流：仅将status/profile推导出的可用性变化送入同一consumer，不读取Swing。
  *
  * 线程纪律：回调若不在EDT，经[ToolWindowManager.invokeLater]路由到EDT再读可见性；
  * EDT只读UI快照并入队（trySend非阻塞），由[cs]上**单一**consumer按FIFO顺序apply并
@@ -99,6 +106,7 @@ internal class VisibilityService(
     private val tickPeriodMs: Long,
     private val workspaceId: String,
     private val probeHost: EdtProbeService? = null,
+    private val states: Flow<KiloAppStateDto> = emptyFlow(),
 ) : Disposable {
 
     /** Platform constructor — resolves collaborators from the service container. */
@@ -111,10 +119,14 @@ internal class VisibilityService(
         tickPeriodMs = TICK_PERIOD_MS,
         workspaceId = newWorkspaceId(),
         probeHost = service<EdtProbeService>(),
+        states = service<KiloAppService>().state,
     )
 
     private val availability = Availability(clock) { draft -> operations()?.record(draft) }
     private val events = Channel<Event>(Channel.BUFFERED)
+    // 仅consumer读写；app状态事件复用最近的EDT可见性快照，无需跨线程读取Swing。
+    private var visible = false
+    private var active = false
 
     /** EDT-only：面板可见性来源（每attach的面板一个），并集判定。 */
     private val visibilitySources = mutableSetOf<PanelVisibilitySource>()
@@ -124,6 +136,7 @@ internal class VisibilityService(
 
     /** dispose后拒绝迟到的consumer事件重新打开探针贡献（项目关闭后贡献只能撤除）。 */
     @Volatile private var disposed = false
+    private val subscription: Job
 
     init {
         project.messageBus.connect(this).subscribe(
@@ -141,6 +154,11 @@ internal class VisibilityService(
             },
         )
         cs.launch { for (event in events) apply(event) }
+        subscription = cs.launch {
+            states.map(::availabilityState).distinctUntilChanged().collect { state ->
+                events.send(Event(null, null, state, tick = false, pause = false))
+            }
+        }
         cs.launch {
             while (true) {
                 delay(tickPeriodMs)
@@ -206,8 +224,10 @@ internal class VisibilityService(
         routeToEdt(tick = false)
     }
 
+    @RequiresEdt
     override fun dispose() {
         disposed = true
+        subscription.cancel()
         // C3：项目关闭即撤除探针贡献；若它曾是最后一个活跃贡献，JVM探针随之关闭
         // （pending按unknown作废并轮换区间），多项目时任一存活项目保持探针开启。
         probeHost?.setActive(this, false)
@@ -218,30 +238,34 @@ internal class VisibilityService(
 
     /** 非EDT回调统一经ToolWindowManager.invokeLater路由；已在EDT则直接读快照。 */
     private fun routeToEdt(tick: Boolean) {
+        if (disposed) return
         val application = ApplicationManager.getApplication() ?: return
         if (application.isDispatchThread) {
             refresh(tick)
-        } else {
-            runCatching { ToolWindowManager.getInstance(project).invokeLater { refresh(tick) } }
+            return
         }
+        ToolWindowManager.getInstance(project).invokeLater { refresh(tick) }
     }
 
     /** EDT只读UI快照：可见性并集 + 最新状态，随后入队交后台record（绝不在此触碰区间）。 */
     @RequiresEdt
     private fun refresh(tick: Boolean) {
+        if (disposed) return
         val visible = visibilitySources.any { source -> source.isVisible() }
         events.trySend(Event(visible, foreground, stateSource(), tick, pause = false))
     }
 
     /** consumer线程（唯一区间演进点）：先按快照推进状态机，tick再切片，pause只丢弃。 */
     private fun apply(event: Event) {
+        visible = event.visible ?: visible
+        active = event.foreground ?: active
         if (event.pause) {
             availability.pause()
             return
         }
-        availability.update(workspaceId, event.visible, event.foreground, event.state)
+        availability.update(workspaceId, visible, active, event.state)
         // C3：本项目"任一面板可见且IDE前台"作为M20探针贡献推送（JVM级并集见EdtProbeService）。
-        if (!disposed) probeHost?.setActive(this, event.visible && event.foreground)
+        if (!disposed) probeHost?.setActive(this, visible && active)
         if (event.tick) availability.tick()
     }
 }

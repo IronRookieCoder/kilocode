@@ -1153,6 +1153,9 @@ class KiloCliDataParserTest {
 
         @Test
         fun `parseStrings accepts arrays and wrapped arrays`() {
+            assertFailsWith<kotlinx.serialization.SerializationException> {
+                KiloCliDataParser.parseStrings("""{"ok":"true","data":["src/Main.kt"]}""")
+            }
             assertEquals(listOf("src/Main.kt"), KiloCliDataParser.parseStrings("""["src/Main.kt"]"""))
             assertEquals(listOf("src/Main.kt"), KiloCliDataParser.parseStrings("""{"ok":true,"data":["src/Main.kt"]}"""))
             assertFailsWith<kotlinx.serialization.SerializationException> {

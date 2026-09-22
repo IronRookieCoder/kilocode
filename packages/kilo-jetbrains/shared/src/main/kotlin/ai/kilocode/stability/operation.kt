@@ -77,17 +77,21 @@ internal class Terminal(
  * 定时器（到点仍结算timeout），业务先完成则取消定时器（不再产生第二条终态）。总撤销
  * （策略失效/shutdown）时end照常结算，只是记录被禁采丢弃，不伪造正常shutdown。
  */
-class Operations(
+class Operations internal constructor(
     internal val recorder: Recorder,
     internal val clock: Clock,
     private val scope: CoroutineScope,
+    private val current: (() -> Operations?)?,
 ) {
+    constructor(recorder: Recorder, clock: Clock, scope: CoroutineScope) : this(recorder, clock, scope, null)
+
     fun begin(
         name: String,
         deadline: Long,
         fields: JsonObject = JsonObject(emptyMap()),
         context: Map<String, String> = emptyMap(),
     ): Operation {
+        current?.invoke()?.let { return it.begin(name, deadline, fields, context) }
         val startMono = clock.mono()
         val snapshot = recorder.beginSnapshot(clock.wall(), name)
         // 调用方预置的operation_id（如attempt挂在逻辑连接旅程上，设计6.2"同时保留逻辑
@@ -143,7 +147,7 @@ class Operations(
      * [Draft]转发到其同一[Recorder]，避免测试读到另一全局recorder实例。准入仍由
      * recorder把守（禁采/DISABLED语义与直接record一致），本方法不记录operation相位。
      */
-    fun record(draft: Draft): Admission = recorder.record(draft)
+    fun record(draft: Draft): Admission = current?.invoke()?.record(draft) ?: recorder.record(draft)
 }
 
 /** 一次逻辑操作的句柄：终态唯一，progress永不终结；采集被禁不影响业务推进。 */

@@ -256,7 +256,7 @@ class Writer(
             droppedPolicy.incrementAndGet()
             return null
         }
-        val permitted = policy?.permit(clock.wall(), fact.name) ?: emptySet()
+        val permitted = policy.permit(clock.wall(), fact.name, category(fact.channel, fact.data))
         if (permitted.none { it in fact.purposes }) {
             droppedPolicy.incrementAndGet()
             return null

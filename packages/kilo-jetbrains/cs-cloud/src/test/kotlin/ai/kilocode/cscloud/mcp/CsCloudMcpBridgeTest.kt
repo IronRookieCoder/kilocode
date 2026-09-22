@@ -12,6 +12,8 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.async
+import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.OkHttpClient
@@ -32,6 +34,63 @@ import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
 class CsCloudMcpBridgeTest {
+    @Test
+    fun `cancellation during bind closes listener clears generation and records cancelled`() = runBlocking {
+        val entered = CompletableDeferred<Unit>()
+        val release = java.util.concurrent.CountDownLatch(1)
+        val closed = CompletableDeferred<Unit>()
+        val server = MockWebServer()
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse {
+                if (request.method == "PUT") {
+                    entered.complete(Unit)
+                    check(release.await(10, TimeUnit.SECONDS))
+                    return MockResponse().setBody("{}")
+                }
+                if (request.method == "DELETE") return MockResponse().setResponseCode(200)
+                return MockResponse().setBody("""{"capabilities":["conversation_ide_capability_v1"]}""")
+            }
+        }
+        server.start()
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        Fixture().use { fixture ->
+            val source = object : IdeMcpSessionFactory {
+                override fun enabled(allow: Set<String>) = setOf("read_file")
+                override suspend fun open(tools: Set<String>, ready: suspend (IdeMcpTransport) -> Nothing): Nothing {
+                    try {
+                        ready(IdeMcpTransport(49152, "X-Test-Auth", "test-token"))
+                    } finally {
+                        closed.complete(Unit)
+                    }
+                }
+            }
+            val bridge = CsCloudMcpBridge(
+                scope, { CsCloudEndpoint(server.url("/").toString().trimEnd('/'), null) },
+                { OkHttpClient() }, { 1 }, source, TestLog(), { it }, fixture.operations,
+            )
+            try {
+                val pending = async { bridge.ensure("conv-cancel", fixture.base.toString()) }
+                withTimeout(10_000) { entered.await() }
+                pending.cancel()
+                release.countDown()
+                withTimeout(10_000) { pending.join() }
+                assertTrue(closed.isCompleted, "listener must be closed before cancellation completes")
+                val requests = server.drain()
+                val bind = requests.single { it.method == "PUT" }
+                val generation = GENERATION.find(bind.body.readUtf8())?.groupValues?.get(1)
+                assertEquals(generation, requests.single { it.method == "DELETE" }.requestUrl?.queryParameter("generation"))
+                fixture.flush()
+                val facts = fixture.facts().filter { it.name == "ide.operation" }
+                assertEquals(listOf("start", "end"), facts.map { it.data.getValue("phase").jsonPrimitive.content })
+                assertEquals("cancelled", facts.last().data.getValue("result").jsonPrimitive.content)
+                assertEquals(facts.first().context["operation_id"], facts.last().context["operation_id"])
+            } finally {
+                release.countDown()
+                scope.cancel()
+                server.shutdown()
+            }
+        }
+    }
     @Test
     fun `lease cancellation is not logged as a failure`() = runBlocking {
         val ready = CompletableDeferred<IdeMcpTransport>()

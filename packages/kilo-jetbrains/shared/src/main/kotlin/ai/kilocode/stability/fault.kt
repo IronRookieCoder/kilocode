@@ -31,8 +31,7 @@ private const val CLASS_NPE = "npe"
 private const val CLASS_ILLEGAL_STATE = "illegal_state"
 private const val CLASS_OTHER = "other"
 
-/** 详情限频（设计11.1）：每fingerprint每分钟最多3份，窗口按wall时钟分钟切分。 */
-private const val DETAILS_PER_WINDOW = 3
+/** 详情限频（设计11.1）：每fingerprint按策略配额，窗口按wall时钟分钟切分。 */
 private const val WINDOW_MS = 60_000L
 
 /** 白名单帧数上限（brief片段take(5)，与字典frames列表maxItems一致）。 */
@@ -86,8 +85,8 @@ private data class CountFact(
  * 只哈希插件类/方法帧（无文件名、行号、原message、cause或完整堆栈），原始异常文本绝不入事实。
  *
  * 去重：fault_id在故障边界生成并由调用方跨重复报告传递，同fault只计一次；去重缓存有界
- * （FIFO淘汰）且随本实例与run同生命周期。限频：每fingerprint每分钟至多[DETAILS_PER_WINDOW]
- * 份详情，超出次数在下一窗口由后续[report]惰性冲刷为一条count=N的固定摘要（仅logs出口，
+ * （FIFO淘汰）且随本实例与run同生命周期。限频：每fingerprint每分钟使用当前策略的详情
+ * 配额，超出次数在下一窗口由后续[report]惰性冲刷为一条count=N的固定摘要（仅logs出口，
  * 不计入异常指标；无后续报告则不生成——本类无后台线程）。限频键表容量[maxRateKeys]
  * （生产默认1024），满后新fingerprint的计数照常、详情归固定overflow摘要。
  *
@@ -132,6 +131,7 @@ class Faults(
                     component = component,
                 ),
             )
+            if (recorder.limit(name) == 0) return
             val state = windows[fingerprint]
             if (state != null) {
                 state.name = name
@@ -204,8 +204,7 @@ class Faults(
         if (windows.size < rateKeys) {
             state.window = window
             windows[state.fingerprint] = state
-            emitDetail(state, fault)
-            state.details = 1
+            tallyLocked(state, window, fault)
         } else {
             tallyOverflowLocked(window)
         }
@@ -216,7 +215,9 @@ class Faults(
             state.window = window
             state.details = 0
         }
-        if (state.details < DETAILS_PER_WINDOW) {
+        val limit = recorder.limit(state.name)
+        if (limit == 0) return
+        if (state.details < limit) {
             state.details += 1
             emitDetail(state, fault)
         } else {

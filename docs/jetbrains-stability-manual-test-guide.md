@@ -243,7 +243,7 @@ RPC 终态复测：测试 RPC 时须保持 metrics 许可至少超过其 deadlin
 
 ### 8.3 触发后核对
 
-自检事实统一带 `context.workspace_id="ws-selftest"`；error 族用显式 `fault_id`（`fault-selftest-reported`/`fault-selftest-uncaught`）辨识，可与自然事实区分。
+多数自检操作和直接构造的事实带 `context.workspace_id="ws-selftest"`。例外：error 族不带 workspace，以显式 `fault_id`（`fault-selftest-reported`/`fault-selftest-uncaught`）辨识；`resource.snapshot` 是进程级资源计数，不带 workspace，按触发时间及 `resource` 对照；真实 `StallMerger` 生成的 `edt.stall` 也不带 workspace，以 `data.observation_id="obs-selftest"` 和 `duration_ms=2500` 辨识。不要只筛选 workspace，否则会漏掉这些自检事实。
 
 1. 触发后等 ≤ 40 秒（入队 + flush），按 §9 汇总 name 分布；
 2. 对照 §8.4 清单：28 个自检名字全部出现；`plugin.started`/`plugin.shutdown`/`telemetry.health` 由服务和后台自然产出——合计 31/31；
@@ -300,7 +300,14 @@ RPC 终态复测：测试 RPC 时须保持 metrics 许可至少超过其 deadlin
 # 读入所有追加式事实文件（容忍最后一条未写满的行）
 $files = Get-ChildItem -File -Filter *.jsonl | Sort-Object FullName
 $facts = foreach ($f in $files) {
-  Get-Content $f.FullName -Encoding UTF8 | Where-Object { $_ } | ForEach-Object { $_ | ConvertFrom-Json }
+  $text = [IO.File]::ReadAllText($f.FullName, [Text.Encoding]::UTF8)
+  $lines = $text.Split([char]10)
+  # 最后一项在末尾有 LF 时为空，否则是未完成尾行；两种情况均不解析。
+  for ($i = 0; $i -lt $lines.Length - 1; $i++) {
+    if ([string]::IsNullOrWhiteSpace($lines[$i])) { continue }
+    try { $lines[$i] | ConvertFrom-Json -ErrorAction Stop }
+    catch { Write-Error ("{0}:{1}: 完整 NDJSON 行格式错误" -f $f.FullName, ($i + 1)) -ErrorAction Continue }
+  }
 }
 
 # 1) name 分布（对照 §8.4）

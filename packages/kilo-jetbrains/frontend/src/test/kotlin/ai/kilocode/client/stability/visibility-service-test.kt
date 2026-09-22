@@ -1,6 +1,7 @@
 package ai.kilocode.client.stability
 
 import ai.kilocode.client.testing.TestCoroutines
+import ai.kilocode.client.app.KiloAppService
 import ai.kilocode.client.testing.pumpEdt
 import ai.kilocode.client.util.edtWait
 import ai.kilocode.rpc.dto.KiloAppStateDto
@@ -19,6 +20,7 @@ import java.util.concurrent.TimeUnit
 import kotlin.concurrent.thread
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.long
+import kotlinx.coroutines.flow.emptyFlow
 
 /**
  * M13真实平台观察（brief Step 5）：在真实IDE测试基座里驱动[VisibilityService]的全链路
@@ -56,6 +58,7 @@ class VisibilityServiceTest : BasePlatformTestCase() {
         clock: MutableClock,
         state: () -> String = { "ready" },
         probeHost: EdtProbeService? = null,
+        app: KiloAppService? = null,
     ): VisibilityService {
         val testCoroutines = TestCoroutines().also { coroutines.add(it) }
         return VisibilityService(
@@ -63,11 +66,12 @@ class VisibilityServiceTest : BasePlatformTestCase() {
             cs = testCoroutines.scope,
             clock = clock,
             operations = { fixture.operations },
-            stateSource = state,
+            stateSource = { app?.let { availabilityState(it.state.value) } ?: state() },
             // 切片节奏远长于用例时长：tick语义由AvailabilityTest以纯时钟覆盖。
             tickPeriodMs = 600_000L,
             workspaceId = "ws-test",
             probeHost = probeHost,
+            states = app?.state ?: emptyFlow(),
         ).also { services.add(it) }
     }
 
@@ -143,8 +147,10 @@ class VisibilityServiceTest : BasePlatformTestCase() {
     fun `test availability state change closes blocked interval before ready interval`() {
         Fixture().use { fixture ->
             val clock = MutableClock()
-            var app = KiloAppStateDto(KiloAppStatusDto.READY)
-            val service = newService(fixture, clock, state = { availabilityState(app) })
+            val runtime = TestCoroutines()
+            val app = KiloAppService(runtime.scope, null)
+            app._state.value = KiloAppStateDto(KiloAppStatusDto.READY)
+            val service = newService(fixture, clock, app = app)
             try {
                 val panel = FlagSource()
                 edtWait { service.attachPanel(panel) }
@@ -154,11 +160,13 @@ class VisibilityServiceTest : BasePlatformTestCase() {
                 panel.visible = true
                 toolWindowChanged(service)
                 clock.now = 5_000
-                app = KiloAppStateDto(KiloAppStatusDto.READY, profile = ProfileDto(email = "user@example.com"))
-                toolWindowChanged(service)
+                app._state.value = KiloAppStateDto(KiloAppStatusDto.READY, profile = ProfileDto(email = "user@example.com"))
+                coroutines.single().drain()
+                fixture.flush()
+                assertEquals("blocked", availabilityFacts(fixture).single().data.getValue("state").jsonPrimitive.content)
                 clock.now = 9_000
-                panel.visible = false
-                toolWindowChanged(service)
+                app._state.value = KiloAppStateDto(KiloAppStatusDto.READY)
+                coroutines.single().drain()
                 fixture.flush()
 
                 val facts = availabilityFacts(fixture)
@@ -171,6 +179,7 @@ class VisibilityServiceTest : BasePlatformTestCase() {
                 assertEquals(9_000L, facts[1].data["end_timestamp"]?.jsonPrimitive?.long)
             } finally {
                 tearDownNow()
+                runtime.close()
             }
         }
     }

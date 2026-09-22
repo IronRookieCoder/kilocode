@@ -415,7 +415,7 @@ account_epoch是daemon给当前已验证账户/租户的随机本机代号，事
 
 kind=diagnostic只是数据形态；error/protocol/violation的最小计数事实写critical，受指标许可控制，不因详细日志限频丢计数。详细message/安全栈帧仅在日志许可允许时写diagnostic，引用相同fault_id但不同event_id，不能再次增加故障次数。
 
-当前实现对 `session.status` 与 file-search 的解码错误均写入一条 `protocol.error`，跨层重复解析不重复计数；包装型 file-search 正常响应不产出协议错误。实际连接建立后，provider hint 会写入本次及后续 run，`connection_provider` 不应保持 `unknown`。READY 但 profile 为空、或凭据缺失时，readiness/availability 以 `blocked` 表达；真实 MCP bind 以有界的 `ide.operation` start/end 记录成功、failure 或 blocked。
+当前实现对 `session.status`、SSE 信封字段形状与 file-search 的解码错误均写入一条 `protocol.error`，跨层重复解析不重复计数；包装型 file-search 正常响应不产出协议错误。provider hint 与 recorder 身份创建共用同步锁：创建 recorder 时冻结本次 run，之前到达的提示用于本次，writer 启动等待期间及之后到达的提示只用于下一次 run。长期消费者持有稳定 `Operations` 入口，新操作解析当前 run，已经开始的操作保留原 run。READY 但 profile 为空时，readiness/availability 以 `blocked` 表达，app 状态订阅即时切换可用性区间；真实 MCP bind 以有界的 `ide.operation` start/end 记录 success、failure、blocked 或 cancelled，未提交的监听器在所有退出路径回收，可能已接受的远端绑定按原 epoch/generation 清理。
 
 operation.end包含公共result、duration_ms、cause，未在表内逐行重复。非operation的环境变化、健康和样本字段按上述固定白名单校验，禁止透传任意对象。
 
@@ -485,7 +485,7 @@ info：正常生命周期和恢复；warn：可自愈退化、风险或采集丢
 
 message使用固定模板加安全枚举，禁止直接截取异常首行。原始异常可能含Token、代码、用户名和路径，截短不等于脱敏。v1不自动上传完整堆栈；最多5个脱敏插件类/方法帧和fingerprint提供归因，深度诊断包另行由用户明确导出。
 
-同fingerprint每分钟最多3份详情，额外次数汇入摘要；异常指标次数不被详情限频改变。采集器错误只向独立本地日志限频输出，不递归调用自身写入。本地事实到日志九字段白名单的映射（timestamp转RFC3339、context折叠为受条目和大小预算约束的attributes）由cs-cloud执行。
+同fingerprint每分钟默认最多3份详情，由有效策略的 `log_detail_rate_limit.per_fingerprint_max_per_minute`（0～60）覆盖；窗口内收紧立即生效，0 不采详情或摘要。类别许可按记录形态判断，critical-only 不放行同名事件的诊断详情；准入和入盘前均复查类别及许可。额外次数汇入摘要，异常指标次数不被详情限频改变。采集器错误只向独立本地日志限频输出，不递归调用自身写入。本地事实到日志九字段白名单的映射（timestamp转RFC3339、context折叠为受条目和大小预算约束的attributes）由cs-cloud执行。
 
 #### 11.2 日志采集范围
 

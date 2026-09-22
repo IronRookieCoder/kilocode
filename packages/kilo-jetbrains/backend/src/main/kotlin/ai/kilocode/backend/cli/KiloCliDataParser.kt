@@ -406,7 +406,7 @@ object KiloCliDataParser {
             is JsonArray -> root
             is JsonObject -> {
                 val ok = root["ok"] as? JsonPrimitive
-                if (ok?.booleanOrNull != true) {
+                if (ok?.isString != false || ok.booleanOrNull != true) {
                     throw SerializationException("String response wrapper must be successful")
                 }
                 root["data"] as? JsonArray ?: throw SerializationException("String response data must be an array")

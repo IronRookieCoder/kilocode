@@ -175,6 +175,71 @@ private fun JsonObject.field(key: String): String = this[key]?.jsonPrimitive?.co
 class ProducerTest {
 
     @Test
+    fun `active consumer survives revoke and reopen without rebinding old operations`() {
+        Harness().use { harness ->
+            harness.writeControl(validControl())
+            harness.service.start("monolith")
+            harness.awaitReason("ok")
+            val consumer = harness.service.operations
+            val old = consumer.begin("rpc", 60_000, buildJsonObject { put("api_group", "other") })
+            harness.awaitFacts(15_000) { it.any { fact -> fact.context["operation_id"] == old.id } }
+            val previous = harness.facts().first().run_id
+            harness.writeControl(disabledControl())
+            harness.awaitReason("unbound")
+            harness.writeControl(validControl())
+            harness.awaitReason("ok")
+            old.end("success")
+            val fresh = consumer.begin("rpc", 60_000, buildJsonObject { put("api_group", "other") })
+            fresh.end("success")
+            consumer.protocolError(ProtocolTransport.SSE, ProtocolStage.DECODE, ProtocolCode.DECODE_FAILED)
+            harness.service.stop("unload")
+            harness.awaitReason("stopped_unload")
+            val facts = harness.facts()
+            assertTrue(facts.none { it.context["operation_id"] == old.id }, "old handles never enter the new run")
+            assertEquals(listOf("start", "end"), facts.filter { it.context["operation_id"] == fresh.id }.map { it.phase() })
+            assertEquals(1, facts.count { it.name == "protocol.error" })
+            assertTrue(facts.all { it.run_id != previous })
+            assertTrue(consumer === harness.service.operations, "the entry is stable across runs")
+        }
+    }
+
+    @Test
+    fun `provider update during writer startup belongs to the next run`() {
+        val entered = java.util.concurrent.CountDownLatch(1)
+        val release = java.util.concurrent.CountDownLatch(1)
+        val hook = { writer: Writer ->
+            val active = defaultAwaitActive(writer)
+            entered.countDown()
+            assertTrue(release.await(15, java.util.concurrent.TimeUnit.SECONDS))
+            active
+        }
+        Harness(awaitActiveHook = hook).use { harness ->
+            try {
+                harness.service.noteConnectionProvider("kilo-cli")
+                harness.writeControl(validControl())
+                harness.service.start("monolith")
+                assertTrue(entered.await(15, java.util.concurrent.TimeUnit.SECONDS))
+                harness.service.noteConnectionProvider("cs-cloud")
+                release.countDown()
+                harness.awaitReason("ok")
+                harness.awaitFacts(15_000) { it.any { fact -> fact.name == "plugin.started" } }
+                assertTrue(harness.facts().all { it.connection_provider == "kilo-cli" })
+                harness.writeControl(disabledControl())
+                harness.awaitReason("unbound")
+                harness.writeControl(validControl())
+                harness.awaitReason("ok")
+                harness.service.operations.begin("plugin.readiness", 60_000).end("success")
+                harness.service.stop("unload")
+                harness.awaitReason("stopped_unload")
+                assertTrue(harness.facts().isNotEmpty())
+                assertTrue(harness.facts().all { it.connection_provider == "cs-cloud" })
+            } finally {
+                release.countDown()
+            }
+        }
+    }
+
+    @Test
     fun `outbox holds one scope-producer jsonl and no registrations`() {
         val home = Files.createTempDirectory("service-outbox")
         val logDir = Files.createTempDirectory("service-logdir")

@@ -140,7 +140,7 @@ class Recorder(
             return Admission.DROPPED
         }
         val now = clock.wall()
-        val permitted = policy.permit(now, draft.name)
+        val permitted = policy.permit(now, draft.name, category(draft.channel, draft.data))
         val purposes = buildSet {
             draft.purposes.forEach { purpose ->
                 if (purpose in permitted && purpose in Dictionary.purposes(draft.name, draft.data)) add(purpose)
@@ -209,8 +209,16 @@ class Recorder(
     /** Operations.begin的开始时快照：当前epoch/revision与该name的即时许可（可为空集）。 */
     internal fun beginSnapshot(now: Long, name: String): BeginSnapshot {
         val policy = if (closed) null else policies.current()
-        return policy?.let { BeginSnapshot(it.epoch, it.revision, it.permit(now, name)) }
+        return policy?.let { BeginSnapshot(it.epoch, it.revision, it.permit(now, name, CHANNEL_CRITICAL)) }
             ?: BeginSnapshot(null, null, emptySet())
+    }
+
+    /** 详情配额每次取新策略；关闭日志/类别或quota=0时不产生详情及其补报摘要。 */
+    internal fun limit(name: String): Int {
+        forwardTo?.let { return it.limit(name) }
+        if (closed) return 0
+        val policy = policies.current()
+        return if ("logs" in policy.permit(clock.wall(), name, "diagnostic")) policy.limit else 0
     }
 
     /** Operation.fields试图覆盖公共/终态字段时由operation.kt调用计数（记录本体拒绝产出）。 */
@@ -252,6 +260,10 @@ class Recorder(
         data = draft.data,
     )
 }
+
+/** 详情按字段形态归类，不能通过把channel伪装成critical绕过诊断许可。 */
+internal fun category(channel: String, data: JsonObject): String =
+    if ("message" in data || "frames" in data) "diagnostic" else channel
 
 /**
  * 32KiB/队列字节的保守上界（设计7.1）：不序列化完整JSON、不在EDT做真实编码。

@@ -188,9 +188,9 @@ class StabilityService private constructor(
     val recorder: Recorder
         get() = activeRecorder ?: lazyStandby().first
 
-    /** 当前采集run的操作入口；与[recorder]同源，激活前捕获的引用经同一转发机制投递活跃run。 */
+    /** 稳定操作入口：每次begin/record读取当前run，已开始的Operation永远绑定原recorder。 */
     val operations: Operations
-        get() = activeOperations ?: lazyStandby().second
+        get() = lazyStandby().second
 
     /**
      * 当前采集run的安全异常入口（A6）；run建立前经惰性standby——standby绑定无策略的
@@ -250,7 +250,7 @@ class StabilityService private constructor(
         }
     }
 
-    /** 后端连接提供方归因（best effort，run快照固定前调用才生效；其余值归unknown）。 */
+    /** 与activateRun的身份冻结共用锁；冻结后到达的hint只作用于下一run。 */
     fun noteConnectionProvider(id: String) = synchronized(stateLock) {
         val provider = when (id) {
             PROVIDER_CS_CLOUD -> PROVIDER_CS_CLOUD
@@ -314,9 +314,14 @@ class StabilityService private constructor(
     @Suppress("ReturnCount")
     private fun activateRun() {
         if (stoppedOnce.get()) return
-        val base = ensureCore()
+        // 身份冻结的线性化点：与provider更新互斥；writer启动与等待均在锁外。
+        val identity = synchronized(stateLock) {
+            ensureCore().copy(
+                runId = RUN_PREFIX + randomId(), mode = runMode.mode, side = runMode.side,
+                connectionProvider = connectionProviderHint,
+            )
+        }
         val store = policies ?: return
-        val identity = base.copy(runId = RUN_PREFIX + randomId(), mode = runMode.mode, side = runMode.side)
         val recorder = Recorder(identity, store, clock)
         activeRecorder = recorder
         activeOperations = Operations(recorder, clock, scope)
@@ -465,7 +470,11 @@ class StabilityService private constructor(
                 .also { baseIdentity = it }
         val standbyPair = standby
             ?: Recorder(identity, store, clock)
-                .let { recorder -> recorder to Operations(recorder, clock, scope) }
+                .let { recorder ->
+                    // 无run时begin使用独立关闭的recorder，不让早开始的句柄随standby转发到未来run。
+                    val inactive = Recorder(identity, store, clock).apply { close() }
+                    recorder to Operations(inactive, clock, scope) { activeOperations }
+                }
                 .also { standby = it }
         standbyFaults ?: Faults(standbyPair.first, clock).also { standbyFaults = it }
         identity

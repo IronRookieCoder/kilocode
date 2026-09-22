@@ -141,6 +141,29 @@ class SseObservationTest {
     }
 
     @Test
+    fun `wrong envelope shapes are observed once and a later event is consumed`() {
+        val invalid = listOf(
+            """{"type":{}}""",
+            """{"payload":{"type":[]}}""",
+            """{"payload":[]}""",
+            """{"type":"host.file.created","directory":{}}""",
+            """{"payload":{"type":"host.file.created","directory":[]}}""",
+            """{"payload":{"type":"host.file.created","properties":{"directory":{}}}}""",
+        )
+        val harness = open(*(invalid + """{"type":"session.idle"}""").toTypedArray()).start()
+        try {
+            harness.await(invalid.size + 1)
+            assertEquals("session.idle", harness.received.last().type)
+            fixture.flush()
+            assertEquals(invalid.size, protocolFacts().size)
+            assertTrue(protocolFacts().all { it.data.keys == setOf("transport", "stage", "error_code") })
+            assertTrue(harness.received.dropLast(1).all { it.observed })
+        } finally {
+            harness.client.close()
+        }
+    }
+
+    @Test
     fun `host event with unparsable directory records apply violation and stays dropped`() {
         workspace = Files.createTempDirectory("sse-observation")
         // NUL在Windows与POSIX上都不是合法路径字符：违反host事件directory的可解析路径约束。

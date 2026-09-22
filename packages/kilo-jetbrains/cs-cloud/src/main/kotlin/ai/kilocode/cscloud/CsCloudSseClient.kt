@@ -9,8 +9,10 @@ import ai.kilocode.stability.ProtocolStage
 import ai.kilocode.stability.ProtocolTransport
 import ai.kilocode.stability.protocolError
 import kotlinx.serialization.json.jsonObject
-import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.SerializationException
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
@@ -79,7 +81,7 @@ class CsCloudSseClient(
             if (!isCurrent(src)) return
             val result = accept(data)
             if (!result.accepted) return
-            val kind = type?.trim()?.takeIf { it.isNotEmpty() } ?: infer(data)
+            val kind = type?.trim()?.takeIf { it.isNotEmpty() } ?: result.kind
             onEvent(SseEvent(kind, data, result.observed))
         }
 
@@ -104,29 +106,24 @@ class CsCloudSseClient(
         true
     }
 
-    private data class Acceptance(val accepted: Boolean, val observed: Boolean = false)
+    private data class Acceptance(val accepted: Boolean, val observed: Boolean = false, val kind: String = "unknown")
+    private data class Envelope(val kind: String, val directory: String?)
 
     /** Host file events are global; only forward events scoped to the active project. */
     private fun accept(data: String): Acceptance {
-        val root = runCatching { json.parseToJsonElement(data).jsonObject }.getOrElse {
+        val envelope = runCatching { decode(data) }.getOrElse {
             // M15（C2）：真实SSE解码失败记一次protocol.error后照旧容忍转发（既有行为）。
-            // 同事件在infer()里的二次解析不重复计数（它不产事实）；正常新增可选字段被
-            // ignoreUnknownKeys正常忽略，绝不走这里；原始响应正文不入事实。
+            // 信封及其type/directory字段由同一解码边界处理一次；正常新增可选字段被
+            // 容忍，原始响应正文不入事实，observed防止下游再重复计数。
             val observed = operations?.let {
                 it.protocolError(ProtocolTransport.SSE, ProtocolStage.DECODE, ProtocolCode.DECODE_FAILED)
                 true
             } ?: false
-            return Acceptance(accepted = true, observed = observed)
+            return Acceptance(accepted = true, observed = observed, kind = KiloCliDataParser.extractEventType(data))
         }
-        val payload = root["payload"]?.let { runCatching { it.jsonObject }.getOrNull() }
-        val kind = infer(data)
-        if (!kind.startsWith("host.")) return Acceptance(accepted = true)
-        val dir = sequenceOf(
-            root["directory"]?.jsonPrimitive?.contentOrNull(),
-            payload?.get("directory")?.jsonPrimitive?.contentOrNull(),
-            payload?.get("properties")?.let { runCatching { it.jsonObject["directory"]?.jsonPrimitive?.contentOrNull() }.getOrNull() },
-        ).filterNotNull().firstOrNull() ?: return Acceptance(accepted = true)
-        val rootPath = workspace?.toAbsolutePath()?.normalize() ?: return Acceptance(accepted = true)
+        val kind = envelope.kind
+        val dir = envelope.directory ?: return Acceptance(accepted = true, kind = kind)
+        val rootPath = workspace?.toAbsolutePath()?.normalize() ?: return Acceptance(accepted = true, kind = kind)
         val eventPath = runCatching { Path.of(dir).toAbsolutePath().normalize() }.getOrNull() ?: run {
             // M15（C2）：host事件的directory违反可解析路径约束（apply违规）；既有丢弃行为不变。
             val observed = operations?.let {
@@ -135,17 +132,27 @@ class CsCloudSseClient(
             } ?: false
             return Acceptance(accepted = false, observed = observed)
         }
-        return Acceptance(accepted = eventPath == rootPath || eventPath.startsWith(rootPath))
+        return Acceptance(accepted = eventPath == rootPath || eventPath.startsWith(rootPath), kind = kind)
     }
 
-    private fun infer(data: String): String {
-        val root = runCatching { json.parseToJsonElement(data).jsonObject }.getOrNull()
-        val payload = root?.get("payload")?.let { runCatching { it.jsonObject }.getOrNull() }
-        return payload?.get("type")?.jsonPrimitive?.contentOrNull()
-            ?: root?.get("type")?.jsonPrimitive?.contentOrNull()
-            ?: KiloCliDataParser.extractEventType(data)
+    /** All envelope reads share one failure boundary, including legal JSON with illegal field shapes. */
+    private fun decode(data: String): Envelope {
+        val root = json.parseToJsonElement(data).jsonObject
+        val payload = root["payload"]?.jsonObject
+        val outer = root.text("type")
+        val inner = payload?.text("type")
+        val kind = inner ?: outer ?: KiloCliDataParser.extractEventType(data)
+        if (!kind.startsWith("host.")) return Envelope(kind, null)
+        val directories = listOf(
+            root.text("directory"), payload?.text("directory"),
+            (payload ?: root)["properties"]?.jsonObject?.text("directory"),
+        )
+        return Envelope(kind, directories.firstOrNull { it != null })
     }
 }
 
-private fun kotlinx.serialization.json.JsonPrimitive.contentOrNull(): String? =
-    runCatching { content }.getOrNull()
+private fun JsonObject.text(key: String): String? {
+    val value = get(key) ?: return null
+    if (value is JsonPrimitive && value.isString) return value.content
+    throw SerializationException("SSE envelope field must be a string")
+}
