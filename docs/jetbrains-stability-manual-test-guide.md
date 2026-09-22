@@ -278,19 +278,19 @@ RPC 终态复测：测试 RPC 时须保持 metrics 许可至少超过其 deadlin
 | session.open | operation | critical | dual | 自然+自检 |
 | session.restore | operation | critical | dual | 自然+自检 |
 | action | operation | critical | dual | 自然（发消息等）+自检 |
-| availability | interval | critical | **metrics** | 自然 |
+| availability | interval | critical | **metrics** | 自然+自检 |
 | error.uncaught | diagnostic | critical=计数 / diagnostic=详情 | metrics / **logs** | 自检 |
 | error.reported | diagnostic | critical=计数 / diagnostic=详情 | metrics / **logs** | 自检 |
 | protocol.error | diagnostic | critical | dual | 自检 |
 | telemetry.health | health | critical | dual | 自然 |
 | session.dispose_risk | transition | critical | **metrics** | 自检 |
-| rpc | operation | critical | **metrics** | 自然 |
-| edt.delay | sample | critical | **metrics** | 自然 |
+| rpc | operation | critical | **metrics** | 自然+自检 |
+| edt.delay | sample | critical | **metrics** | 自然+自检 |
 | edt.stall | sample | critical | **metrics** | 自检（真实 StallMerger）+自然 |
 | edt.violation | diagnostic | critical | dual | 自检 |
 | render.apply | sample | critical | **metrics** | 自然（发消息）+自检 |
 | ide.operation | operation | critical | dual | 自然（diff 等）+自检 |
-| resource.snapshot | sample | critical | **metrics** | 自然 |
+| resource.snapshot | sample | critical | **metrics** | 自然+自检 |
 
 ## 9. 落盘校验工具箱
 
