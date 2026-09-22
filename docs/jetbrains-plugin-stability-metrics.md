@@ -68,15 +68,15 @@
 | timeout | 观测截止前未完成 | 连接超过30秒仍未就绪 | 技术失败，但不因此中断业务 |
 | blocked | 缺少前置条件 | 凭据未就绪、未安装服务、必须迁移 | 单独展示，不归为插件异常 |
 | cancelled | 预期取消 | 用户取消、关闭项目、正常卸载 | 单独展示，不归为技术失败 |
-| unknown | 无法获得可信结果 | 有开始无结束，进程消失 | 降低完整率，不算成功或崩溃 |
+| unknown | 无法获得可信结果 | 终态证据不足（如end_kind无法判定），由插件侧事实显式携带 | 降低完整率，不算成功或崩溃 |
 
 技术成功率=`success/(success+failure+timeout)`；成功到达比例=`success/全部成熟操作`。同时显示blocked/cancelled/unknown占比，两个比率不能都叫“成功率”。
 
 例如100次打开：90成功、3失败、2超时、3凭据未就绪、1主动关闭、1未知。技术成功率90/95≈94.7%，成功到达比例90%，未知1%。只展示94.7%会隐藏部分用户进不去的问题。
 
-“成熟操作”指已到业务观测截止时间的同一批操作，不代表相关文件已经交接完成。分子分母必须属于同一批；缺少开始事件的孤立终态单列为采集缺口。完整率=`有可信终态的成熟操作/全部成熟操作`，unknown不在分子。缺end时先展示pending及暂定完整率，交接宽限结束才最终计unknown；具体持久配对、24小时宽限和累计结算规则见[设计10.2](./jetbrains-stability-design.md#102-业务截止与交接迟到)。pending不是新增业务result，也不作为已完成结果输出。
+“成熟操作”指已到业务观测截止时间的同一批操作，不代表相关文件已经交接完成。分子分母必须属于同一批；缺少开始事件的孤立终态单列为采集缺口。完整率=`有可信终态的成熟操作/全部成熟操作`，unknown不在分子。终态由插件单调时钟结算，cs-cloud不配对、不补造unknown；丢失的终态体现为覆盖缺口，由plugin.unclean与health损失增量观测，迟到的可信终态按事件时间归入原批次。终态与归窗规则见[设计10.2](./jetbrains-stability-design.md#102-终态与归窗)。
 
-默认观测截止：界面初始化30秒、后端加载30秒、打开到可用60秒、逻辑连接30秒、恢复和普通交互30秒。安装/启动/凭据/下载按实际业务deadline随开始事件记录。插件用单调时钟在业务完成与截止之间结算唯一终态；业务超时后才完成只补诊断，不第二次结算，遥测不新增业务取消。截止前已完成但因封存或离线晚收到的end仍是有效终态，consumer不能把未收到end直接当timeout。
+默认观测截止：界面初始化30秒、后端加载30秒、打开到可用60秒、逻辑连接30秒、恢复和普通交互30秒。安装/启动/凭据/下载按实际业务deadline随开始事件记录。插件用单调时钟在业务完成与截止之间结算唯一终态；业务超时后才完成只补诊断，不第二次结算，遥测不新增业务取消。截止前已完成但因缓冲或离线晚收到的end仍是有效终态，consumer不能把未收到end直接当timeout。
 
 ### 1.3 时间、归因和窗口
 
@@ -140,7 +140,7 @@
 
 **如何衡量：** 已就绪的必要连接意外丢失开启恢复区间，全部恢复后结束；多个流同时失败只开一个区间，正常关闭排除。
 
-**技术指标：** `jetbrains_plugin_connection_disconnect_total`、`jetbrains_plugin_connection_recovery_total`、`jetbrains_plugin_connection_recovery_duration_seconds`；维度reason、result、intervention=automatic/manual。
+**技术指标：** `jetbrains_plugin_connection_disconnect_total`、`jetbrains_plugin_connection_recovery_total`、`jetbrains_plugin_connection_recovery_duration_seconds`；维度reason（断开），result与intervention=automatic/manual（恢复两指标）。
 
 **如何解读：** 自动恢复比例=截止前自动恢复区间/全部成熟恢复区间，并展示手动、超时、未知。connectionEpoch变化只代表新连接，不能证明daemon重启。连接诊断见M04。
 
@@ -286,7 +286,7 @@
 
 > 发现用户感觉“点击没有反应”的响应问题。
 
-**如何衡量：** 面板可见且IDE前台，同JVM共用一个UI线程探针，每秒至多投递一次且最多一个未完成探针。单个有效样本排队≥2秒即形成观测到的卡顿区间；仅合并明确相交或首尾相接的阻塞区间，不跨缺口推断连续性。独立观测ID、探针序号、投递/完成单调时间和有效性字段见[设计10.3](./jetbrains-stability-design.md#103-edt探针事实与卡顿推导)。已确认插件线程违规另计，不能由延迟推断违规。
+**如何衡量：** 面板可见且IDE前台，同JVM共用一个UI线程探针，每秒至多投递一次且最多一个未完成探针。插件在本机合并有效样本的阻塞区间：单个区间持续≥2秒即形成观测到的卡顿区间，仅合并明确相交或首尾相接的区间，不跨缺口推断连续性，逐条落盘为edt.stall事实；cs-cloud只计数与分布，不推导合并。探针字段与合并规则见[设计10.3](./jetbrains-stability-design.md#103-edt探针事实与卡顿推导)。已确认插件线程违规另计，不能由延迟推断违规。
 
 **技术指标：** `jetbrains_plugin_edt_delay_duration_seconds`、`jetbrains_plugin_edt_stall_total`、`jetbrains_plugin_edt_violation_total`；operation仅用于已知违规。
 
@@ -330,9 +330,9 @@
 
 > 判断“没有错误”是健康，还是记录没写下来、没交给cs-cloud。
 
-**如何衡量：** 开始/结束完整性、写入失败、丢弃条数、待交接大小及最老年龄，每30秒和异常变化时记录。observation_total不新增采集点，由cs-cloud从operation start/end配对及M22的run start/end/unclean事实推导。操作缺口在交接宽限内保持pending，最终unknown才累计；暂定完整率来自配对状态查询，不靠已发布counter的回减实现。
+**如何衡量：** 开始/结束完整性、写入失败、丢弃增量、待交接大小及最老年龄，每30秒和异常变化时记录。observation_total不新增采集点，由插件侧终态事实直接构成：run级复用M22的start/end/unclean，操作级复用各operation的end/timeout终态；cs-cloud不配对结算、不推断丢失终态，覆盖缺口由health损失增量与unclean表达。
 
-**技术指标：** `jetbrains_plugin_observation_total`（phase=started/terminal/unknown）、`jetbrains_plugin_telemetry_dropped_total`、`jetbrains_plugin_telemetry_write_error_total`、`jetbrains_plugin_outbox_depth_bytes`、`jetbrains_plugin_outbox_oldest_age_seconds`；按需选phase、reason、channel。
+**技术指标：** `jetbrains_plugin_observation_total`（phase=started/terminal）、`jetbrains_plugin_telemetry_dropped_total`、`jetbrains_plugin_telemetry_write_error_total`、`jetbrains_plugin_outbox_depth_bytes`、`jetbrains_plugin_outbox_oldest_age_seconds`；按需选phase、reason、channel。
 
 **如何解读：** 完整率=有可信终态的成熟操作/全部成熟操作，unknown不在分子。磁盘满且进程崩溃时，丢失计数也可能丢失，不能承诺知道所有损失。
 
@@ -350,7 +350,7 @@
 
 > 给突然消失、强杀或关机问题提供线索，定位未知终态来源。
 
-**如何衡量：** 每个run记录start/end；确认旧writer不存活且无正常结束标记才记unclean，证据不足unknown。不用全局last_clean_shutdown混合多个进程。基础run身份及start/end事件随采集器基础能力提供，支撑M14分母。
+**如何衡量：** 每个run记录start/end；下一插件实例按scope-id前缀检查前任文件，最后一条plugin.started后无plugin.shutdown即记unclean。不用全局last_clean_shutdown混合多个进程。基础run身份及start/end事件随采集器基础能力提供，支撑M14分母。
 
 **技术指标：** `jetbrains_plugin_run_started_total`、`jetbrains_plugin_run_end_total`；维度end_kind=app_close/unload/unclean/unknown。
 
@@ -400,7 +400,7 @@ daemon_restart必须有daemon实例身份变化等证据；只使用provider实�
 
 counter/histogram在同一源序列内累计，不能每60秒清零上传。60秒可以是发送周期，不是统计重置周期。cs-cloud对事实先去重、再累计和持久化输出。
 
-同一事实派生的次数、耗时等输出分别生成确定性ID，不能都复用输入event_id；累计键还须隔离account_epoch、映射版本及登记标签，详见[设计9.1](./jetbrains-stability-design.md#91-派生输出身份与版本)。同源迟到事实的排序、暂定配对状态查询和最终批次归窗必须在阶段0验证；不能只验证多源求和而忽略乱序产生的非单调快照。
+同一事实派生的次数、耗时等输出分别生成确定性ID，不能都复用输入event_id；生成方案由cs-cloud内部自定，约束为确定性、区分度与长度合规，累计键还须隔离account_epoch、映射版本及登记标签，详见[设计9.1](./jetbrains-stability-design.md#91-派生输出身份)。同源迟到事实的排序和最终批次归窗必须在阶段0验证；不能只验证多源求和而忽略乱序产生的非单调快照。
 
 插件的producer/run与cs-cloud的process_epoch不同：consumer重启但插件run未变时，恢复该源已提交的去重及累计状态，不按daemon启动时间重新归零。cs-cloud提案按进程重置的默认规则不能直接套用到外部插件源；EventBuilder也必须保留插件采集时的版本、客户端类型和业务时间，具体适配边界见[设计2.2](./jetbrains-stability-design.md#22-与cs-cloud指标提案的对齐边界)。
 

@@ -11,7 +11,7 @@
 
 ### 1. 结论与范围
 
-采用“插件采集结构化事实并落盘，cs-cloud消费文件、转换为指标和日志并统一上报”。插件不实现云端认证、上报重试、流量控制或存储查询。Agent Core指标继续由cs-cloud负责。
+采用“插件采集结构化事实并落盘，cs-cloud消费文件、转换为指标和日志并统一上报”。插件不实现云端认证、上报重试、流量控制或存储查询。Agent Core指标继续由cs-cloud负责。交接面收敛为两个文件级约定：插件向`~/.costrict/telemetry/outbox/`追加NDJSON事实，cs-cloud发布`~/.costrict/telemetry/control/jetbrains.json`控制文件；cs-cloud对接只需第5.3节的路径与文件约定及第6、8、9章的行格式、控制格式与事件字典，无需了解插件实现细节。业务推导（操作终态、卡顿区间、健康增量）由插件完成，cs-cloud只做去重、累计、映射与上报。
 
 指标与日志是两条独立的数据链路，共用采集器和文件交接设施，不共用统计口径或上传协议。
 
@@ -19,7 +19,7 @@
 |---|---|---|
 | 目的 | 衡量成功率、耗时分布、可用性和数据完整性 | 还原关键过程、定位故障及关联诊断 |
 | 输入用途 | purposes含metrics的计数、结果、区间和样本事实 | purposes含logs的生命周期、状态变化、失败及安全诊断事实 |
-| cs-cloud转换 | 去重、配对、累计、分桶，按Spec映射 | 选择事件、套用安全模板，映射日志九字段 |
+| cs-cloud转换 | 去重、累计、分桶，按Spec映射 | 选择事件、套用安全模板，映射日志九字段 |
 | 输出类型 | counter、histogram、gauge | 带message、level、attributes的日志记录 |
 | 上报服务 | User-indicator，client_type=jetbrains | Telemetry，client_type=jetbrains-plugin |
 | 请求与确认 | JSON events数组；HTTP 200仍需逐项确认 | NDJSON；HTTP 200空响应体表示整批接口受理 |
@@ -57,8 +57,8 @@
 | [凭据读写](../../cs-cloud/internal/provider/credentials.go)、[网关TokenManager](../../cs-cloud/internal/gateway/costrict/token.go) | LoadCredentials按调用读文件；SaveCredentials直接WriteFile；TokenManager仅首次加载后缓存，刷新仅由实例内mutex串行化 | 不具备全daemon一致的身份代际、外部凭据变化通知或跨进程刷新协调；需共享身份组件 |
 | [JWT工具](../../cs-cloud/internal/provider/jwt.go)、[当前用户查询](../../cs-cloud/internal/provider/cloud_user.go) | ParseJWT只解码payload，UserID可回退sub；当前用户DTO未给出完整issuer/tenant绑定 | 不能将解码成功或UserID作为本协议“已验证账户/租户”；日志要求universal_id，不能用sub替代 |
 | [云客户端](../../cs-cloud/internal/cloud/client.go)、[HTTP客户端](../../cs-cloud/internal/platform/http.go) | CloudBaseURL默认补/cloud-api，SetUserAuthHeaders固定JSON；HTTPClient通常返回无总超时的http.DefaultClient | 可参考认证与传输封装，但两出口须明确完整地址、Content-Type及独立超时；不能机械复用URL拼接 |
-| [工作流outbox](../../cs-cloud/internal/workflowrunner/outbox.go) | 只保存任务结果并按fact_id写pending/done/dead；Add有temp+rename，没有文件Sync及两出口状态事务 | 不是本方案durable spool（持久队列），不能直接作为.done确认的可靠性依据 |
-| [原子写入](../../cs-cloud/internal/membertask/atomicfile.go)、[Windows替换](../../cs-cloud/internal/membertask/atomicfile_windows.go)、[Windows权限](../../cs-cloud/internal/membertask/permissions_windows.go) | 已有文件Sync、按平台替换及DACL处理范例，但函数服务于membertask | 可提取通用存储原语并测试，不复用任务数据目录或假设已具备插件跨语言锁协议 |
+| [工作流outbox](../../cs-cloud/internal/workflowrunner/outbox.go) | 只保存任务结果并按fact_id写pending/done/dead；Add有temp+rename，没有文件Sync及两出口状态事务 | 不是本方案durable spool（持久队列），不能直接作为消费位移确认的可靠性依据 |
+| [原子写入](../../cs-cloud/internal/membertask/atomicfile.go)、[Windows替换](../../cs-cloud/internal/membertask/atomicfile_windows.go)、[Windows权限](../../cs-cloud/internal/membertask/permissions_windows.go) | 已有文件Sync、按平台替换及DACL处理范例，但函数服务于membertask | 可提取通用存储原语并测试，不复用任务数据目录 |
 | [运行事件总线](../../cs-cloud/internal/runtime/eventbus.go) | 每订阅64槽，Emit满时default分支丢弃 | 只能作实时提示，不作为插件事实可靠接收或ACK依据 |
 | [本地logger](../../cs-cloud/internal/logger/logger.go) | zap ConsoleEncoder加lumberjack输出app.log/error.log，包含调用者及异常栈；无Telemetry上传 | 本地运行日志不是九字段上传日志，不能整份转发或由计数日志反推指标 |
 | [发布配置](../../cs-cloud/.goreleaser.yml) | CGO_ENABLED=0，Linux/macOS/Windows构建，当前排除Windows ARM64 | 新存储、文件锁及权限实现必须适配现有发布矩阵，不能依赖系统SQLite或额外动态库 |
@@ -73,7 +73,7 @@
 | sessiontrace支持collect-only及本地viewer | 这是另一种有独立许可的本地轨迹用途，不放宽插件上传用途禁采规则；本文不新增collect-only模式 |
 | counter/histogram按daemon进程重启归零，使用process_epoch | 插件源run与daemon进程独立；消费状态及源累计必须持久恢复，不能仅因consumer（消费方）重启而清零后重放已消费事实 |
 | EventBuilder默认cli、cs-cloud版本及设备上下文 | 必须支持保留插件原始client_type、plugin_version、device_id、source/run及业务时间；禁止补成daemon采集时上下文 |
-| metrics spool批量fsync并允许小窗口丢失 | 未完成同步的输入不得对插件ACK（确认）；.done之前必须持久保存原事实及必要输出/重建状态；可以批量提交，不能先确认后刷盘 |
+| metrics spool批量fsync并允许小窗口丢失 | 未完成同步的输入不得推进消费位移；位移推进之前必须持久保存原事实及必要输出/重建状态；可以批量提交，不能先推位移后刷盘 |
 | trajectory store与metrics spool分离 | 轨迹viewer数据库不是插件交接ACK，也不是日志待发队列；两出口仍按第10、11章各自转换和确认 |
 | 既有提案只设计指标传输 | 日志endpoint发现（向服务端查询上传地址）、NDJSON九字段、整批响应、独立开关和限频是新增工作，不复用指标Sender协议 |
 
@@ -87,12 +87,14 @@
 | 命名与单位 | 统一jetbrains_plugin_*，云端时长用秒；本地毫秒由cs-cloud转换 |
 | 逐项源码映射 | 保留接入点和现状差距，明确“已有日志”不等于“口径可靠” |
 | 事件字典 | 吸收生命周期、连接、前置供给动作、UI/会话、异常和采集健康事件，并补关键操作与完整性 |
+| 对接面最小化 | 上行为outbox目录内每采集进程一个追加式.jsonl，下行为单个控制文件；无登记目录、无状态机后缀、无锁、无救援，cs-cloud按“目录、行格式、位移”三个约定即可独立实现 |
+| 派生前移 | 操作终态、EDT卡顿区间、健康增量均由插件结算，落盘事实即终态；cs-cloud不配对、不推导、不做快照差分 |
 | 插件不绑定云端格式 | 本地保存结构化事实，cs-cloud按指标文档登记的Spec（指标规格）与桶（histogram分桶边界）执行累计和双出口（指标与日志）映射；不让上报格式升级牵动插件 |
-| 持久化后ACK | .done表示已进入daemon可靠队列，插件不等待云端成功；读完不能ACK |
-| 崩溃恢复 | writer（插件侧写入方）锁和进程启动身份确认所有权，mtime（文件修改时间）只辅助，休眠不能被当作死亡 |
-| 时效 | 使用尽量短的封存（把.open文件定稿为.ready）和扫描周期；以事件发生到受理、看板/告警分别验收 |
-| 多源和重放 | source/run身份与device_id分开；先按输入去重再累计；确定性输出ID在重试时保持不变 |
-| 采集控制 | 区分临时上传失败、服务端禁采和用户撤销；禁采期间不再新增日志事实，也不保留数据等待将来补报 |
+| 位移即确认 | cs-cloud的持久化消费位移与durable spool入队原子提交；插件不逐文件确认、不等待云端成功，位移之前的数据才可能被容量淘汰 |
+| 崩溃恢复 | 无锁无救援：追加尾行可能残缺，读取方跳过无LF尾行并计数；不做writer死亡推断，休眠/慢写不影响交接 |
+| 时效 | 使用尽量短的flush与目录扫描周期；以事件发生到受理、看板/告警分别验收 |
+| 多源和重放 | source/run身份与device_id分开；先按输入去重再累计；输出ID由cs-cloud内部确定性生成，契约只约束稳定性与长度上限 |
+| 采集控制 | 无有效策略默认不限制（fail open，见8）；区分临时上传失败、服务端禁采和用户撤销；禁采期间不再新增日志事实。用户撤销授权/总开关关闭时清理待交接数据、不保留补报；服务端用途级禁采按第8章保留期处理缓存，重开后可补发关闭前数据 |
 | 账户与版本 | 采集时固定account_epoch、plugin_version等上下文，不补绑到后来的账户或新版本 |
 | 深度诊断 | v1只收安全摘要、有限脱敏插件帧和指纹，不自动上传完整堆栈或原始异常首行 |
 
@@ -100,7 +102,7 @@
 
 #### 3.1 方案取舍
 
-文件消费让daemon不可用期间的插件故障仍能保留，上报策略也集中在cs-cloud维护。若用本地HTTP作为唯一数据入口，插件就要自建可靠缓存和重试，职责反而扩大。解析已有文本虽然起步快，却缺成功分母、稳定起止点，且有内容日志风险，因此不作主通道。
+文件消费让daemon不可用期间的插件故障仍能保留，上报策略也集中在cs-cloud维护。若用本地HTTP作为唯一数据入口，插件就要自建可靠缓存和重试，职责反而扩大。解析已有文本虽然起步快，却缺成功分母、稳定起止点，且有内容日志风险，因此不作主通道。交接形态取“追加日志+消费位移”而非“分段文件+状态机+双锁”：后者要求cs-cloud实现认领互斥、跨语言文件锁与崩溃救援，任何一项实现不当都会丢数据或死锁；前者把并发安全交给单写者追加与读取幂等（event_id去重），协议只剩路径、行格式与位移语义。
 
 维护收益有边界：新增插件观测能力仍要升级插件；只是调整已有事实映射、上报认证、地址、流控、桶和告警策略时，可以主要升级cs-cloud和平台。
 
@@ -110,18 +112,18 @@
 
 #### 3.3 观测盲区
 
-采集初始化前失败、首次无有效许可、进程强杀前尚未落盘、磁盘故障、离线过期及未接入的远程端都会造成覆盖偏差。不能把“没有结束记录”当插件崩溃，也不能把“没有错误记录”当无错误。UI线程卡顿是共享IDE现象，除非有证据，不归因插件。
+采集初始化前失败、进程强杀前尚未落盘、磁盘故障、已授权用途的策略过期时段及未接入的远程端都会造成覆盖偏差；首次安装、daemon未运行及本机无控制文件时的凭据未就绪时段按无有效策略默认采集，不再是盲区——daemon运行中显式发布pending/disabled仍按第8章停采，属显式限制而非fail-open。崩溃时未flush的追加尾行丢失（critical至多约30秒），读取方跳过残缺尾行，该损失由health计数表达，没有救援补偿。不能把“没有结束记录”当插件崩溃，也不能把“没有错误记录”当无错误。UI线程卡顿是共享IDE现象，除非有证据，不归因插件。
 
 ## 第二部分：共用采集与文件交接协议
 
 ### 4. 设计目标与责任
 
-outbox（发件箱）是插件写下、等待cs-cloud接管的数据目录；durable spool（持久队列）是cs-cloud负责持久保存并重试发送的队列。插件只需知道本地记录是否进入采集队列，不需要知道云端是否上传成功。
+outbox（发件箱）是`~/.costrict/telemetry/outbox/`目录：每个采集进程一个追加式NDJSON文件，插件是其唯一写者；durable spool（持久队列）是cs-cloud负责持久保存并重试发送的队列。插件只需知道本地记录是否写入outbox，不需要知道云端是否上传成功。
 
 ```mermaid
 flowchart LR
-  P[插件记录结构化事实] --> O[本机outbox文件]
-  O --> C[cs-cloud校验并持久接收]
+  P[插件记录结构化事实] --> O[本机outbox追加日志]
+  O --> C[cs-cloud按位移读取并持久接收]
   C --> S[cs-cloud持久队列]
   S --> MF[metrics用途事实]
   S --> LF[logs用途事实]
@@ -136,7 +138,7 @@ flowchart LR
 | 责任 | 插件 | cs-cloud |
 |---|---|---|
 | 业务观测 | 操作起止、结果、耗时、阶段、异常和自身采集健康 | 不从文本猜测业务成功 |
-| 本地保存 | 脱敏、异步有界写入、封存及未交接数据清理 | 认领、校验、持久接收、接管后的清理 |
+| 本地保存 | 脱敏、异步有界追加、容量重写淘汰及同源残留清理 | 按位移读取、校验、持久接收、陈旧文件清理 |
 | 指标转换 | 保存事实，不维护云端指标名/桶配置 | 去重、累计、单位转换、Spec与标签映射 |
 | 日志转换 | 保存安全诊断事实，不拼云端日志请求 | 事件选择、模板、级别及九字段映射 |
 | 指标上报 | 无指标HTTP、JWT、上传重试 | 指标认证、JSON批次、逐项确认、幂等及独立退避 |
@@ -153,10 +155,12 @@ flowchart LR
 
 | 阶段 | cs-cloud做什么 | 细节见 |
 |---|---|---|
-| 发现 | 定期扫描`~/.costrict/telemetry/registrations/`目录（建议每5秒一次，与.ready扫描同周期），发现本机正在运行的IDE；新IDE的登记从出现到被首次扫到的时延，计入第13章的时效验收 | 5.2 |
-| 认领 | 对每个通过所有权校验的登记，按其中的outbox_path找到该producer的outbox根目录；在exchange.lock内把.ready改名为.claimed，再在锁外复制并校验内容。同一数据源同一时刻只允许一个消费者，多个daemon靠源锁互斥 | 7.2 |
-| 接收 | 校验通过的记录连同当时的账户与许可快照，先持久写入cs-cloud的可靠队列（durable spool），然后才把源文件标记为.done——到这里插件的责任就结束了 | 7.2 |
-| 分派 | 记录入队后先按event_id去掉重复，再看purposes字段：包含metrics的进入指标链，包含logs的进入日志链；两种用途都有的事实分别进入两条链，任何一条链失败都不会阻塞另一条 | 14.4 |
+| 发现 | 定期扫描`~/.costrict/telemetry/outbox/`目录（建议每5秒一次），文件名即数据源身份；新文件从出现到被首次扫到的时延，计入第13章的时效验收 | 5.2 |
+| 读取 | 对每个文件从持久化位移继续读取；按6.1校验每行，跳过无LF的残缺尾行，中间坏行隔离计数；按event_id去重 | 6.1、7.2、7.3 |
+| 接收 | 去重后的记录连同当时的账户与许可快照持久写入durable spool，随后原子提交该文件的新位移——到这里插件的责任就结束了 | 7.2 |
+| 分派 | 记录入队后按purposes字段分派：包含metrics的进入指标链，包含logs的进入日志链；两种用途都有的事实分别进入两条链，任何一条链失败都不会阻塞另一条 | 14.4 |
+
+位移提交与持久入队必须在同一可恢复事务内完成。文件变短或被写者重写（文件身份变化）时位移归零重读，重复读取由event_id去重吸收，因此读取是幂等的；多个daemon并发读同一文件也是安全的，部署上仍建议单消费者，属资源建议而非协议要求。
 
 控制文件的发布（第8章）与文件消费共用同一轮扫描结果，但两件事互不阻塞；身份代际（account_epoch）同样由cs-cloud发布，并在每次发送前重新校验（见8.1）。
 
@@ -164,7 +168,7 @@ flowchart LR
 
 | | 指标链（第10章） | 日志链（第11章） |
 |---|---|---|
-| 转换 | 配对、累计、分桶，按Spec映射成指标 | 挑选事件、套用安全模板、映射成九字段 |
+| 转换 | 终态累计、分桶，按Spec映射成指标 | 挑选事件、套用安全模板、映射成九字段 |
 | 上报 | 发给User-indicator，请求为JSON events数组 | 上传地址来自endpoint发现，以NDJSON发给Telemetry |
 | 确认 | HTTP 200后仍要逐项确认每个输出 | 空响应体表示整批已受理 |
 
@@ -180,54 +184,44 @@ flowchart LR
 
 v1目标支持单体完整采集，前提是插件与cs-cloud均实现本文新协议；当前版本尚不具备该链路。远程完整覆盖要求两端各有cs-cloud文件消费能力。前端仅运行采集组件而不启动Agent Core是待新增部署能力：当前daemon/serve均启动默认agent，不能直接用现有命令宣称实现。该模式未交付时应明确前端未接入，不为补遥测强制启动额外agent。
 
-策略与消费能力都是机器局部的：若frontend机器没有本机消费组件，就没有策略来源，按第8章首次无策略处理——默认关闭上传用途采集，仅保留独立本地文本诊断，不写critical/diagnostic待交接事实，不存在“仅本地保存等待未来交接”的中间形态。覆盖状态必须显示“前端未接入”，不能把缺失当无故障。RPC文件转运不隐含在v1内，需另行定义持久确认和断连重放。
+策略与消费能力都是机器局部的：若frontend机器没有本机消费组件，就没有策略来源，按第8章无有效策略处理——默认不限制，照常采集并落盘；没有本机消费者，数据仅受每producer容量与保留期约束，最终由清理回收。覆盖状态必须显示“前端未接入”，不能把缺失当无故障。RPC文件转运不隐含在v1内，需另行定义持久确认和断连重放。
 
-#### 5.2 路径发现与元数据
+#### 5.2 路径与文件布局
 
-插件通过PathManager.getLogDir()得到当前IDE日志目录，不从工作目录或硬编码系统路径推测。建议结构：
+事实文件与控制文件同根，都位于用户主目录：
 
 ```text
-<ide-log-dir>/costrict-telemetry/v1/<producer-id>/
-  producer.json
-  writer.lock
-  exchange.lock
-  critical/<run-id>-<segment-id>.open
-  critical/<run-id>-<segment-id>.ready
-  diagnostic/<run-id>-<segment-id>.open
-  diagnostic/<run-id>-<segment-id>.ready
+~/.costrict/telemetry/
+  control/jetbrains.json                    # cs-cloud原子写，插件30秒轮询（第8章）
+  outbox/<scope-id>-<producer-id>.jsonl     # 每个采集进程（JVM）一个，追加式NDJSON事实
 ```
 
-critical保存计数、结果、生命周期和健康事实；diagnostic保存限频诊断详情。每个JVM采集实例一个随机producer_id，每次采集生命周期一个随机run_id；PID只辅助诊断，不作唯一身份。同进程多项目共享writer，用随机workspace_id区分。
+producer_id为每JVM采集实例的随机标识，run_id为每次采集生命周期的随机标识，同进程多项目用随机workspace_id区分；scope-id是每个IDE安装范围持久的随机标识（存于IDE持久设置），同一IDE多次启动共享，用于识别前任文件（plugin.unclean判定，见7.3）与同源清理归属，不同IDE互不相同。文件由其创建进程单写者追加：一行（含行尾LF）一次write调用，行内字段自包含全部来源信息；不再有registrations发现目录、producer.json、锁文件及.open/.ready/.claimed/.done状态机——目录即发现，文件名即身份，位移即确认。
 
-插件原子写登记文件`~/.costrict/telemetry/registrations/<producer-id>.json`，包含schema_major、outbox_path、producer_id、pid、process_start、created_at；outbox_path指向该producer的outbox根目录，字段名避开第4节cs-cloud持久队列（durable spool）的术语。cs-cloud扫描该目录发现多个IDE，发现节奏与消费总览见4.1；登记文件只用于本机发现与所有权校验，不进入上报数据。不再使用固定logs/metrics云端预格式化目录。
+以上为默认profile约定路径，不覆盖cs-cloud的data-dir/auth-path配置。v1自动接入仅针对双方确认的默认profile；自定义profile在完成显式绑定契约前标记不支持，不能回退使用默认控制文件或读取另一个profile的凭据。默认profile的控制文件发布者互斥由cs-cloud自行协调（如单例部署或最后写入者语义），不影响插件读取语义；自定义profile扩展需绑定数据目录、控制、账户代际和spool四者，而不只是换一个数据目录。
 
-以上为默认profile发现路径，不覆盖cs-cloud的data-dir/auth-path配置。v1自动接入仅针对双方确认的默认profile；自定义profile在完成显式绑定契约前标记不支持，不能回退使用默认控制文件或读取另一个profile的凭据。默认profile的控制文件由一个持有profile级所有权锁的consumer发布，避免多个daemon覆盖策略；多消费者仍按源锁互斥。自定义profile扩展需绑定登记、控制、账户代际和spool四者，而不只是换一个数据目录。
+记录自身携带全部来源字段（6.1），生产者升级或清理元数据后历史仍可解释。device_id是随机安装标识，重装是否更换取决于IDE持久设置是否保留，不能承诺重装必变。
 
-producer.json固定该源的plugin_version、完整IDE构建号、归一化IDE版本、OS/arch、mode/side、env和device_id。记录本身也保存这些来源字段，避免生产者升级、清理元数据后历史无法解释。device_id是随机安装标识，重装是否更换取决于IDE持久设置是否保留，不能承诺重装必变。
-
-登记及控制子目录由双方约定专用，cs-cloud升级/清理不得误删。POSIX使用用户级0700/0600；Windows使用对应用户ACL，不能把chmod数值当作Windows权限实现。消费器验证用户所有权、解析后目录范围，拒绝符号链接/重解析点越界，不支持远程请求任意指定读取路径。
+目录与文件权限：POSIX用户级0700/0600；Windows使用对应用户ACL，不能把chmod数值当作Windows权限实现。消费器只读取文件名匹配`^[a-z0-9][a-z0-9-]*\.jsonl$`的平铺常规文件，验证用户所有权与解析后路径不越出outbox目录，拒绝子目录、符号链接/重解析点越界，不支持远程请求任意指定读取路径。
 
 #### 5.3 对接面总览：路径、文件与格式
 
-插件与cs-cloud在稳定性链路上的对接全部通过本机文件系统完成，插件不发起任何面向上报的HTTP调用：上行是outbox事实文件与发现登记，下行只有控制文件；认证、endpoint发现、上报与重试都在cs-cloud侧（见4.1）。cs-cloud实现消费器时，以下表为交接面的汇总入口，规则本体以引用章节为准，不在两处重复维护；消费组件的接入任务与可复用边界见12.1。
+插件与cs-cloud在稳定性链路上的对接全部通过本机文件系统完成，插件不发起任何面向上报的HTTP调用：上行是outbox目录内的追加式事实文件，下行只有控制文件；认证、endpoint发现、上报与重试都在cs-cloud侧（见4.1）。cs-cloud实现消费器时，下表即交接面全部内容，配合第6章行格式、第8章控制格式与第9章事件字典即可独立开发，不需要了解插件实现细节；消费组件的接入任务与可复用边界见12.1。
 
 | 交接物 | 落盘路径 | 写入方→读取方 | 格式与内容 | 细节见 |
 |---|---|---|---|---|
-| 事实文件 | `<ide-log-dir>/costrict-telemetry/v1/<producer-id>/<channel>/<run-id>-<segment-id>.open`，封存后同名`.ready`；channel取critical或diagnostic | 插件writer→cs-cloud consumer | NDJSON v1：UTF-8无BOM、LF结尾、每行一个JSON对象、普通记录≤32KiB；字段闭集与示例 | 6.1、7.1 |
-| 交接状态 | 同一文件名的后缀`.claimed`、`.done` | cs-cloud（插件永不触碰） | 后缀即状态机：.open→.ready→.claimed→.done；.done表示已进入durable spool | 7.2 |
-| 环境元数据 | `<outbox根>/producer.json` | 插件（首个成功run写一次）→cs-cloud | 单JSON对象：producer_id、device_id、plugin_version、ide_product、ide_build、ide_build_major、os_family、arch、mode、side、env、connection_provider | 5.2 |
-| 发现登记 | `~/.costrict/telemetry/registrations/<producer-id>.json` | 插件原子写→cs-cloud周期扫描（建议每5秒） | 单JSON对象：schema_major、outbox_path、producer_id、pid、process_start、created_at；只用于本机发现与所有权校验，不进入上报数据 | 4.1、5.2 |
-| 所有权与交接锁 | `<outbox根>/writer.lock`、`<outbox根>/exchange.lock` | 双方按规则持有 | 锁文件常驻、不得删除后重建；JVM/Go互操作原语、锁范围及统一锁顺序 | 7.2 |
-| 采集控制 | `~/.costrict/telemetry/control/jetbrains.json` | cs-cloud原子写→插件后台每30秒轮询 | control v1单JSON对象：开关、分用途有效期、account_epoch、account_state、允许事件类别及日志诊断限频；缺失、畸形或未知major按无有效策略fail closed | 8 |
-| 机器可读wire契约 | `packages/kilo-jetbrains/shared/src/test/resources/stability/` | 双方共同冻结 | fact-schema.json（事实行）与control-schema.json（控制文件）为JSON Schema；output-vectors.json承载输出ID向量的冻结（当前pending_freeze）；contract.json登记阶段0各项的冻结与验证状态 | 9.1、12 |
+| 事实文件 | `~/.costrict/telemetry/outbox/<scope-id>-<producer-id>.jsonl` | 插件单写者追加→cs-cloud按位移读取 | NDJSON v1：UTF-8无BOM、LF结尾、每行一个JSON对象、一行一write、普通记录≤32KiB；字段闭集与示例 | 6.1、7.1 |
+| 读取与位移 | cs-cloud自有状态存储（不写入outbox目录） | cs-cloud自管 | 每文件持久位移，与持久入队原子提交；文件变短或身份变化即归零重读，重复由event_id去重吸收 | 7.2 |
+| 采集控制 | `~/.costrict/telemetry/control/jetbrains.json` | cs-cloud原子写→插件后台每30秒轮询 | control v1单JSON对象：开关、分用途有效期、account_epoch、account_state、允许事件类别及日志诊断限频；无有效策略（缺失、空、畸形、未知major）默认不限制，限制仅来自当前有效的显式策略 | 8 |
+| 机器可读wire契约 | `packages/kilo-jetbrains/shared/src/test/resources/stability/` | 双方共同冻结 | fact-schema.json与control-schema.json为JSON Schema；本目录文件尚未随协议修订，待实现任务同步：fact-schema补edt.stall，control-schema的默认策略语义需反转（现为fail-closed描述）并补unbound占位说明，output-vectors.json与contract.json的输出ID冻结及锁验证条目废止重组 | 9.1、12 |
 
-两条根路径职责不同，不能混用：`~/.costrict/telemetry`位于用户主目录，是默认profile边界（5.2），只存放跨IDE的发现登记与控制文件；`<ide-log-dir>/costrict-telemetry`位于IDE日志目录，只存放本producer的outbox数据，机器局部——Split Mode下backend机器的cs-cloud读不到frontend机器的outbox（5.1）。事实行内禁止路径与凭据（6.1白名单）；登记文件的outbox_path是交接面中唯一的路径字段，consumer必须校验其解析结果不越出预期目录范围，并拒绝符号链接/重解析点越界（5.2）。
+唯一根路径为`~/.costrict/telemetry`（默认profile边界、机器局部）：`control/`只存放cs-cloud发布的控制文件，`outbox/`只存放插件追加的事实文件，两个子目录职责不混用——Split Mode下backend机器的cs-cloud读不到frontend机器的outbox（5.1）。事实行内禁止路径与凭据（6.1白名单）；consumer只接受outbox目录下的平铺常规文件并校验解析结果不越界，拒绝符号链接/重解析点（5.2）。
 
 ### 6. 本地事实格式v1
 
 #### 6.1 公共字段
 
-UTF-8无BOM，NDJSON，每行一个JSON对象，以LF结束；内嵌换行JSON转义。普通记录最大32KiB，message安全摘要最大512字节；v1不自动收集完整异常堆栈。
+UTF-8无BOM，NDJSON，每行一个JSON对象，以LF结束；内嵌换行JSON转义。事实逐行追加写入单文件，一行（含行尾LF）一次write调用。普通记录最大32KiB，message安全摘要最大512字节；v1不自动收集完整异常堆栈。
 
 | 字段 | 类型 | 含义 |
 |---|---|---|
@@ -290,15 +284,15 @@ workspace_id采用项目级随机映射或带本机秘密的HMAC，不用可被�
 
 #### 6.2 操作、区间和异常语义
 
-operation使用phase=start/progress/end。start携带deadline_ms（从开始起的观测时限）；end包含result、duration_ms、stage、cause及安全error_code，必须自包含，不能依赖查找原日志文本。插件用单调时钟判定截止；定时器到点或业务完成，先发生者成为终态，超时判定不取消业务本身。progress不计算完成次数。同一operation仅一个end；丢失start或end单列质量缺口，不能推测成功。跨账户切换的操作保留开始时的epoch，不能把end重新绑定给新账户。
+operation使用phase=start/progress/end。start携带deadline_ms（从开始起的观测时限）；end包含result、duration_ms、stage、cause及安全error_code，必须自包含，不能依赖查找原日志文本。插件用单调时钟判定截止；定时器到点或业务完成，先发生者成为终态，超时判定不取消业务本身。progress不计算完成次数。同一operation仅一个end；丢失的start或end无法由cs-cloud配对补全——不推测成功、不生成unknown，缺口由health损失计数与plugin.unclean表达（见10.2）。跨账户切换的操作保留开始时的epoch，不能把end重新绑定给新账户。
 
 断线恢复同时保留逻辑operation_id和传输attempt_id。后台重试会增加attempt，但逻辑操作分母不随之增加。正常取消保留cancelled，不进入error计数。
 
-interval保存begin_timestamp、end_timestamp、duration_ms、state和随机workspace_id，用于活跃/不可用时长，区间不重叠。sample保存单次耗时；高频渲染可对成功耗时受控采样并标明sample_rate，cs-cloud用样本生成分布且看板标注采样。不能只保存count/sum/min/max后声称可重建P95；失败事实和P0结果不采样，不据成功耗时样本估计操作成功率。
+interval保存begin_timestamp、end_timestamp、duration_ms、state和随机workspace_id，用于活跃/不可用时长，区间不重叠。sample保存单次耗时；高频渲染可对成功耗时受控采样并标明sample_rate，cs-cloud用样本生成分布且看板标注采样。不能只保存count/sum/min/max后声称可重建P95；失败事实和P0结果不采样，不据成功耗时样本估计操作成功率。stall区间由插件推导：探针观测区间内合并明确相交或首尾相接、持续≥2秒的阻塞区间，逐条产出edt.stall事实（duration_ms、observation_id）；合并与失效判定是插件侧规则（见10.3），cs-cloud只计数与分布，不从原始样本推导。
 
 diagnostic的data仅允许固定字段：message（固定安全模板加枚举，≤512字节）、error_class、frames（脱敏插件栈帧摘要，最多5帧，不含原始异常message）、fingerprint、count。fingerprint由异常类别及归一化插件类/方法生成，去掉行号等变化值；fault_id区分一次故障，fingerprint用于同类聚集。
 
-health中的drop/write_error使用本run累计快照，cs-cloud对同一源取相邻两次快照的差值，并单独处理第一份快照（没有更早的快照可相减），避免摘要重放造成重复计数；与操作事实产生的计数不能相加。持续计数只描述可观测损失，崩溃前尚未持久化部分可能丢失。
+health中的drop/write_error为自上一条health事实以来的增量，cs-cloud直接求和，无需差分与首份快照特判；run重启后增量自然从零起算。与操作事实产生的计数不能相加。持续计数只描述可观测损失，崩溃前尚未写出的部分可能丢失。
 
 ### 7. 写入、交接与容量
 
@@ -308,60 +302,48 @@ health中的drop/write_error使用本run累计快照，cs-cloud对同一源取�
 
 队列同时限制2000条及4MiB，以先达到者为准；critical预留按两个维度分别预留20%（400条、约820KiB）。优先丢diagnostic，critical仍满则拒绝新记录并计数，不能阻塞IDE或无限分配。入队耗时目标P99<1ms，需测试。
 
-每个通道单文件达到1MiB即封存；未满文件在累计16条或64KiB、或自首条写入起超过通道最长延迟（critical 30秒、diagnostic 5分钟）时封存，只有非空文件参与定时封存。最小批量避免低速率流（如每30秒一条health/availability记录）逐条成文件，最长延迟约束告警时效；具体阈值用真实事件率校准。封存执行flush、文件同步、关闭，再同目录原子改名.open→.ready；平台不支持原子改名时不能假装封存成功，应保留原文件并记健康错误。文件改名（目录项）在断电后是否仍然保留，需按操作系统分别实测验证。
+writer后台把队列批量追加到本producer的.jsonl文件：队列非空且有积压时最迟30秒flush并fsync一次（满足critical时效；diagnostic随批写出，不设更长延迟），或累计16条/64KiB即flush。只有非空批次参与定时flush；最小批量避免低速率流（如每30秒一条health/availability记录）逐条写盘，具体阈值用真实事件率校准。平台不支持fsync时记健康错误，不假装持久。
 
-最大易失范围包含排队和封存前数据，正常调度下约等于该通道最长封存延迟（critical约30秒）；长暂停、断电或磁盘失败可能更长。不能承诺“强杀IDE数据不丢”。日志和指标共享封存周期，该延迟须满足第13章从发生到受理的时效验收，避免过长轮转导致指标无法及时告警。
+最大易失范围包含排队和未flush数据，正常调度下约等于30秒；长暂停、断电或磁盘失败可能更长。不能承诺“强杀IDE数据不丢”。flush周期须满足第13章从发生到受理的时效验收，避免过长的缓冲导致指标无法及时告警。
 
-#### 7.2 文件状态与ACK
+#### 7.2 读取、位移与确认
 
-| 状态 | 谁能写/删除 | 含义 |
-|---|---|---|
-| .open | 插件writer | 正在追加，consumer不得读作完整文件 |
-| .ready | 插件可按配额淘汰；consumer可认领 | 已封存，内容不可变 |
-| .claimed | cs-cloud | 已认领，复制/校验中；尚未ACK |
-| .done | cs-cloud | 所有合法行已进入durable spool，坏行已登记；可清理源文件 |
+没有交接锁、没有状态机后缀：插件是本文件唯一写者，cs-cloud只读。确认语义从文件状态转为消费位移——cs-cloud为每个文件维护持久化字节位移，含义是“该位移之前的合法行已进入durable spool”，不是读完，也不是云端受理。
 
-插件持有writer.lock整个采集生命周期；消费者和清理器仅在后台用exchange.lock串行化.ready认领/淘汰。统一锁顺序为writer.lock→exchange.lock，允许插件在持有writer锁时短暂获取exchange锁，禁止任何执行者持exchange锁再等待writer锁。救援.open须先释放exchange锁，再尝试获取writer锁；插件不能为淘汰文件释放活跃writer锁。consumer先预留容量再在锁内.ready→.claimed，锁外复制和校验；插件永远不碰.claimed。发现ENOENT只说明另一方已认领/淘汰，不能记上传成功。
+| 规则 | 约定 |
+|---|---|
+| 位移提交 | 与持久入队（含输入event_id去重索引、源记录及账户/许可快照、消费进度、输出计划或可重建它们的版本信息）在同一可恢复事务内提交；可用事务存储或带提交标记与同步规则的journal实现，本轮不替cs-cloud选定数据库 |
+| 幂等重读 | 文件变短或文件身份变化（写者容量重写、外部替换）时位移归零重读；重复读取由event_id去重吸收，任何顺序的重读都不得重复累计 |
+| 残缺尾行 | 读到无LF结尾的尾部行时跳过并等待下次扫描；写者崩溃可能留下这种行（7.3） |
+| 多消费者 | 并发读同一文件安全（读取幂等）；部署建议单消费者，属资源建议而非协议要求 |
 
-cs-cloud完成整文件合法行的持久接收、去重索引及消费状态提交后，再.claimed→.done；ACK含义是“进入daemon可靠投递链”，不是读完，也不是云端受理。跨磁盘时复制到spool并同步后才ACK，不能依赖跨盘原子移动。
+consumer崩溃后从上次已提交位移重放，不因文件名或身份变化跳过。未知major或无法解析的版本文件隔离、有界保留并记录不支持，不能误报成功接收。可靠交接不能直接套用现有workflowrunner.Outbox或提案中的异步fsync默认值：日志与指标的后续投递独立，但任何必要信息仍只在易失内存中时都不能推进位移。
 
-可靠交接不能直接套用现有workflowrunner.Outbox或提案中的异步fsync默认值。提交必须覆盖输入event_id、源记录及账户/许可快照、消费进度、输出计划或可重建它们的版本信息；映射后的结果尚未产生时，也要能在重启后恢复处理。可用事务存储，或带提交标记和同步规则的journal实现；本轮不替cs-cloud选定数据库。日志与指标的后续投递独立，但任何必要信息仍只在易失内存中时都不能.done。
-
-writer.lock/exchange.lock还需明确JVM与Go的互操作原语及锁范围：Unix不能未经验证混用不互斥的flock与fcntl锁，Windows需匹配字节范围锁及共享打开方式。必须用真实JVM writer和Go consumer跨进程验证互斥、进程死亡释放及休眠保留，不能只用同语言锁测试证明协议成立。
-
-consumer中途崩溃，重新处理.claimed并按稳定input event_id去重；不要因为文件名已变化就跳过。多个daemon对同一源只有一个消费者锁持有者。未知major或无法解析的版本文件隔离、有界保留并记录不支持，不能误报成功接收。
-
-ACK后插件责任结束，云端指标与日志分别维护输出状态。输入记录在必要输出已受理、永久拒绝或按策略过期前保留可恢复信息；一个出口失败不能阻塞另一个。
+位移提交后插件责任结束，云端指标与日志分别维护输出状态。输入记录在必要输出已受理、永久拒绝或按策略过期前保留可恢复信息；一个出口失败不能阻塞另一个。
 
 #### 7.3 崩溃残留和坏行
 
-不能仅凭mtime判writer死亡：休眠、暂停或低活动都可能很久不更新。consumer先取得writer.lock并核查pid/process_start，确认没有活跃writer才救援.open。证据不足等待，不通过超时强行接管；同device_id的新进程也不能随意封存其他进程文件。
+写者崩溃可能留下无LF的残缺尾行：读取方丢弃该行并记corrupt，不做救援、不做mtime死亡推断、不接管他者文件；休眠、暂停或低活动不影响交接。中间坏行隔离并计数，其他合法行继续处理，不让一行阻塞整个队列；只有明确支持的schema才按逐行容错处理，未知major不能逐行当corrupt清空。
 
-救援只保留最后完整LF前的记录；尾部不完整行丢弃并记corrupt。中间坏行隔离并计数，其他合法行继续处理；不要让一行阻塞整个队列。只有明确支持的schema才按逐行容错处理，未知major不能逐行当corrupt清空。
-
-consumer识别旧run未正常结束只能记unclean或unknown，不推断插件崩溃或daemon重启。
+未正常结束的run由插件下一实例判定：按scope-id前缀找到前任文件，最后一条plugin.started之后没有plugin.shutdown即产出plugin.unclean。consumer不推断插件崩溃或daemon重启。
 
 #### 7.4 空间和清理
 
 | 范围 | 默认上限 | 责任 |
 |---|---|---|
 | 内存队列 | 2000条且4MiB | 插件 |
-| 每producer未交接文件 | 10MiB，保留期24小时 | 活跃writer清理；死亡producer由后续插件实例或daemon清理 |
-| 同IDE日志根目录未交接总量 | v1不设根目录级强制配额 | 每producer独立执行10MiB；跨producer协调机制与总量阈值（如50MiB）列入第13章联调确认，v1不实现 |
+| 每producer事实文件 | 10MiB | 写者进程后台重写淘汰最旧行，淘汰计入health drop |
+| 陈旧事实文件 | 保留期24小时（无新追加） | 同scope由后续插件实例清理；跨scope由cs-cloud清理 |
 
-同一机器多个IDE日志根目录、同一根目录下多个producer的预算分别计算；v1不做跨producer协调淘汰，根目录总量是否需要阈值及机制用真实多producer场景评估（见第13章）。默认值需用实际事件率校准；“最长24小时”不保证满24小时都存得下。
+文件超过10MiB时由写者进程重写：把最新内容截取至预算内写入临时文件，原子替换后重开追加；被淘汰行按drop原因计数，不改写保留行的内容。consumer通过“文件变短”检测并归零重读（7.2）。插件必须容忍自身文件被清理方删除：下次追加时按原名重建，不视为错误。默认上限需用实际事件率校准。
 
-未交接超限先淘汰最旧diagnostic .ready，再淘汰最旧critical .ready；不改写已封存文件来按行删除内容，以免与消费竞争。仍无空间则拒绝新写入并计数。根目录协调只在后台进行，绝不阻塞业务。
-
-.done持久确认后可立即删除，周期扫尾不晚于1小时，计入daemon容量直到删除；.done已交接完毕，不计入插件侧未交接10MiB/24小时配额。停用/卸载后的残留由已登记且通过所有权校验的daemon清理；producer登记在确认无活跃writer且文件已清空后清除，避免元数据无限增长。不得按目录名通配删除其他IDE日志。
-
-插件后续实例启动时及运行期间每小时，在后台扫描同一IDE日志根目录的已登记旧producer；即使采集禁用或daemon不可用也执行残留清理，清理不产生待上传业务事实。通过路径、所有权、PID/启动身份校验并取得旧writer.lock后，按writer→exchange顺序删除已过保留期的.open/.ready；未过期.open交由正常救援流程，.claimed/.done仍仅由daemon处理。不得持自己的writer锁去等待另一个producer锁，旧源清理采用独立任务及非阻塞试锁。无活跃writer且无数据文件后才移除登记和元数据；锁文件保持稳定；当其他执行者可能持有或打开它时，不得删除后重建（unlink）。
-
-24小时是数据可交接/发送的保留期，不是无人运行时的物理删除保证。插件与daemon均停用时无法执行清理，恢复运行后的首轮清理删除过期残留。v1不承诺跨producer磁盘总量有硬上限；根目录总配额仍是第13章的上线评估项。
+陈旧清理只删除整个文件，条件是自最后一次追加起超过保留期24小时；活跃producer至少周期性追加health事实，不会误触。清理在后台进行，绝不阻塞业务，也不产生待上传业务事实；插件实例只清理自己scope-id前缀的文件，跨scope残留由cs-cloud按保留期清理。24小时是数据可交接的保留期，不是无人运行时的物理删除保证：插件与daemon均停用时无法执行清理，恢复运行后的首轮清理删除过期残留。v1不设outbox目录总配额，跨IDE安装的总量阈值与机制列入第13章评估。
 
 ### 8. 采集开关与账户归属
 
-cs-cloud原子写`~/.costrict/telemetry/control/jetbrains.json`，插件后台每30秒检查一般策略，consumer发批前检查；账户切换另按8.1同步，不依赖该轮询提供身份正确性。控制文件按机器生效：远程frontend机器没有本机cs-cloud时无策略来源，视同首次无策略，不因backend机器存在策略而放行本机采集。字段：schema_major、revision、enabled、metrics_enabled、metrics_expires_at、logs_enabled、logs_expires_at、account_epoch、account_state（pending/ready/disabled）、expires_at、各用途允许事件类别及日志诊断限频，无JWT。metrics_enabled的服务端权威信号在现有契约中没有对应端点，其来源需在阶段0定义；日志开关由11.3的endpoint发现及明确禁采响应同步。事件固定policy_revision和purposes，便于重开或策略变更后核对原始用途，不能仅凭当前开关扩大旧数据用途。
+cs-cloud原子写`~/.costrict/telemetry/control/jetbrains.json`，插件后台每30秒检查一般策略，consumer发批前检查；账户切换另按8.1同步，不依赖该轮询提供身份正确性。控制文件按机器生效：远程frontend机器没有本机cs-cloud时无策略来源，按无有效策略默认不限制，也不因backend机器存在策略而改变本机语义。字段：schema_major、revision、enabled、metrics_enabled、metrics_expires_at、logs_enabled、logs_expires_at、account_epoch、account_state（pending/ready/disabled）、expires_at、各用途允许事件类别及日志诊断限频，无JWT。metrics_enabled的服务端权威信号在现有契约中没有对应端点，其来源需在阶段0定义；日志开关由11.3的endpoint发现及明确禁采响应同步。事件固定policy_revision和purposes，便于重开或策略变更后核对原始用途，不能仅凭当前开关扩大旧数据用途。
+
+**默认值（fail open）。** 无有效策略——文件不存在、为空、畸形或未知major——时默认不限制采集：插件按全用途采集，purposes标metrics与logs，policy_revision=0，account_epoch使用占位值unbound（见8.1）。限制只能来自当前有效的显式策略；策略过期视为显式授权边界已过，仍按过期停采处理，这也是“用户撤销授权且daemon失联无法更新文件”时的安全上限（单项最长24小时）。
 
 | 状态 | 插件 | cs-cloud |
 |---|---|---|
@@ -369,21 +351,21 @@ cs-cloud原子写`~/.costrict/telemetry/control/jetbrains.json`，插件后台�
 | 暂时离线/429限额 | 在有效许可及容量内采集 | 有界缓存，遵循退避/Retry-After |
 | 服务端logs_enabled=false | 最迟30秒停止新增上传用诊断；独立本地运行日志不受影响 | 立即停日志新批次；既有缓存只在原保留期内保留，重开后可补发关闭前数据 |
 | metrics_enabled=false | 停新增指标事实；日志仍按独立许可处理 | 停指标发送，不把日志开关当指标开关 |
-| 用户撤销授权/总enabled=false | 停采并清理待交接数据 | 停发并清理待发数据，不在重开后补报撤销期间数据 |
-| 某用途策略缺失或过期 | 仅停止该用途采集，另一有效用途继续 | 仅暂停对应出口，按该用途保留期处理缓存 |
-| 公共策略缺失、过期或未知major | 关闭两种上传用途采集，独立本地诊断继续 | 不推定允许，等待有效公共策略 |
+| 用户撤销授权/总enabled=false/公共expires_at过期 | 停采并清理待交接数据 | 停发并清理待发数据，不在重开后补报撤销期间数据 |
+| 某用途过期或显式关闭 | 仅停止该用途采集，另一有效用途继续 | 仅暂停对应出口，按该用途保留期处理缓存 |
+| 无有效策略（缺失、空、畸形、未知major） | 默认不限制：全用途采集，purposes全标，epoch用占位值unbound，policy_revision=0 | 正常消费；上报按发送时账户与许可核对，不因占位epoch拒收 |
 
 服务端关闭日志时，仍允许的指标事实可继续采集，但不得派生新的日志输出。每种输出都必须同时满足采集时purposes与发送时许可，不能在重开后把关闭期间指标事实追溯转为日志，或把仅日志用途的数据追溯转为指标。已在途请求不能保证撤回，关闭行为需标明生效边界。
 
 控制文件分别提供metrics_expires_at与logs_expires_at，独立判断用途是否有效；公共expires_at仅限制账户绑定及总授权。每项用途的有效截止取自身截止与公共截止的较早值，不取另一个用途的截止。单项允许策略最长有效期建议24小时，且不得超过该用途上游授权/配置有效期；日志用途还受endpoint发现缓存有效期约束（expires_in单位为分钟），不能用24小时覆盖已过期的5小时日志配置。
 
-日志策略过期只停止logs用途，仍有效的metrics继续；指标策略过期亦然。缺少某用途策略即关闭该用途，不因另一个用途允许而放行。公共策略失效、账户未就绪或总授权撤销才同时停止两条链路。既有数据仅在各自保留期内等待有效策略。默认关闭会降低首次安装/凭据未就绪时的故障覆盖，属于3.3节的观测盲区；如果产品已有明确生效的采集默认策略，接入同一有效许可规则，不由文档私自扩大权限。
+日志策略过期只停止logs用途，仍有效的metrics继续；指标策略过期亦然。有效策略中某用途关闭或过期即停止该用途，不因另一个用途允许而放行。公共策略失效、账户未就绪（显式pending/disabled）或总授权撤销才同时停止两条链路。既有数据仅在各自保留期内等待有效策略。默认不限制使首次安装、daemon未运行及凭据未就绪时段也有故障覆盖；若产品后续需要更保守的默认（如仅开指标用途），由cs-cloud发布显式策略实现，不由插件内置缩小或扩大。
 
 #### 8.1 账户切换边界
 
-account_epoch是daemon给当前已验证账户/租户的随机本机代号，事件采集时固定，与device_id不同。v1采用保守丢弃策略：账户或租户切换、登出时永久退役旧epoch，清除其尚未发送的输入和派生输出；再次登录同一账户也分配新epoch，不恢复旧epoch队列。仅Token刷新且已验证身份不变时可保留epoch。
+account_epoch是daemon给当前已验证账户/租户的随机本机代号，事件采集时固定，与device_id不同。无有效策略期间采集的事实使用固定占位值unbound且policy_revision=0：占位epoch不绑定任何账户代际，任何unbound时段的占位数据都按发送时已验证身份归属上报，不触发退役丢弃；ready epoch发布后新事实改用该epoch，占位期数据不重绑、不丢弃。v1采用保守丢弃策略：账户或租户切换、登出时永久退役旧epoch，清除其尚未发送的输入和派生输出；再次登录同一账户也分配新epoch，不恢复旧epoch队列。仅Token刷新且已验证身份不变时可保留epoch。
 
-清除针对记录用途和输出状态执行；已封存文件可能混有其他epoch，不按行改写或整文件误删。consumer持久登记退役行已丢弃，处理完文件其他合法行后才能清理源文件；已认领文件仍由consumer负责。内存排队事实可直接按epoch丢弃，任何一方都不得因此突破7.2的文件所有权规则。
+清除针对记录用途和输出状态执行；追加文件可能混有其他epoch的行，不按行改写文件。consumer持久登记已丢弃的退役epoch行，其余合法行正常处理。内存排队事实可直接按epoch丢弃；插件的容量重写与清理只由写者进程按7.4执行，不受epoch退役影响。
 
 身份代际必须与daemon实际使用的业务凭据同步：在启用新身份前持久化旧epoch退役并阻止其新批次，再发布pending；新身份及许可确认后发布新的ready epoch。发送器每批次校验当前已验证身份与epoch的绑定，不能仅相信尚未刷新的控制文件。外部认证文件变化也必须经过该边界；若cs-cloud不能提供这项保证，账户归属能力不满足阶段0要求，不能用30秒轮询代替。
 
@@ -420,10 +402,11 @@ account_epoch是daemon给当前已验证账户/租户的随机本机代号，事
 | availability | interval | state、起止及duration_ms | M13，时间损失 |
 | error.uncaught / error.reported | diagnostic | 计数事实：fault_id、error_class、handled、fingerprint、component；详情记录另加6.2的message/frames | M14，异常次数与关联；不等于记录所有IDE错误 |
 | protocol.error | diagnostic | transport、stage、error_code | M15，协议兼容 |
-| telemetry.health | health | drop/write_error累计、depth_bytes、oldest_age_ms | M16，采集健康；consumer的迟到质量另见10.2 |
+| telemetry.health | health | drop/write_error增量、depth_bytes、oldest_age_ms | M16，采集健康与覆盖缺口观测 |
 | session.dispose_risk | transition | dispose_source、conversation_active | M18，释放风险 |
 | rpc | operation | phase、api_group | M19，通信定位 |
 | edt.delay / edt.violation | sample/diagnostic | 探针字段见10.3；违规记录带operation与evidence字段 | M20，延迟和已确认违规分开 |
+| edt.stall | sample | duration_ms、observation_id | M20，插件合并≥2秒阻塞区间产出的卡顿区间（见10.3） |
 | render.apply | sample | duration_ms、result、component、batch_size_bucket | M21，UI处理 |
 | ide.operation | operation | phase、operation | M23，IDE能力 |
 | resource.snapshot | sample | resource、count | M24，自有资源数量 |
@@ -432,13 +415,13 @@ kind=diagnostic只是数据形态；error/protocol/violation的最小计数事�
 
 operation.end包含公共result、duration_ms、cause，未在表内逐行重复。非operation的环境变化、健康和样本字段按上述固定白名单校验，禁止透传任意对象。
 
-事件data可包含未列入指标聚合维度的明细字段（如stage、error_code），cs-cloud只取登记维度作标签，明细用于日志与诊断。M16的observation_total由cs-cloud推导：run级started/terminal/unknown计数复用M22的plugin.started/shutdown/unclean事件，操作级缺口按10.2完成配对和最终结算，不新增插件业务埋点。M20推导及每个派生输出的身份分别见10.3、9.1；M17为cs-cloud对两出口的自观测，不登记插件事实。
+事件data可包含未列入指标聚合维度的明细字段（如stage、error_code），cs-cloud只取登记维度作标签，明细用于日志与诊断。M16的observation_total由插件侧终态事实直接构成：run级复用plugin.started/shutdown/unclean，操作级复用各operation的end/timeout终态；cs-cloud不配对结算、不推断丢失终态（见10.2），不新增插件业务埋点。M20的stall由插件产出edt.stall；每个派生输出的身份见9.1；M17为cs-cloud对两出口的自观测，不登记插件事实。
 
-#### 9.1 派生输出身份与版本
+#### 9.1 派生输出身份
 
-输入event_id仅用于事实去重，不能直接复用为所有派生指标的输出ID。同一operation.end的次数counter、耗时histogram及诊断日志必须各有独立ID。单事实输出用UUIDv5生成：固定命名空间加规范化数组`[input_event_id, sink, output_name, mapping_version]`（sink为输出用途，取metrics或logs）；数组元素顺序和编码固定，不能用无分隔字符串拼接；命名空间常量值及数组规范化编码在阶段0一并冻结，跨版本不得更换。36字符满足指标≤64和日志≤128字符的限制，重试与崩溃恢复保持ID和内容不变。
+输入event_id仅用于事实去重，不能直接复用为所有派生输出的ID：同一operation.end的次数counter、耗时histogram及诊断日志必须各有独立ID。生成方案（哈希算法、UUID版本、命名空间与编码）是cs-cloud内部实现细节，由其仓库自定并测试，不在本契约冻结；约束只有三条：确定性（同输入重放生成的ID及内容不变，重试与崩溃恢复不换ID）、区分度（同事实不同sink或输出名得到不同ID；累计类输出使用持久化聚合键与输出序号，聚合键含producer/run、account_epoch、用途、指标及登记标签、映射版本）与长度合规（指标输出ID≤64字符、日志≤128字符）。
 
-累计快照、限频摘要及配对结算等多事实输出，使用持久化的聚合键和输出序号代替input_event_id作为确定性输入；聚合键含producer/run、account_epoch、用途、指标及登记标签、映射版本。输入去重、累计更新、输出序号和输出内容须作为一个可恢复提交，禁止重放时重新分配ID。映射升级只作用于尚未派生的新输入，旧输出按原内容重试；修正已拒绝且确定未写入的日志可用新的映射修订生成替代输出，不因升级重复计入已接受的业务事实。
+插件保证输入event_id在采集时生成、重放不变。输入去重、累计更新、输出序号和输出内容须作为一个可恢复提交，禁止重放时重新分配ID。映射升级只作用于尚未派生的新输入，旧输出按原内容重试；修正已拒绝且确定未写入的日志可用新的映射修订生成替代输出，不因升级重复计入已接受的业务事实。
 
 ## 第三部分：指标采集、转换与上报
 
@@ -448,7 +431,7 @@ operation.end包含公共result、duration_ms、cause，未在表内逐行重复
 
 指标仅消费purposes包含metrics且指标许可有效的事实，用于成功率、耗时分布、可用性及完整性统计。M01～M24的口径、分母、优先级、Spec与桶以[指标文档](./jetbrains-plugin-stability-metrics.md)为准；原始异常message、堆栈详情和日志级别不进入指标值或自由文本标签。
 
-插件保存操作起止/结果、可用性区间、有效探针与资源样本，以及异常最小计数事实。cs-cloud先按输入ID去重，再配对、累计、分桶并持久化指标输出；counter/histogram为同源累计，gauge为瞬时值，毫秒耗时转秒。不得从日志行数估计成功率，也不得把日志详情采样率用于还原指标分母。异常次数不因同fingerprint日志限频而减少。
+插件保存操作起止/结果、可用性区间、有效探针与资源样本，以及异常最小计数事实。cs-cloud先按输入ID去重，再按插件已结算的终态累计、分桶并持久化指标输出；counter/histogram为同源累计，gauge为瞬时值，毫秒耗时转秒。不得从日志行数估计成功率，也不得把日志详情采样率用于还原指标分母。异常次数不因同fingerprint日志限频而减少。
 
 指标独立使用metrics_enabled与metrics_expires_at。指标服务故障只积压指标发送队列；日志成功不能将指标输出标为已受理。指标输出身份采用9.1，累计键包括来源、账户代际、标签与映射版本；多源、重置和迟到分别验证。
 
@@ -456,13 +439,11 @@ operation.end包含公共result、duration_ms、cause，未在表内逐行重复
 
 JetBrains输入应作为cs-cloud未来metrics核心的一个独立模块接入：输入是插件事实，不是agent.SessionObservation。插件来源上下文必须由适配器显式传入EventBuilder，保留采集时版本和producer/run，不能套用提案中的daemon版本、cli及cs-cloud默认值。consumer重启恢复同一源的去重/累计状态；consumer自身process_epoch仅用于自观测，不得替换插件run_id。Metrics模块关闭也不能关闭独立的日志文件消费与发送。
 
-#### 10.2 业务截止与交接迟到
+#### 10.2 终态与归窗
 
-业务deadline不是consumer等待文件的超时。end在deadline内发生，即使因封存、断连或重放较晚收到，仍按其可信终态结算；业务在deadline后才完成则沿用插件已结算的timeout，迟到完成只补安全诊断。consumer不能仅凭“当前没收到end”生成timeout。
+业务截止由插件单调时钟结算（6.2）：end或timeout落盘即为可信终态，cs-cloud不再维护pending配对、交接迟到宽限或二次结算，也不能仅凭“当前没收到end”生成timeout或unknown。业务在deadline后才完成时沿用插件已结算的timeout，迟到完成只补安全诊断。
 
-有start无end时先记为配对状态pending，不立即增加unknown累计值；暂定看板展示“等待交接确认”，不能算成功或可信终态。默认在业务截止后再容忍24小时的交接迟到，宽限结束前收到有效end即可完成配对。宽限结束仍缺end才最终记unknown；之后到达的记录仅由consumer记late_after_finalization质量计数，不再次改变已结算结果。这个宽限控制配对状态保留，不延长原始文件或日志输出的保留期。
-
-暂定完整率由查询侧读取配对状态，最终unknown才进入累计指标。cs-cloud必须持久化配对状态、结算标志及确定性输出，重启不得重开宽限或二次结算。历史终态计入事件发生时的原批次，不能把今天收到的昨天成功算作今天的操作。累计输出还必须处理同源乱序：在确定顺序前缓存，已发出的累计快照不能换内容或插入破坏单调性的快照；暂定视图与按原批次累计所需的查询支持列入阶段0验证。平台未支持前不宣称实时完整率与历史累计同时正确。
+迟到收到的终态（断连、重放、文件归零重读）按事件timestamp归入发生时的原批次，不把今天收到的昨天成功算作今天的操作，也不重复累计。同源乱序在确定顺序前缓存，已发出的累计快照不能换内容或插入破坏单调性的快照；cs-cloud必须持久化累计与位移状态，重启不得重复增量或二次结算。“未收到”在查询侧表达为覆盖缺口（以plugin.unclean与health损失增量为输入），不是一类终态计数；平台未支持前不宣称实时完整率与历史累计同时正确。
 
 #### 10.3 EDT探针事实与卡顿推导
 
@@ -470,7 +451,7 @@ JetBrains输入应作为cs-cloud未来metrics核心的一个独立模块接入�
 
 edt.delay包含observation_id、probe_seq、scheduled_mono_ms、completed_mono_ms、duration_ms和validity=valid/suspended/scheduler_gap/unknown。时间采用本run内的相对单调时钟毫秒，probe_seq在观测区间内按实际投递递增；通道seq只能辅助判断事实丢失，不能代替探针序号。后台调度器检测自身调度间隔异常并结合平台休眠/恢复通知使未完成样本失效；不能可靠区分休眠的情况记unknown，不算卡顿。恢复后必须开启新观测区间。
 
-cs-cloud只将valid样本用于延迟直方图。单个样本的排队区间持续≥2秒即构成一个观测到的stall（卡顿区间），不要求阻塞期间仍每秒产生样本；同观测区间内仅合并明确相交或首尾相接的阻塞区间，不跨空白时间猜测连续性。序号缺失、中断标记或observation_id变化打断合并，缺失部分不推断卡顿，但不抹去已完整观测的长延迟样本。该口径衡量探针观测到的排队阻塞，可能低估真实冻结时间，不等同平台freeze检测。
+插件将valid样本的排队区间在本机合并：单个区间持续≥2秒即构成一个观测到的stall（卡顿区间），不要求阻塞期间仍每秒产生样本；同观测区间内仅合并明确相交或首尾相接的阻塞区间，不跨空白时间猜测连续性。序号缺失、中断标记或observation_id变化打断合并，缺失部分不推断卡顿，但不抹去已完整观测的长延迟样本。合并结果逐条落盘为edt.stall事实（6.2）；该口径衡量探针观测到的排队阻塞，可能低估真实冻结时间，不等同平台freeze检测。cs-cloud只将valid样本计入延迟直方图、按edt.stall事实计数卡顿区间并累计其分布，不从原始样本推导合并。
 
 #### 10.4 指标请求、确认与重试
 
@@ -482,9 +463,9 @@ cs-cloud使用当前已验证账户有效JWT调用`POST /user-indicator/api/v2/m
 
 HTTP 200必须解析accepted/rejected及errors，按index/event_id确认每个输出；不能把整批直接标成功。重复ID响应按契约视为已受理，不再次累计；字段/Spec/标签及stale_event时效超窗等永久拒绝单独登记，已成功项不跟随失败项重新派生。无法可信解析响应时保持未确认，并以相同ID和内容重试。
 
-请求级400修正请求结构后重试；413拆小批次；401用同一身份刷新凭据；403暂停发送并核查权限；429遵循Retry-After，可重试的服务端错误使用有界退避。指标服务幂等窗口（窗口内同一输出ID重复投递会被服务端忽略）默认7天且可配置，指标输出最大重试期限必须在阶段0配置为不超过实际幂等窗口，超过后丢弃并计数，不能换ID当新事件补报；同时事件timestamp受独立的时效窗口约束（默认7天），超出即按stale_event逐条永久拒绝、不可重试，积压输出按丢弃处理并计数。指标持久队列与累计/配对状态的容量单独设定，不与日志共用50MiB预算和3天接收窗口。
+请求级400修正请求结构后重试；413拆小批次；401用同一身份刷新凭据；403暂停发送并核查权限；429遵循Retry-After，可重试的服务端错误使用有界退避。指标服务幂等窗口（窗口内同一输出ID重复投递会被服务端忽略）默认7天且可配置，指标输出最大重试期限必须在阶段0配置为不超过实际幂等窗口，超过后丢弃并计数，不能换ID当新事件补报；同时事件timestamp受独立的时效窗口约束（默认7天），超出即按stale_event逐条永久拒绝、不可重试，积压输出按丢弃处理并计数。指标持久队列与累计状态的容量单独设定，不与日志共用50MiB预算和3天接收窗口。
 
-cs-cloud指标提案给出的spool候选为32MiB/72小时，周期快照候选为30秒，可作为独立指标预算的评估起点，不是已生效配置；其不同章节的批量目标值也须在实施前统一。72小时只用于已交接指标输出，不延长插件24小时outbox或日志保留期；亦不等于服务端接收时间窗口。周期快照还要计入插件封存和文件扫描时延，不能仅用Sender耗时代表P0告警时效。
+cs-cloud指标提案给出的spool候选为32MiB/72小时，周期快照候选为30秒，可作为独立指标预算的评估起点，不是已生效配置；其不同章节的批量目标值也须在实施前统一。72小时只用于已交接指标输出，不延长插件24小时outbox或日志保留期；亦不等于服务端接收时间窗口。周期快照还要计入插件flush和目录扫描时延，不能仅用Sender耗时代表P0告警时效。
 
 ## 第四部分：日志采集、转换与上报
 
@@ -523,7 +504,7 @@ cs-cloud使用当前账户有效Token调用`GET /user-indicator/api/v1/telemetry
 | client_type | 固定jetbrains-plugin；发送者是cs-cloud不改变原产品类型 |
 | client_version | 使用采集时plugin_version，≤64字节；不改为daemon版本 |
 | workspace_id | 使用安全的context.workspace_id，≤128字节；无项目上下文省略 |
-| event_id | 使用9.1的日志输出ID，重试不变；本方案统一使用36字符UUID |
+| event_id | 使用9.1的日志输出ID，重试不变；长度≤128字符，具体格式由cs-cloud按9.1自定 |
 | attributes | 固定键的字符串值，最多24对；键符合`[a-z][a-z0-9_]{0,47}`，单值≤1KiB；不透传context/data对象 |
 
 attributes优先保留event_name、input_event_id、producer_id、run_id、mode、side、plugin_env、connection_provider及存在的operation_id/attempt_id/fault_id/trace_id；剩余预算按映射白名单选result、duration_ms、stage、cause、error_code、fingerprint、count和安全环境信息。有限插件栈帧拼成一个≤1KiB的安全字符串，不发送数组；为details_truncated预留一个键，超预算时省略低优先级明细并标记true，不截断关联ID或身份字段。所有值显式转字符串，无对象、数组或null；未知字段不直接转成动态键。
@@ -540,11 +521,11 @@ attributes优先保留event_name、input_event_id、producer_id、run_id、mode�
 
 仅合并同一已验证账户/租户及epoch的数据，优先同设备批次。发送为UTF-8 NDJSON，使用application/stream+json或application/x-ndjson，不能包装JSON数组；支持gzip。触发建议为100条、256KiB解压后体积或5秒，任一达到即发送非空批次。硬限制同时满足1～500条、传输≤1MiB、解压≤4MiB、单行≤64KiB；v1安全message上限仍为512字节，不因服务端允许32KiB而放宽。最多2个在途日志请求，总超时建议30秒。
 
-消费器建议每5秒扫描非空ready队列；加上插件封存与daemon批量等待，正常调度且无积压时，critical事实到首次发送的调度预算约40秒，diagnostic约310秒，均另加I/O及网络时间。接口建议的5秒批量周期不等于端到端5秒。详情日志当前适合排障，P0告警使用critical指标；如需日志快速告警，应先缩短diagnostic封存预算并实测成本，不能直接宣称已满足。
+消费器建议每5秒扫描outbox目录并续读新数据；加上插件flush与daemon批量等待，正常调度且无积压时，critical事实到首次发送的调度预算约40秒，diagnostic随critical同批写出、预算相同，均另加I/O及网络时间。接口建议的5秒批量周期不等于端到端5秒。详情日志当前适合排障，P0告警使用critical指标；如需日志快速告警，应先实测flush与批量成本，不能直接宣称已满足。
 
 #### 11.6 日志确认、失败与重试
 
-.done仅表示本地可靠接收；日志POST返回200且空响应体时，cs-cloud持久化该批各输出的accepted状态，不等待不存在的逐条成功数组。accepted表示接口受理，不表示逐条持久化、立即可查询或exactly-once。指标200部分成功仍按指标契约逐项处理，不能套用日志整批确认语义。
+位移提交仅表示本地可靠接收；日志POST返回200且空响应体时，cs-cloud持久化该批各输出的accepted状态，不等待不存在的逐条成功数组。accepted表示接口受理，不表示逐条持久化、立即可查询或exactly-once。指标200部分成功仍按指标契约逐项处理，不能套用日志整批确认语义。
 
 | 响应/故障 | cs-cloud动作 |
 |---|---|
@@ -561,7 +542,7 @@ attributes优先保留event_name、input_event_id、producer_id、run_id、mode�
 
 #### 11.7 日志容量与保留期
 
-日志spool默认预算50MiB，原事件发生后24小时到期，ACK、重试、账户刷新和重开开关均不延长；与outbox属于不同容量，不能隐含再保留24小时。服务端接收时间窗口为过去3天至未来5分钟，与本地保留策略同时满足。先淘汰低级别日志输出并记录丢弃，不能删除仍被指标出口或配对状态引用的唯一输入。daemon必须对共享输入、配对/去重索引和两出口状态另设总体容量；预算与释放规则在其仓库内定稿并做满盘测试，不能把50MiB当成整个daemon的总空间上界。
+日志spool默认预算50MiB，原事件发生后24小时到期，ACK、重试、账户刷新和重开开关均不延长；与outbox属于不同容量，不能隐含再保留24小时。服务端接收时间窗口为过去3天至未来5分钟，与本地保留策略同时满足。先淘汰低级别日志输出并记录丢弃，不能删除仍被指标出口或去重/累计状态引用的唯一输入。daemon必须对共享输入、去重/累计索引和两出口状态另设总体容量；预算与释放规则在其仓库内定稿并做满盘测试，不能把50MiB当成整个daemon的总空间上界。
 
 #### 11.8 日志投递质量
 
@@ -571,18 +552,18 @@ attributes优先保留event_name、input_event_id、producer_id、run_id、mode�
 
 ### 12. 实施顺序与边界
 
-本轮交付为文档整合。下列为后续交付分期，尚未执行代码变更。
+本轮交付为文档修订：交接协议由分段文件+状态机+锁改为追加日志+位移消费，并同步简化派生语义。插件侧采集器已按旧版分段协议在分支上实现并测试，需按本版协议调整落盘布局与事件字典（health增量、edt.stall等）；cs-cloud侧消费与上报尚未实现。下列为交付分期。
 
 | 阶段 | 共用设施 | 指标交付与验收 | 日志交付与验收 |
 |---|---|---|---|
-| 0 契约冻结 | 身份切换、许可、远程范围、持久交接及输出ID命名空间/编码 | 冻结Spec、分母、累计/重置/迟到查询、指标容量与幂等期限 | 冻结日志选择、九字段、发现/禁采、整批响应及日志容量 |
-| 1 最小链路 | writer、登记、控制、ACK与崩溃恢复 | 接M03/M14/M16/M17和M22基础run事实；指标逐项确认，重放不重复累计 | 接生命周期、操作失败与安全异常；发现、映射、整批确认、重试及查询可关联 |
+| 0 契约冻结 | 身份切换、许可、远程范围、位移事务及序列键承载 | 冻结Spec、分母、累计/重置与终态归窗查询、指标容量与幂等期限 | 冻结日志选择、九字段、发现/禁采、整批响应及日志容量 |
+| 1 最小链路 | writer、追加协议、控制与位移消费 | 接M03/M14/M16/M17和M22基础run事实；指标逐项确认，重放不重复累计 | 接生命周期、操作失败与安全异常；发现、映射、整批确认、重试及查询可关联 |
 | 2 用户旅程 | 复用已验证事实通道 | 完成11组P0（M01～M05、M11～M14、M16、M17），具备分母及完整性 | 按11.2覆盖关键过程、退化与恢复，验证详情限频和脱敏；不要求每个指标对应一条日志 |
 | 3 灰度 | 验证两链路开关、有效期及故障隔离 | 接入13组P1并积累两周基线，根据真实样本确定告警阈值 | 验证原时间/版本查询、重复识别、保留期和实际日配额；单独评估排障时效 |
 
 插件修改保持在JetBrains/Kilo自有模块，不需要修改共享OpenCode或Agent Core。现有无关产品使用遥测不在本次迁移范围；同一稳定性事实不得同时走旧capture和新链路重复计数。
 
-实现时使用真实临时文件和现有测试基座，测试实际写入、锁、重放和状态变化；涉及Swing使用真实Application/EDT。执行受影响模块定向测试与JetBrains typecheck，不默认跑全量；新增平台API需核查公开API及Split Mode适用性。正式用户功能交付再添加changeset。
+实现时使用真实临时文件和现有测试基座，测试实际写入、追加/重写、位移重放和状态变化；涉及Swing使用真实Application/EDT。执行受影响模块定向测试与JetBrains typecheck，不默认跑全量；新增平台API需核查公开API及Split Mode适用性。正式用户功能交付再添加changeset。
 
 #### 12.1 cs-cloud接入任务与可复用边界
 
@@ -591,14 +572,14 @@ attributes优先保留event_name、input_event_id、producer_id、run_id、mode�
 | 接入任务 | 可参考现有位置 | 必须新增或调整的行为 |
 |---|---|---|
 | 消费组件生命周期 | internal/cli/daemon.go、serve.go | 组装在agent初始化之前；组件失败降级为未采集且不阻塞agent；agent启动失败时已保存事实可由后续消费恢复。独立前端消费模式另行实现，不以正常daemon启动成功作其验收 |
-| profile与身份策略 | internal/platform/paths.go、provider、gateway/costrict/token.go | 单profile控制文件发布锁，共享身份代际与并发刷新，外部凭据替换失效及两用途独立策略；当前配置模型新增字段后再启用 |
-| 插件文件消费 | 拟新增插件输入适配器 | 读取registrations及v1 NDJSON，校验/认领/救援；与sessiontrace解析器分开；JVM/Go锁协议及跨平台路径权限验证 |
-| 可靠接收存储 | membertask原子写入/权限原语可提取；metrics提案spool可扩展 | 先持久提交再.done；输入去重、累计、输出计划及恢复事务；保留CGO_ENABLED=0，不直接使用workflow任务outbox |
+| profile与身份策略 | internal/platform/paths.go、provider、gateway/costrict/token.go | 单profile控制文件发布者互斥，共享身份代际与并发刷新，外部凭据替换失效及两用途独立策略；当前配置模型新增字段后再启用 |
+| 插件文件消费 | 拟新增插件输入适配器 | 扫描outbox目录、按位移续读v1 NDJSON行并校验，幂等重读；与sessiontrace解析器分开；路径范围与符号链接校验 |
+| 可靠接收存储 | membertask原子写入/权限原语可提取；metrics提案spool可扩展 | 位移提交与持久入队同事务；输入去重、累计、输出计划及恢复事务；保留CGO_ENABLED=0，不直接使用workflow任务outbox |
 | 指标适配 | 提案internal/metrics及EventBuilder/transport，尚未实现 | 独立JetBrains模块，原来源上下文、多源持久累计、Spec校验及逐项确认；不要求先完成全部agent会话轨迹功能 |
 | 日志出口 | 拟新增日志发现/映射/Sender | 九字段NDJSON、独立许可/预算/退避、整批确认；不扩展本地logger为整文件上传器 |
 | 状态与健康 | 提案stabilitymetrics及本地状态入口 | 分别报告文件接入、metrics/logs启用、积压、拒绝和覆盖；“服务在线”不等于“日志/指标链路已接入” |
 
-阶段0优先验证身份边界、JVM/Go锁互操作和持久ACK，再落地单体最小链路。远程前端消费模式、自定义profile及在线暂定完整率若尚未支持，应在覆盖/能力状态中明确展示，不能用指标提案存在代替实现验证。
+阶段0优先验证身份边界、位移事务与追加/重写竞争，再落地单体最小链路。远程前端消费模式、自定义profile及在线完整率若尚未支持，应在覆盖/能力状态中明确展示，不能用指标提案存在代替实现验证。
 
 #### 指标源码接入点与现状差距
 
@@ -612,7 +593,7 @@ attributes优先保留event_name、input_event_id、producer_id、run_id、mode�
 | cs-cloud/.../CscInstaller.kt、CsCloudStarter.kt、CscLogin.kt | M06～M08 | 命令退出、健康可用、凭据就绪分开 |
 | backend/.../cli/KiloCliDownloader.kt | M09 | 仅kilo-cli，缓存和下载分开 |
 | frontend/.../session/controller/SessionController.kt、设置保存 | M11、M12、M18、M21 | pending恢复和UI应用完成才结算 |
-| frontend 面板可见性监听与EDT探针（新增接入点） | M13、M20 | 活跃区间不重叠、同项目多面板去重；单JVM一个未完成探针，valid排队区间≥2秒计卡顿，中断不拼接 |
+| frontend 面板可见性监听与EDT探针（新增接入点） | M13、M20 | 活跃区间不重叠、同项目多面板去重；单JVM一个未完成探针，插件合并≥2秒阻塞区间产出edt.stall，中断不拼接 |
 | shared/log及新增采集器 | M14、M16、M22 | 原文本日志保留，新通道异步有界 |
 | RPC、IDE能力及资源所有者 | M19、M23、M24 | 自有边界观测，不全局拦截和重复上报 |
 
@@ -622,18 +603,19 @@ attributes优先保留event_name、input_event_id、producer_id、run_id、mode�
 |---|---|---|
 | 指标服务支持 | 新增jetbrains及统一指标，复用costrict-plugin | Spec/labels接受样例，部分成功处理通过 |
 | 多源累计查询 | 先逐producer/run取增量再汇总，不能只放metadata；契约尚无序列键承载字段（见10.1），承载方式属阶段0契约演进项 | A 3→5、B 8→9得3；A重置0→2另计2；直方图分位正确；序列键承载方式定案并据此登记Spec |
-| 终态迟到与乱序 | 按10.2保留pending并最终结算，旧累计快照不可回写 | 截止前完成但晚交接仍成功；宽限到期只结算一次unknown；同源乱序不误判重置；暂定查询与原批次归窗有实际查询证据 |
-| daemon可靠队列 | 持久接收后ACK，本地输入去重与输出可恢复 | 在认领、复制、累计、ACK前后中断测试 |
-| 与现有spool区别 | 工作流outbox不是遥测spool；提案批量fsync不能先ACK | 同步失败时不.done；consumer重启不清零插件源累计；已ACK输入可重建两出口 |
+| 终态迟到与乱序 | 按10.2终态直接归窗，旧累计快照不可回写 | 截止前完成但晚交接仍按原时间批次成功；同源乱序不误判重置；归窗查询有实际查询证据 |
+| daemon可靠队列 | 位移提交与持久入队原子，本地输入去重与输出可恢复 | 在读取、入队、位移提交前后中断测试 |
+| 与现有spool区别 | 工作流outbox不是遥测spool；提案批量fsync不能先推位移 | 同步失败时不推进位移；consumer重启不清零插件源累计；已提交位移的输入可重建两出口 |
+| 追加与重写竞争 | 单写者一行一write；容量重写后变短触发位移归零 | 插件重写与consumer读取并发不丢行、不重复累计；崩溃残缺尾行被跳过并计数 |
 | 日志上报 | 按第11章调用endpoint发现和Telemetry；日志接口200整批受理 | 九字段校验、expires_in分钟换算、空200、错误码、禁采及重开通过；查询保留原插件版本与事件时间 |
 | 输出身份 | 同事实不同指标/日志独立ID，重试ID及内容不变 | counter、histogram均被接受；重复文件不新增派生输出；日志响应丢失时允许重复但指标不增计 |
 | 远程覆盖 | 本机消费器才可读本机文件 | 两机器部署验证或明确前端未接入 |
 | 运行模式与profile | 当前daemon依赖默认agent；自动接入仅默认profile | 独立消费模式无需agent也可接收；未实现时显示不支持；自定义data-dir/auth-path不误用默认策略 |
-| 权限与账户 | 用户禁用优先、独立日志/指标开关；账户切换退役旧epoch | 模拟插件30秒未更新及外部凭据切换，旧epoch误标数据仍被丢弃；同账户重登不恢复旧队列；关闭/过期不追溯扩大用途 |
+| 权限与账户 | 用户禁用优先、独立日志/指标开关；无有效策略默认不限制；账户切换退役旧epoch | 删除/清空控制文件后默认全用途采集（占位epoch）；模拟插件30秒未更新及外部凭据切换，旧epoch误标数据仍被丢弃；同账户重登不恢复旧队列；关闭/过期不追溯扩大用途 |
 | TokenProvider与身份验证 | 当前缓存、文件读取和解码函数不足以提供已验证代际 | 网关与两Sender同代际；并发刷新/登出/文件覆盖不会复活旧账户；缺universal_id或非法tenant不回退sub/machineID |
 | 独立控制与故障 | 两用途分别校验许可和有效期，各自排队/确认/退避 | 日志配置过期或服务503时指标仍工作；反向同样成立；仅公共授权/账户失效同时关闭 |
-| 时效与容量 | 插件参数见第7章，指标参数见10.4，日志参数见11.5和11.7，发现节奏见4.1 | 分别实测指标告警与日志排障时延及新producer从登记到首次消费的发现时延；各自预算受控；同根目录多producer仍须评估总量阈值与协调机制，不能宣称已有根目录硬上限 |
-| 残留清理 | 活跃源有配额，死亡源由后续实例/daemon按7.4回收 | daemon不可用并多次重启IDE后，旧源过期文件能清理；两者均停止时不承诺物理删除期限；不误删活跃源或claimed文件 |
+| 时效与容量 | 插件参数见第7章，指标参数见10.4，日志参数见11.5和11.7，发现节奏见4.1 | 分别实测指标告警与日志排障时延及新文件从出现到首次消费的发现时延；各自预算受控；同根目录多producer仍须评估总量阈值与协调机制，不能宣称已有根目录硬上限 |
+| 残留清理 | 活跃源有文件配额，陈旧源按保留期由同scope实例/daemon回收（7.4） | daemon不可用并多次重启IDE后，过期文件能清理；两者均停止时不承诺物理删除期限；不误删活跃scope文件 |
 
 业务验收优先看“用户能否工作”和“数据是否可信”，然后再优化采集成本和诊断细节。
 
@@ -643,27 +625,26 @@ attributes优先保留event_name、input_event_id、producer_id、run_id、mode�
 
 | 场景 | 预期 |
 |---|---|
-| 正常封存、认领、复制、ACK | 合法数据进入spool持久队列后才.done，插件无云端依赖 |
-| writer写一半崩溃 | 能取得writer锁后救援完整行，尾行丢失可见，不承诺零损失 |
-| IDE休眠/暂停超过30分钟 | 不按mtime抢文件，恢复后仍能正常写入 |
-| 多IDE、PID复用、多个daemon | producer/run/锁正确隔离，单一消费者 |
-| consumer在复制、累计、ACK前后崩溃 | 重放不重复累计，稳定输出不变 |
-| .ready淘汰与认领竞争 | 锁内只有一方成功，.claimed不被插件删 |
-| writer淘汰与consumer救援并发 | 只允许writer→exchange锁顺序，consumer不持exchange等待writer；活跃writer不释放所有权 |
-| 磁盘满、队列满、异常风暴 | 内存、单producer及daemon容量按各自预算受控，不阻塞EDT，详情限频不改变可记录的计数；多producer总量限制见第13章 |
+| 正常追加、读取、位移推进 | 合法数据进入spool持久队列后才提交位移，插件无云端依赖 |
+| writer写一半崩溃 | 残缺尾行被跳过并计数，不救援，不承诺零损失 |
+| IDE休眠/暂停超过30分钟 | 无死亡推断，恢复后继续追加与消费 |
+| 多IDE、多daemon并发读 | scope/producer文件隔离；重复读取由event_id去重吸收，不重复累计 |
+| consumer在读取、入队、位移提交前后崩溃 | 从已提交位移重放，不重复累计，稳定输出不变 |
+| 插件容量重写与consumer读取并发 | 变短触发位移归零重读，不丢行、不重复计数 |
+| 磁盘满、队列满、异常风暴 | 内存、单producer及daemon容量按各自预算受控，不阻塞EDT，详情限频不改变可记录的计数；跨scope总量限制见第13章 |
 | 版本升级、账户切换且插件尚未刷新策略 | 历史版本不变，旧epoch永久退役；旧操作end不绑定新账户；误标旧epoch的数据丢弃 |
-| daemon不可用、IDE多次重启并关闭采集 | 后续插件实例仍可清理死亡producer过期文件，不采集新的上传用事实；claimed留给daemon |
+| 控制文件缺失、空、畸形或未知major | 默认不限制采集（占位epoch、revision=0、purposes全标）；有效策略出现后按策略执行，占位期数据不丢弃不重绑 |
+| daemon不可用、IDE多次重启并关闭采集 | 后续插件实例清理同scope过期文件，不采集新的上传用事实；跨scope残留由daemon按保留期处理 |
 | Split Mode前端无消费器 | 后端正常，前端覆盖缺口明确，不能宣称完整 |
 | 输入含路径/Token/异常消息 | 出盘前白名单过滤，上传请求也不含机密 |
-| Windows/Linux/macOS | 原子封存、锁、ACL、救援和清理验证，目录不能越界 |
-| JVM writer与Go consumer同时持锁/救援 | 使用互操作锁原语；活跃writer锁阻止Go接管，进程死亡后释放；不能用两套各自通过的锁单测替代 |
-| 非默认data-dir/auth-path、多daemon发布策略 | 未绑定profile拒绝自动接入；默认控制文件只有一个发布者，不跨profile读取凭据 |
+| Windows/Linux/macOS | 追加原子性、重写替换、ACL和清理验证，目录不能越界 |
+| 非默认data-dir/auth-path、多daemon发布策略 | 未绑定profile拒绝自动接入；默认控制文件发布互斥由cs-cloud协调，不跨profile读取凭据 |
 
 #### 14.2 指标链路
 
 | 场景 | 预期 |
 |---|---|
-| end在截止前完成，下一文件晚到 | 宽限内由pending转可信终态，不能先永久累计unknown/timeout；宽限后仅记迟到质量，不重复结算 |
+| end在截止前完成、交接迟到 | 按事件时间归原批次累计为可信终态，不重复、不二次结算，不生成unknown |
 | EDT阻塞3秒、休眠、探针调度暂停 | 有效3秒样本计一次stall；休眠/调度中断记无效，不跨观测ID或缺口拼接 |
 | 同设备不同进程及run重置 | 累计增量正确，设备ID不代替序列身份 |
 | 从用户操作到告警 | 测完整时延，不只测daemon拉取后的局部时间 |
