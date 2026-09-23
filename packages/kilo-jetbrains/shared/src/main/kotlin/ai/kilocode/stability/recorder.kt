@@ -211,16 +211,18 @@ class Recorder private constructor(
 
     /** Operations.begin的开始时快照：当前epoch/revision与该name的即时许可（可为空集）。 */
     internal fun beginSnapshot(now: Long, name: String): BeginSnapshot {
+        forwardTo?.let { return it.beginSnapshot(now, name) }
         val policy = if (closed) null else policies?.current()
         return policy?.let { BeginSnapshot(it.epoch, it.revision, it.permit(now, name, CHANNEL_CRITICAL)) }
             ?: BeginSnapshot(null, null, emptySet())
     }
 
     /** 详情配额每次取新策略；关闭日志/类别或quota=0时不产生详情及其补报摘要。 */
-    internal fun limit(name: String): Int {
-        forwardTo?.let { return it.limit(name) }
+    internal fun limit(name: String, schema: Int = 1): Int {
+        forwardTo?.let { return it.limit(name, schema) }
         val policy = if (closed) null else policies?.current()
-        return if (policy != null && "logs" in policy.permit(clock.wall(), name, "diagnostic")) policy.limit else 0
+        val permitted = policy != null && "logs" in policy.permit(clock.wall(), name, "diagnostic", schema)
+        return if (permitted) policy.limit else 0
     }
 
     /** Operation.fields试图覆盖公共/终态字段时由operation.kt调用计数（记录本体拒绝产出）。 */

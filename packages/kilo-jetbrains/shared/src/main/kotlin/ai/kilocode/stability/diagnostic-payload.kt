@@ -13,17 +13,17 @@ import kotlinx.serialization.json.put
 data class PayloadResult(val drafts: List<Draft>, val bytes: Long, val hash: String, val truncated: Boolean)
 
 private const val MAX_PAYLOAD_BYTES = 1024 * 1024
-private const val HALF_PAYLOAD_BYTES = MAX_PAYLOAD_BYTES / 2
 
 /* 为Fact外壳、JSON转义与可变的序号留出余量，确保单条真实UTF-8 wire记录低于32KiB。 */
 private const val MAX_CONTENT_BYTES = 4 * 1024
 
 /** 将已脱敏的原始字节拆为可重组的v2 diagnostic.payload草稿。 */
 object DiagnosticPayload {
-    fun parts(incident: String, kind: String, bytes: ByteArray): PayloadResult {
+    fun parts(incident: String, kind: String, bytes: ByteArray, budget: Int = MAX_PAYLOAD_BYTES): PayloadResult {
+        require(budget in 1..MAX_PAYLOAD_BYTES)
         val hash = sha(bytes)
-        val truncated = bytes.size > MAX_PAYLOAD_BYTES
-        val data = if (truncated) clip(bytes) else bytes
+        val truncated = bytes.size > budget
+        val data = if (truncated) clip(bytes, budget) else bytes
         val text = utf8(data)
         val encoding = if (text == null) "base64" else "utf8"
         val content = text ?: Base64.getEncoder().encodeToString(data)
@@ -32,9 +32,11 @@ object DiagnosticPayload {
         return PayloadResult(drafts, bytes.size.toLong(), hash, truncated)
     }
 
-    private fun clip(bytes: ByteArray): ByteArray = ByteArray(MAX_PAYLOAD_BYTES).also { out ->
-        bytes.copyInto(out, 0, 0, HALF_PAYLOAD_BYTES)
-        bytes.copyInto(out, HALF_PAYLOAD_BYTES, bytes.size - HALF_PAYLOAD_BYTES, bytes.size)
+    private fun clip(bytes: ByteArray, budget: Int): ByteArray = ByteArray(budget).also { out ->
+        val head = (budget + 1) / 2
+        val tail = budget - head
+        bytes.copyInto(out, 0, 0, head)
+        bytes.copyInto(out, head, bytes.size - tail, bytes.size)
     }
 
     private fun utf8(bytes: ByteArray): String? = try {

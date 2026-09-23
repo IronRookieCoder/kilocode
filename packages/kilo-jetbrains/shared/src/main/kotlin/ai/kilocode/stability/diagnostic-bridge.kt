@@ -3,6 +3,7 @@ package ai.kilocode.stability
 import ai.kilocode.log.FileLog
 import ai.kilocode.log.IntellijLog
 import ai.kilocode.log.KiloLog
+import java.util.concurrent.CancellationException
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
@@ -17,6 +18,7 @@ enum class DiagnosticSeverity {
 }
 
 /** 原始诊断输入；payload supplier 仅由有 logs 许可的后续持久化消费者求值。 */
+@Suppress("LongParameterList") // 原始诊断输入契约；可选字段保持调用点兼容。
 class DiagnosticInput(
     val severity: DiagnosticSeverity,
     val component: String,
@@ -25,10 +27,13 @@ class DiagnosticInput(
     context: Map<String, String> = emptyMap(),
     attributes: Map<String, String> = emptyMap(),
     payloads: Map<String, () -> String> = emptyMap(),
+    val handled: Boolean = true,
 ) {
     val context = context.toMap()
     val attributes = attributes.toMap()
     val payloads = payloads.toMap()
+    val thread = Thread.currentThread().name
+    val threadId = Thread.currentThread().threadId()
 
     companion object {
         fun error(
@@ -136,6 +141,8 @@ object DiagnosticBridge {
                     begin()
                     try {
                         deliver(input)
+                    } catch (error: CancellationException) {
+                        throw error
                     } catch (error: Exception) {
                         log.warn("Diagnostic bridge sink failed", error)
                     } finally {

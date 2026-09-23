@@ -13,6 +13,17 @@ import kotlinx.serialization.json.int
 import kotlinx.serialization.json.jsonPrimitive
 
 class DiagnosticPayloadTest {
+    @Test
+    fun `caller supplied budget clips head tail while retaining original metadata`() {
+        val bytes = "0123456789".encodeToByteArray()
+        val out = DiagnosticPayload.parts("inc-1", "request", bytes, 5)
+        assertEquals("01289", out.drafts.single().data.getValue("content").jsonPrimitive.content)
+        assertEquals(10L, out.bytes)
+        assertEquals(sha(bytes), out.hash)
+        assertTrue(out.truncated)
+        assertTrue(Dictionary.validate(out.drafts))
+    }
+
 
     @Test
     fun `chunks UTF-8 text at character boundaries and preserves it`() {

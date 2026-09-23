@@ -351,6 +351,26 @@ class StartupTest {
 }
 
 class ProducerTest {
+    @Test
+    fun `active bridge persists original diagnostic payload and publishing thread identity`() {
+        Harness().use { harness ->
+            val policy = factJson.parseToJsonElement(validControl()) as JsonObject
+            harness.writeControl(JsonObject(policy + ("accepted_fact_schema_majors" to
+                JsonArray(listOf(JsonPrimitive(1), JsonPrimitive(2))))).toString())
+            harness.service.start("monolith")
+            harness.awaitReason("ok")
+            val thread = Thread.currentThread().threadId()
+            DiagnosticBridge.publish(DiagnosticInput.error("test", message = "original message", payloads = mapOf("request" to { "original body" })))
+            DiagnosticBridge.await()
+            harness.service.stop("unload")
+            harness.awaitReason("stopped_unload")
+            val facts = harness.facts()
+            val parent = facts.single { it.name == "diagnostic.reported" }
+            assertEquals(thread.toString(), parent.data["thread_id"]?.jsonPrimitive?.content)
+            assertTrue(facts.any { it.data["payload_kind"] == JsonPrimitive("request") && it.data["content"] == JsonPrimitive("original body") })
+        }
+    }
+
 
     @Test
     fun `bridge skips metrics only policy without evaluating payloads`() {
@@ -785,6 +805,7 @@ class ProducerTest {
             val runId = facts.first { it.name == "plugin.started" }.run_id
             assertTrue(facts.any { it.name == "plugin.readiness" }, "captured operations reach the active run")
             assertTrue(facts.any { it.name == "error.reported" }, "captured faults reach the active run")
+            assertTrue(facts.any { it.name == "error.reported" && it.channel == "critical" }, "captured faults retain metrics")
             assertTrue(
                 facts.all { it.run_id == runId },
                 "every fact lands in the active run, got ${facts.map { it.run_id }.toSet()}",

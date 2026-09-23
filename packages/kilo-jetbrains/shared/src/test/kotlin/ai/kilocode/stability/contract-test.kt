@@ -256,6 +256,10 @@ class ContractTest {
         val second = diagnosticChunk("response", 1)
 
         assertTrue(Dictionary.validate(parent))
+        val refs = parent.with(data = JsonObject(parent.data + ("payload_refs" to JsonArray((0 until 16).map { JsonPrimitive("part$it") }))))
+        assertTrue(Dictionary.validate(refs))
+        assertTrue(dataShellViolations(refs.data).isEmpty())
+        assertFalse(Dictionary.validate(parent.with(data = JsonObject(parent.data + ("payload_refs" to JsonArray((0 until 17).map { JsonPrimitive("part$it") }))))))
         assertTrue(Dictionary.validate(listOf(first, second)))
         assertFalse(Dictionary.validate(parent.with(purposes = setOf("metrics"))))
         assertFalse(Dictionary.validate(parent.with(context = mapOf("operation_id" to "op-1"))))
@@ -379,7 +383,7 @@ class ContractTest {
             val valueOk = when (value) {
                 is JsonObject -> false
                 is JsonArray ->
-                    value.size <= maxItems &&
+                    value.size <= (dataSchema["properties"]?.jsonObject?.get(key)?.jsonObject?.get("maxItems")?.jsonPrimitive?.int ?: maxItems) &&
                         value.all { element -> element is JsonPrimitive && element !is JsonNull && element.isString }
                 is JsonPrimitive -> value !is JsonNull
             }

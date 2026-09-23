@@ -438,7 +438,7 @@ object Dictionary {
             key("json_path", FieldType.TEXT),
             key("expected_type", FieldType.STRING),
             key("actual_type", FieldType.STRING),
-            key("payload_refs", FieldType.STRING_LIST),
+            "payload_refs" to KeyRule(FieldType.STRING_LIST, maxItems = 16),
             key("truncated", FieldType.BOOLEAN),
         )
         val payloadKeys = listOf(

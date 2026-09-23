@@ -377,10 +377,11 @@ class StabilityService private constructor(
             return
         }
         // A6：安全异常入口与health摘要随run创建（去重缓存与计数随run生命周期绑定）。
-        val faults = Faults(recorder, clock)
+        val diagnostics = Diagnostics(recorder, clock)
+        val faults = Faults(diagnostics)
         activeFaults = faults
         activeHealth = Health(recorder, writer, clock)
-        installBridge(faults, store)
+        installBridge(diagnostics, store)
     }
 
     /** 公共授权撤销：关准入→writer最后排空（失效事实按入盘前重判期丢弃），不记shutdown；
@@ -407,14 +408,13 @@ class StabilityService private constructor(
         runFailure = if (pending) REASON_WRITER_DISABLED else null
     }
 
-    /** writer活动后才安装；既有Faults适配器保留给Task 5的Diagnostics替换。 */
-    private fun installBridge(faults: Faults, store: PolicyStore) {
+    /** writer活动后才安装；后台drain调用完整诊断入口。 */
+    private fun installBridge(diagnostics: Diagnostics, store: PolicyStore) {
         synchronized(stateLock) {
             if (stoppedOnce.get()) return
             val bridge = DiagnosticBridge.install { input ->
                 if (!logsPermitted(store)) return@install
-                val error = input.error ?: IllegalStateException(input.message)
-                faults.report(error, input.component, handled = true)
+                diagnostics.report(input)
             }
             activeBridge = bridge
         }

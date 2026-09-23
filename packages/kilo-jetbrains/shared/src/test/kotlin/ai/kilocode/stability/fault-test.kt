@@ -136,7 +136,7 @@ class FaultTest {
     fun `cancellation is excluded from collection`() {
         Fixture().use { fixture ->
             val faults = Faults(fixture.recorder, fixture.clock)
-            faults.report(CancellationException("client cancelled prompt"), "frontend", true)
+            assertFailsWith<CancellationException> { faults.report(CancellationException("client cancelled prompt"), "frontend", true) }
             assertEquals(0L, fixture.recorder.health().accepted)
             fixture.flush()
             assertEquals(0, fixture.facts().size)
@@ -149,9 +149,10 @@ class FaultTest {
             val faults = Faults(fixture.recorder, fixture.clock)
             assertFailsWith<OutOfMemoryError> { faults.report(OutOfMemoryError("oom"), "frontend", true) }
             assertFailsWith<ThreadDeath> { faults.report(ThreadDeath(), "frontend", true) }
-            assertEquals(0L, fixture.recorder.health().accepted)
+            assertEquals(2L, fixture.recorder.health().accepted)
             fixture.flush()
-            assertEquals(0, fixture.facts().size, "fatal errors are never collected")
+            assertEquals(2, fixture.facts().size)
+            assertTrue(fixture.facts().all { it.name == "error.uncaught" && it.channel == "critical" })
         }
     }
 

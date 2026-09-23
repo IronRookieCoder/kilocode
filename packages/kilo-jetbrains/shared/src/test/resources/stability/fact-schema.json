@@ -229,6 +229,13 @@
     },
     "data": {
       "type": "object",
+      "properties": {
+        "payload_refs": {
+          "type": "array",
+          "items": { "type": "string" },
+          "maxItems": 16
+        }
+      },
       "description": "事件专属白名单，禁止任意业务payload；各name的data字段按事件字典（设计第9章）逐项冻结。值允许标量或字符串数组——如diagnostic详情的frames（脱敏插件栈帧摘要，最多5帧，不含原始异常message，设计6.2）。diagnostic的message安全摘要最大512字节。允许空对象：专属字段由公共字段承载的事件（如plugin.started）合法。",
       "maxProperties": 32,
       "propertyNames": {

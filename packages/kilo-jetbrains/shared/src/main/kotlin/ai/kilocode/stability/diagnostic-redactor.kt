@@ -109,8 +109,11 @@ object DiagnosticRedactor {
         if (jose(match.groupValues[1])) "<redacted:jwt>" else match.value
     }
 
-    private fun jose(part: String): Boolean = runCatching {
+    private fun jose(part: String): Boolean = try {
         val bytes = Base64.getUrlDecoder().decode(part)
         Json.parseToJsonElement(bytes.decodeToString()).jsonObject["alg"]?.jsonPrimitive?.contentOrNull?.isNotBlank() == true
-    }.getOrDefault(false)
+    } catch (_: IllegalArgumentException) {
+        // 无效Base64或JSON头只表示非JWT；取消和致命错误必须交给Diagnostics传播。
+        false
+    }
 }

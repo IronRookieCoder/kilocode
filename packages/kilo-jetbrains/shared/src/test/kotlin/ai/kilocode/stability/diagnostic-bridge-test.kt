@@ -17,6 +17,22 @@ private const val TIMEOUT = 5L
 
 @ResourceLock("diagnostic-bridge")
 class DiagnosticBridgeTest {
+    @Test
+    fun `sink cancellation escapes the worker and later publishes still drain`() {
+        val failure = java.util.concurrent.CancellationException("cancelled")
+        val escaped = CompletableFuture<Throwable>()
+        DiagnosticBridge.install {
+            Thread.currentThread().uncaughtExceptionHandler = Thread.UncaughtExceptionHandler { _, error -> escaped.complete(error) }
+            throw failure
+        }.use {
+            DiagnosticBridge.publish(DiagnosticInput.error("test"))
+            assertEquals(failure, escaped.get(TIMEOUT, TimeUnit.SECONDS))
+        }
+        val seen = mutableListOf<DiagnosticInput>()
+        DiagnosticBridge.install(seen::add).use { DiagnosticBridge.publish(DiagnosticInput.error("test", message = "next")) }
+        assertEquals("next", seen.single().message)
+    }
+
 
     @Test
     fun `warn and error mirror with their severity and throwable`() {
