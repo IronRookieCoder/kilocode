@@ -13,6 +13,30 @@ import kotlin.test.assertTrue
  */
 class EdtStallTest {
 
+    @Test
+    fun `captured stack is retained until close and linked to the stall`() {
+        Fixture().use { fixture ->
+            fixture.enableDiagnostics()
+            val stack = EdtStack(Thread.currentThread())
+            val merger = StallMerger(fixture.operations::report, fixture.operations::record)
+            merger.onValidSample("obs-stack", 1, 0, 2_500, stack)
+            fixture.flush()
+            assertTrue(fixture.facts().isEmpty())
+            merger.onObservationEnded()
+            merger.onObservationEnded()
+            fixture.flush()
+            val facts = fixture.facts()
+            val stall = facts.single { it.name == "edt.stall" }
+            val incident = facts.single { it.name == "diagnostic.reported" }
+            assertEquals(incident.context["incident_id"], stall.context["incident_id"])
+            assertEquals(Thread.currentThread().name, incident.data.getValue("thread_name").jsonPrimitive.content)
+            assertEquals(Thread.currentThread().threadId(), incident.data.getValue("thread_id").jsonPrimitive.long)
+            val payload = fixture.payload("edt_stack")
+            stack.frames.forEach { assertTrue(payload.contains(it.toString()), "Missing captured frame: $it") }
+            assertTrue(payload.contains("captured stack is retained"))
+        }
+    }
+
     private fun merger(): Pair<StallMerger, MutableList<Draft>> {
         val out = mutableListOf<Draft>()
         return StallMerger { out.add(it) } to out

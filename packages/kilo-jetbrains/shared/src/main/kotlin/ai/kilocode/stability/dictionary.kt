@@ -456,16 +456,26 @@ object Dictionary {
         check(payloadKeys.map { pair -> pair.first }.toSet() == PAYLOAD_FIELDS)
 
         spec("plugin.started", "lifecycle")
+        val evidence = listOf(
+            key("last_flush_time", FieldType.NON_NEGATIVE_INTEGER),
+            "open_operations" to KeyRule(FieldType.STRING_LIST, maxBytes = ID_BYTES, maxItems = MAX_OPEN_OPERATIONS),
+            key("open_operation_count", FieldType.NON_NEGATIVE_INTEGER),
+            key("payload_refs", FieldType.STRING_LIST),
+            key("truncated", FieldType.BOOLEAN),
+        )
         spec(
             "plugin.shutdown", "lifecycle",
-            keys = listOf(key("end_kind", FieldType.STRING, END_KIND_VALUES)),
+            keys = evidence + listOf(key("end_kind", FieldType.STRING, END_KIND_VALUES)),
             required = setOf("end_kind"),
         )
         spec(
             "plugin.unclean", "lifecycle",
-            keys = listOf(
+            keys = evidence + listOf(
                 key("previous_run_id", FieldType.STRING, maxBytes = ID_BYTES),
                 key("evidence", FieldType.STRING),
+                key("last_seq", FieldType.NON_NEGATIVE_INTEGER),
+                key("last_channel", FieldType.STRING, CHANNELS),
+                key("last_fact_time", FieldType.NON_NEGATIVE_INTEGER),
             ),
             required = setOf("previous_run_id", "evidence"),
         )
@@ -594,6 +604,7 @@ object Dictionary {
                 key("drop_evicted", FieldType.NON_NEGATIVE_INTEGER),
                 key("drop_failure", FieldType.NON_NEGATIVE_INTEGER),
                 key("quality", FieldType.STRING, setOf("good", "degraded")),
+                key("last_flush_time", FieldType.NON_NEGATIVE_INTEGER),
             ),
             required = setOf("drop", "write_error", "depth_bytes", "oldest_age_ms"),
         )

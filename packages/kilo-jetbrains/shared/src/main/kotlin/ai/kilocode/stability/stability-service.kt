@@ -233,7 +233,15 @@ class StabilityService private constructor(
             resourceGaugeJob?.cancel()
             closeBridge()
             if (runActive) {
-                if (permitted()) activeRecorder?.record(shutdownDraft(endKind))
+                if (permitted()) activeRecorder?.recordBatch(operationEvidence(
+                    NAME_SHUTDOWN,
+                    buildJsonObject {
+                        put("end_kind", endKind)
+                        activeWriter?.flushed?.let { put("last_flush_time", it) }
+                    },
+                    activeOperations?.snapshot()?.keys.orEmpty(),
+                    activeRecorder?.limit("diagnostic.payload", 2)?.let { it > 0 } == true,
+                ))
                 activeRecorder?.close()
                 activeWriter?.close()
                 activeWriter = null
@@ -338,8 +346,7 @@ class StabilityService private constructor(
         // §7.3/M22：必须在writer打开文件前判定，避免writer为追加补LF后将崩溃尾页误作
         // 前任shutdown；读取先经Storage拒绝链接/越界/权限不可验证目标，检测失败仍fail open，
         // 不阻塞采集启动（R15）。
-        val drafts = runCatching { UncleanDetector(file).detect(storage.read(file)) }
-            .getOrDefault(emptyList())
+        val drafts = recover(file, storage, recorder)
         // 追加协议布局（§5.2）：outbox下平铺单文件`<scope-id>.jsonl`，跨run与JVM稳定。
         val writer = Writer(outboxDir(), fileName(), identity, recorder, store, clock, storage = storage)
         writer.onDisabled = { setStatus(REASON_WRITER_DISABLED) }
@@ -364,7 +371,7 @@ class StabilityService private constructor(
         activeWriter = writer
         runActive = true
         clearLegacy()
-        drafts.forEach(recorder::record)
+        if (drafts.isNotEmpty()) recorder.recordBatch(drafts)
         recorder.record(startedDraft())
         // F5：stop落在最后预检与提交序列之间的微窗口——提交后复查裁决，命中即就地收尾
         // （recorder/writer的close幂等，与stop协程双路重入安全），绝不留下裁决后仍活跃的
@@ -378,8 +385,7 @@ class StabilityService private constructor(
             return
         }
         // A6：安全异常入口与health摘要随run创建（去重缓存与计数随run生命周期绑定）。
-        val faults = Faults(diagnostics)
-        activeFaults = faults
+        activeFaults = Faults(diagnostics)
         activeHealth = Health(recorder, writer, clock)
         installBridge(diagnostics, store)
     }
@@ -407,6 +413,11 @@ class StabilityService private constructor(
         }.isFailure
         runFailure = if (pending) REASON_WRITER_DISABLED else null
     }
+
+    /** 读取前任证据失败不阻断启动；消费者不支持v2时仍保留有界生命周期摘要。 */
+    private fun recover(file: Path, storage: Storage, recorder: Recorder): List<Draft> = runCatching {
+        UncleanDetector(file).detect(storage.read(file), recorder.limit("diagnostic.payload", 2) > 0)
+    }.getOrDefault(emptyList())
 
     /** writer活动后才安装；后台drain调用完整诊断入口。 */
     private fun installBridge(diagnostics: Diagnostics, store: PolicyStore) {
@@ -530,13 +541,6 @@ class StabilityService private constructor(
 
     private fun startedDraft(): Draft =
         Draft(NAME_STARTED, KIND_LIFECYCLE, CHANNEL_CRITICAL, JsonObject(emptyMap()))
-
-    private fun shutdownDraft(endKind: String): Draft = Draft(
-        NAME_SHUTDOWN,
-        KIND_LIFECYCLE,
-        CHANNEL_CRITICAL,
-        buildJsonObject { put("end_kind", endKind) },
-    )
 
     companion object {
         /** 测试工厂（KiloBackendAppService同型）：注入路径/时钟/scope-id/运行模式来源，不触平台。 */

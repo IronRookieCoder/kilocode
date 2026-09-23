@@ -16,7 +16,9 @@ internal fun complete(facts: List<Fact>): Boolean {
     if (chunks.any { it.data["incident_id"] != JsonPrimitive(it.context["incident_id"]) }) return false
     return chunks.groupBy { it.context["incident_id"] }.all { (id, parts) ->
         id != null && facts.any {
-            it.context["incident_id"] == id && (it.name == "diagnostic.reported" || it.name.startsWith("error."))
+            it.context["incident_id"] == id &&
+                (it.name in setOf("diagnostic.reported", "plugin.unclean", "plugin.shutdown") ||
+                    it.name.startsWith("error."))
         } && parts.groupBy { it.data["payload_kind"] }.all { (_, rows) ->
             val count = (rows.first().data["chunk_count"] as? JsonPrimitive)?.intOrNull
             count == rows.size &&

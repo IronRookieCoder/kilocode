@@ -171,10 +171,10 @@ class DictionarySweepTest {
             assertTrue(errorDetails.all { it.data["count"].toString().trim('"').toLong() >= 1 })
             assertTrue(errorCounts.all { "secret" !in it.data.toString() && "boom" !in it.data.toString() }, "原始异常message不得进入事实")
 
-            // —— seq按通道从1连续（critical与diagnostic独立）——
+            // —— seq按通道从1连续；failure优先允许物理行序重排（critical与diagnostic独立）——
             listOf("critical", "diagnostic").forEach { channel ->
                 val seqs = facts.filter { it.channel == channel }.map { it.seq }
-                assertEquals((1L..seqs.size).toList(), seqs, "$channel channel seq must be contiguous from 1")
+                assertEquals((1L..seqs.size).toList(), seqs.sorted(), "$channel channel seq must be contiguous from 1")
             }
 
             // —— 身份字段来自控制文件且全程稳定 ——

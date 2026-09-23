@@ -4,8 +4,19 @@ import ai.kilocode.client.testing.TestCoroutines
 import ai.kilocode.stability.Clock
 import ai.kilocode.stability.Draft
 import ai.kilocode.stability.Fixture
+import com.intellij.openapi.application.ApplicationManager
+import com.intellij.testFramework.fixtures.BasePlatformTestCase
+import com.intellij.util.ui.UIUtil
 import java.util.UUID
-import kotlin.test.Test
+import java.util.concurrent.CompletableFuture
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.asCoroutineDispatcher
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
 import kotlin.test.assertEquals
 import kotlin.test.assertNotEquals
 import kotlin.test.assertNotNull
@@ -15,11 +26,88 @@ import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.long
 
 /**
- * M20探针纯状态机与所有者（brief Step 1/6）：可变时钟驱动，绝不真实睡眠；首条测试为
- * brief逐字片段。host用直接finalize/直连回调派发同步驱动，循环周期600s在测试内不触发；
- * 时效语义全部经时钟口径表达。真实EDT阻塞验证见VisibilityServiceTest（平台测试）。
+ * 真实平台EDT/后台调度器验证2秒阈值与阻塞栈；其余状态机用可变时钟同步驱动。
+ * 真实阻塞用latch和executor屏障同步；唯一时间等待即被测阈值本身。
  */
-class ProbeTest {
+class ProbeTest : BasePlatformTestCase() {
+
+    private val timeout = 15L
+
+    fun `test real scheduler captures the blocked edt before recovery`() {
+        Fixture(tickMs = 600_000).use { fixture ->
+            fixture.enableDiagnostics()
+            val dispatcher = Executors.newSingleThreadExecutor().asCoroutineDispatcher()
+            val scope = CoroutineScope(SupervisorJob() + dispatcher)
+            val entered = CountDownLatch(1)
+            val release = CountDownLatch(1)
+            val completed = CountDownLatch(1)
+            val finished = CompletableFuture<Unit>()
+            val thread = Thread.currentThread()
+            val start = System.nanoTime()
+            val clock = object : Clock {
+                override fun wall() = System.currentTimeMillis()
+                override fun mono() = (System.nanoTime() - start) / 1_000_000
+            }
+            val host = EdtProbeService(scope, clock, { fixture.operations }, post = { task ->
+                scope.launch {
+                    task()
+                    // 时间仅驱动真实的2秒阈值；本轮后台检查已执行才释放EDT。
+                    if (clock.mono() >= 2_500) release.countDown()
+                }
+            }, dispatchToEdt = { task ->
+                ApplicationManager.getApplication().invokeLater {
+                    task()
+                    completed.countDown()
+                }
+            }, offerPeriodMs = 50)
+            try {
+                ApplicationManager.getApplication().invokeLater {
+                    entered.countDown()
+                    blocked(release, 80)
+                }
+                Thread.ofPlatform().start {
+                    try {
+                        check(entered.await(timeout, TimeUnit.SECONDS)) { "EDT did not enter blocking frame" }
+                        host.setActive(this, true)
+                        check(completed.await(timeout, TimeUnit.SECONDS)) { "EDT probe callback did not complete" }
+                        host.setActive(this, false)
+                        // 单线程executor barrier保证关闭命令和所有finalize已被消费。
+                        scope.launch { finished.complete(Unit) }
+                    } catch (error: Throwable) {
+                        finished.completeExceptionally(error)
+                    } finally {
+                        release.countDown()
+                    }
+                }
+                UIUtil.dispatchAllInvocationEvents()
+                finished.get(timeout, TimeUnit.SECONDS)
+                fixture.flush()
+                val facts = fixture.facts()
+                val stall = facts.single { it.name == "edt.stall" }
+                val incident = facts.single { it.name == "diagnostic.reported" }
+                assertEquals(incident.context["incident_id"], stall.context["incident_id"])
+                assertEquals(thread.name, incident.data.getValue("thread_name").jsonPrimitive.content)
+                assertEquals(thread.threadId(), incident.data.getValue("thread_id").jsonPrimitive.long)
+                val stack = fixture.payload("edt_stack")
+                assertEquals(81, stack.lineSequence().count { it.contains("ProbeTest.blocked(") })
+                assertTrue(stack.contains("CountDownLatch.await"))
+                assertTrue(stack.contains("java.awt.EventDispatchThread"))
+                assertEquals(1, facts.count { it.name == "diagnostic.reported" })
+            } finally {
+                release.countDown()
+                scope.cancel()
+                dispatcher.close()
+            }
+        }
+    }
+
+    private fun blocked(release: CountDownLatch, depth: Int) {
+        if (depth > 0) {
+            blocked(release, depth - 1)
+            return
+        }
+        check(release.await(timeout, TimeUnit.SECONDS)) { "Watchdog did not release the blocked EDT" }
+    }
 
     private class MutableClock : Clock {
         var now = 0L
@@ -27,7 +115,7 @@ class ProbeTest {
         override fun mono(): Long = now
     }
 
-    @Test fun `one delayed callback represents the entire wait`() {
+    fun `test one delayed callback represents the entire wait`() {
         var now = 0L
         val clock = object : Clock { override fun wall() = now; override fun mono() = now }
         val events = mutableListOf<Draft>()
@@ -43,7 +131,7 @@ class ProbeTest {
         assertEquals("valid", events.single().data.getValue("validity").jsonPrimitive.content)
     }
 
-    @Test fun `offer is rejected while pending and seq advances only on delivery`() {
+    fun `test offer is rejected while pending and seq advances only on delivery`() {
         var now = 0L
         val clock = object : Clock { override fun wall() = now; override fun mono() = now }
         val events = mutableListOf<Draft>()
@@ -60,7 +148,7 @@ class ProbeTest {
         assertEquals(1, events.size)
     }
 
-    @Test fun `interrupt invalidates the pending sample and rotates the observation id`() {
+    fun `test interrupt invalidates the pending sample and rotates the observation id`() {
         val clock = MutableClock()
         val events = mutableListOf<Draft>()
         val probe = Probe(clock, events::add)
@@ -88,7 +176,7 @@ class ProbeTest {
         assertEquals(500L, valid.data.getValue("duration_ms").jsonPrimitive.long)
     }
 
-    @Test fun `stale callback does not become valid in a new observation interval`() {
+    fun `test stale callback does not become valid in a new observation interval`() {
         val clock = MutableClock()
         val events = mutableListOf<Draft>()
         val probe = Probe(clock, events::add)
@@ -109,7 +197,7 @@ class ProbeTest {
         assertEquals(200L, events.last().data.getValue("duration_ms").jsonPrimitive.long)
     }
 
-    @Test fun `disable invalidates pending and rejects offers until re-enabled`() {
+    fun `test disable invalidates pending and rejects offers until re-enabled`() {
         val clock = MutableClock()
         val events = mutableListOf<Draft>()
         val probe = Probe(clock, events::add)
@@ -131,7 +219,7 @@ class ProbeTest {
     }
 
     /** suspended词表仅随所有者显式传入产出（平台休眠通知经G1确认前生产不使用）。 */
-    @Test fun `suspend validity is carried only when the owner reports it`() {
+    fun `test suspend validity is carried only when the owner reports it`() {
         val clock = MutableClock()
         val events = mutableListOf<Draft>()
         val probe = Probe(clock, events::add)
@@ -159,7 +247,7 @@ class ProbeTest {
 
     private fun edtFacts(fixture: Fixture) = fixture.facts().filter { it.name == "edt.delay" }
 
-    @Test fun `host keeps the probe enabled while any contributor remains`() {
+    fun `test host keeps the probe enabled while any contributor remains`() {
         Fixture().use { fixture ->
             val clock = MutableClock()
             val coroutines = TestCoroutines()
@@ -189,7 +277,7 @@ class ProbeTest {
         }
     }
 
-    @Test fun `last contributor detach invalidates the pending sample`() {
+    fun `test last contributor detach invalidates the pending sample`() {
         Fixture().use { fixture ->
             val clock = MutableClock()
             val coroutines = TestCoroutines()
@@ -213,7 +301,7 @@ class ProbeTest {
         }
     }
 
-    @Test fun `scheduler gap beyond tolerance invalidates the pending sample`() {
+    fun `test scheduler gap beyond tolerance invalidates the pending sample`() {
         Fixture().use { fixture ->
             val clock = MutableClock()
             val coroutines = TestCoroutines()
@@ -247,7 +335,7 @@ class ProbeTest {
         }
     }
 
-    @Test fun `scheduling interval at tolerance boundary does not invalidate`() {
+    fun `test scheduling interval at tolerance boundary does not invalidate`() {
         Fixture().use { fixture ->
             val clock = MutableClock()
             val coroutines = TestCoroutines()
@@ -276,7 +364,7 @@ class ProbeTest {
     }
 
     /** 两次重叠valid样本（同obs、seq连续、首尾相接合计≥2s）在观测终点合并产出一条edt.stall。 */
-    @Test fun `overlapping valid samples merge into one stall fact when the observation ends`() {
+    fun `test overlapping valid samples merge into one stall fact when the observation ends`() {
         Fixture().use { fixture ->
             val clock = MutableClock()
             val coroutines = TestCoroutines()
@@ -316,7 +404,7 @@ class ProbeTest {
         }
     }
 
-    @Test fun `edt violation draft carries registered operation and fixed evidence only`() {
+    fun `test edt violation draft carries registered operation and fixed evidence only`() {
         Fixture().use { fixture ->
             // operation=session是字典已登记token（API_GROUPS的session组，M19同词表）
             fixture.operations.record(edtViolationDraft("session"))

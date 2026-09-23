@@ -2,11 +2,13 @@ package ai.kilocode.client.stability
 
 import ai.kilocode.stability.Clock
 import ai.kilocode.stability.Draft
+import ai.kilocode.stability.EdtStack
 import ai.kilocode.stability.Operations
 import ai.kilocode.stability.StallMerger
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.components.Service
 import java.util.UUID
+import java.awt.EventQueue
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
@@ -15,6 +17,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.channels.Channel
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 
@@ -38,12 +41,16 @@ internal const val VALIDITY_UNKNOWN = "unknown"
 /** 后台投递节奏与调度断层容差（brief建议值：正常1000ms、间隔>2000ms判scheduler_gap；G1校准项）。 */
 internal const val PROBE_OFFER_PERIOD_MS = 1_000L
 internal const val SCHEDULER_GAP_TOLERANCE_MS = 2_000L
+private const val STALL_THRESHOLD_MS = 2_000L
 
 /** edt.violation固定证据类别：只有插件自有显式断言边界用它，绝不由延迟时长推断。 */
 internal const val EVIDENCE_PLATFORM_THREAD_ASSERTION = "platform_thread_assertion"
 
 /** 一条在途探针样本：投递即定格区间ID与调度时刻，完成/作废都按它产出唯一一条事实。 */
-private class PendingSample(val seq: Long, val scheduledMono: Long, val observationId: String)
+private class PendingSample(val seq: Long, val scheduledMono: Long, val observationId: String) {
+    val sampled = AtomicBoolean()
+    @Volatile var stack: EdtStack? = null
+}
 
 /**
  * M20单JVM EDT探针状态机（brief C3/设计10.3）：至多一个在途样本。
@@ -68,6 +75,20 @@ class Probe(
     private val pending = AtomicReference<PendingSample?>()
     private val observationId = AtomicReference(randomObservationId())
     private val nextSeq = AtomicLong(0)
+    private val thread = AtomicReference<Thread?>()
+
+    /** 后台watchdog只在pending首次越过2秒时抓栈；EDT已恢复则丢弃该次证据。 */
+    fun watch() {
+        val sample = pending.get() ?: return
+        if (clock.mono() - sample.scheduledMono < STALL_THRESHOLD_MS ||
+            !sample.sampled.compareAndSet(false, true)
+        ) return
+        val known = thread.get()?.takeIf { it.isAlive }
+        val stack = known?.let(::EdtStack) ?: Thread.getAllStackTraces().entries.singleOrNull { entry ->
+            entry.value.any { it.className == "java.awt.EventDispatchThread" }
+        }?.let { EdtStack(it.key, it.value) }
+        if (pending.get() === sample) sample.stack = stack
+    }
 
     /** 启停探针；关闭即作废当前pending（unknown——关闭原因无法归入休眠/断层等已确认类别）。 */
     fun enabled(value: Boolean) {
@@ -91,11 +112,12 @@ class Probe(
 
     /** EDT回调（brief逐字接线invokeLater{complete(seq)}）：只读完成时刻，交后台构造并record。 */
     fun complete(seq: Long) {
+        if (EventQueue.isDispatchThread()) thread.set(Thread.currentThread())
         val completedMono = clock.mono()
         val taken = takePending(seq) ?: return
         finalize {
             emit(sampleDraft(taken, completedMono, VALIDITY_VALID))
-            stall?.onValidSample(taken.observationId, taken.seq, taken.scheduledMono, completedMono)
+            stall?.onValidSample(taken.observationId, taken.seq, taken.scheduledMono, completedMono, taken.stack)
         }
     }
 
@@ -154,9 +176,8 @@ private fun defaultDispatchToEdt(block: () -> Unit) {
  * [SCHEDULER_GAP_TOLERANCE_MS]判scheduler_gap并作废pending——后台调度器被饿死/休眠
  * 后样本时长不可信；断层tick随后的投递落在更换后的新观测区间。
  *
- * 线程纪律：[setActive]来自项目consumer后台线程与dispose（EDT）；synchronized块只做
- * 短非阻塞状态切换（record非阻塞、launch非阻塞），EDT绝不在该锁上等待；[tick]只由
- * 循环协程与测试驱动。complete回调经[dispatchToEdt]（invokeLater）回EDT只读完成时刻。
+ * 线程纪律：[setActive]/[tick]/finalize进入同一个后台FIFO，contributors和StallMerger
+ * 只由该消费者访问；EDT只入队和读取完成时刻，不做I/O或等待锁。
  */
 @Service(Service.Level.APP)
 @Suppress("LongParameterList")
@@ -164,7 +185,7 @@ internal class EdtProbeService internal constructor(
     private val cs: CoroutineScope,
     private val clock: Clock,
     private val operations: () -> Operations?,
-    private val post: (() -> Unit) -> Unit = { task -> cs.launch { task() } },
+    post: ((() -> Unit) -> Unit)? = null,
     private val dispatchToEdt: (() -> Unit) -> Unit = ::defaultDispatchToEdt,
     private val offerPeriodMs: Long = PROBE_OFFER_PERIOD_MS,
 ) {
@@ -172,50 +193,52 @@ internal class EdtProbeService internal constructor(
     /** Platform constructor — resolves collaborators from the service container. */
     constructor(cs: CoroutineScope) : this(cs, FrontendClock, ::defaultOperations)
 
-    /** stall窗口终结时的产出通道：与edt.delay同一operations出口（record非阻塞）。 */
-    private val stall = StallMerger { draft -> operations()?.record(draft) }
-    private val probe = Probe(clock, ::emit, post, stall)
+    /** 默认由单个后台消费者依次处理；注入的post也必须保持FIFO。 */
+    private val tasks = Channel<() -> Unit>(Channel.UNLIMITED)
+    private val submit: (() -> Unit) -> Unit = post ?: { tasks.trySend(it) }
+    private val stall = StallMerger({ input -> operations()?.report(input) }, ::emit)
+    private val probe = Probe(clock, ::emit, submit, stall)
     private val contributors = HashSet<Any>()
     private var loopJob: Job? = null
 
     @Volatile private var lastTickMono: Long = clock.mono()
 
+    init {
+        if (post == null) cs.launch {
+            for (task in tasks) task()
+        }.invokeOnCompletion { tasks.cancel() }
+    }
+
     /** 项目consumer推送本项目贡献（visible&&foreground）；并集翻转驱动启停与循环生命周期。 */
-    fun setActive(owner: Any, active: Boolean) {
-        synchronized(contributors) {
-            val wasActive = contributors.isNotEmpty()
-            if (active) {
-                contributors.add(owner)
-            } else {
-                contributors.remove(owner)
-            }
-            val nowActive = contributors.isNotEmpty()
-            if (wasActive == nowActive) return
-            probe.enabled(nowActive)
-            if (nowActive) {
-                // 新观察起点：启用前的空窗不计入调度间隔
-                lastTickMono = clock.mono()
-                loopJob = cs.launch {
-                    while (isActive) {
-                        delay(offerPeriodMs)
-                        tick()
-                    }
-                }
-            } else {
-                loopJob?.cancel()
-                loopJob = null
+    fun setActive(owner: Any, active: Boolean) = submit {
+        val previous = contributors.isNotEmpty()
+        if (active) contributors.add(owner) else contributors.remove(owner)
+        val enabled = contributors.isNotEmpty()
+        if (previous == enabled) return@submit
+        probe.enabled(enabled)
+        if (!enabled) {
+            loopJob?.cancel()
+            loopJob = null
+            return@submit
+        }
+        lastTickMono = clock.mono()
+        loopJob = cs.launch {
+            while (isActive) {
+                delay(offerPeriodMs)
+                tick()
             }
         }
     }
 
     /** 一次后台tick（brief Step 3）：先记录调度间隔（超容差判scheduler_gap），再至多投递一个探针。 */
-    internal fun tick() {
+    internal fun tick() = submit {
         val now = clock.mono()
         val gap = now - lastTickMono
         lastTickMono = now
         if (gap > SCHEDULER_GAP_TOLERANCE_MS) probe.interrupt(VALIDITY_SCHEDULER_GAP)
+        probe.watch()
         // brief逐字片段：offer成功才经invokeLater把complete(seq)送上EDT
-        val seq = probe.offer() ?: return
+        val seq = probe.offer() ?: return@submit
         dispatchToEdt { probe.complete(seq) }
     }
 

@@ -88,6 +88,10 @@ class Writer(
     @Volatile var disabledReason: String? = null
         private set
 
+    /** 最近已确认成功的fsync完成时刻；只读快照供health/退出事实持久化，未知时不推测。 */
+    @Volatile var flushed: Long? = null
+        private set
+
     private val writeErrors = AtomicLong(0)
     private val droppedPolicy = AtomicLong(0)
     private val droppedOversize = AtomicLong(0)
@@ -377,6 +381,7 @@ class Writer(
         val open = channel ?: return
         try {
             storage.force(open)
+            flushed = clock.wall()
             pendingRecords = 0
             pendingBytes = 0L
             pendingSinceMonoMs = -1L
@@ -394,7 +399,9 @@ class Writer(
     private class Stored(val fact: Fact?, val bytes: ByteArray, val order: Int) {
         fun key(): List<String> {
             val id = fact?.context?.get("incident_id")
-            val grouped = fact?.name in setOf("diagnostic.reported", "diagnostic.payload") ||
+            val grouped = fact?.name in setOf(
+                "diagnostic.reported", "diagnostic.payload", "plugin.unclean", "plugin.shutdown",
+            ) ||
                 fact?.name?.startsWith("error.") == true
             return if (id != null && grouped) listOf(fact.producer_id, fact.run_id, id) else listOf(order.toString())
         }
@@ -431,6 +438,7 @@ class Writer(
         runCatching { channel?.close() }
         channel = null
         storage.atomicWrite(file, output.toByteArray())
+        flushed = clock.wall()
         loss(droppedEvicted, dropped.mapNotNull { it.fact })
         // 非法旧行也属于被淘汰行，但不能据此推断failure类别。
         droppedEvicted.addAndGet(dropped.count { it.fact == null }.toLong())

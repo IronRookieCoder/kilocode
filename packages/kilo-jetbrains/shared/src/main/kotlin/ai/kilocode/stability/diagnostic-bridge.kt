@@ -29,13 +29,13 @@ class DiagnosticInput(
     payloads: Map<String, () -> String> = emptyMap(),
     val handled: Boolean = true,
     secrets: Set<String> = emptySet(),
+    val thread: String = Thread.currentThread().name,
+    val threadId: Long = Thread.currentThread().threadId(),
 ) {
     val context = DiagnosticContextElement.value()?.context.orEmpty() + context
     val attributes = DiagnosticContextElement.value()?.attributes.orEmpty() + attributes
     val payloads = DiagnosticContextElement.value()?.payloads.orEmpty() + payloads
     val secrets = secrets.filter(String::isNotEmpty).sortedByDescending(String::length)
-    val thread = Thread.currentThread().name
-    val threadId = Thread.currentThread().threadId()
 
     companion object {
         fun error(

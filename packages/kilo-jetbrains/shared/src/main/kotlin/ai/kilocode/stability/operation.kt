@@ -1,6 +1,7 @@
 package ai.kilocode.stability
 
 import java.util.UUID
+import java.util.Collections
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.CoroutineScope
@@ -84,6 +85,20 @@ class Operations internal constructor(
     private val diagnostics: Diagnostics = Diagnostics(recorder, clock),
     private val current: (() -> Operations?)?,
 ) {
+    // 同一逻辑ID可同时持有父操作和传输attempt；仅最后一个终态删除该ID。
+    private val active = AtomicReference<Map<String, Int>>(emptyMap())
+
+    /** 生命周期收尾的不可变快照；值为该逻辑ID仍未终结的句柄数。 */
+    fun snapshot(): Map<String, Int> = current?.invoke()?.snapshot()
+        ?: Collections.unmodifiableMap(LinkedHashMap(active.get()))
+
+    internal fun ended(id: String) {
+        active.updateAndGet { ids ->
+            val count = ids[id] ?: return@updateAndGet ids
+            if (count == 1) ids - id else ids + (id to count - 1)
+        }
+    }
+
     constructor(recorder: Recorder, clock: Clock, scope: CoroutineScope) :
         this(recorder, clock, scope, Diagnostics(recorder, clock), null)
 
@@ -121,6 +136,7 @@ class Operations internal constructor(
             beginFields = beginFields,
             operations = this,
         )
+        active.updateAndGet { ids -> ids + (operationId to (ids.getOrDefault(operationId, 0) + 1)) }
         if (!overrideRejected) {
             val startData = buildJsonObject {
                 beginFields.forEach { (key, value) -> put(key, value) }
@@ -171,7 +187,11 @@ class Operation internal constructor(
     private val clock = operations.clock
     private val recorder = operations.recorder
 
-    private val terminal = Terminal(startMono, deadline) { outcome, durationMs -> emitEnd(outcome, durationMs) }
+    private val terminal = Terminal(startMono, deadline) { outcome, durationMs ->
+        settled = true
+        operations.ended(id)
+        emitEnd(outcome, durationMs)
+    }
 
     /** end的self-contained载荷；timeout定时器路径可能为null（用默认值）。 */
     private val pendingEnd = AtomicReference<EndPayload?>()

@@ -105,6 +105,7 @@ class Health(
                     put("oldest_age_ms", sample.oldestAgeMs)
                     sample.reasons.forEach { (key, value) -> put(key, value - baseline.getOrDefault(key, 0)) }
                     put("quality", sample.quality)
+                    writer.flushed?.let { put("last_flush_time", it) }
                 },
                 emptyMap(), null, DUAL_PURPOSES,
             ),

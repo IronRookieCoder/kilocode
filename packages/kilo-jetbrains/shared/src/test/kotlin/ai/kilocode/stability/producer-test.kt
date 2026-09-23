@@ -19,6 +19,7 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.put
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -708,6 +709,8 @@ class ProducerTest {
             harness.writeControl(validControl())
             harness.service.start("monolith")
             harness.awaitReason("ok")
+            val open = harness.service.operations.begin("plugin.readiness", 60_000)
+            harness.service.operations.begin("plugin.readiness", 60_000).end("success")
             harness.service.stop("app_close")
             harness.service.stop("app_close")
             harness.service.stop("unload")
@@ -715,6 +718,9 @@ class ProducerTest {
             val facts = harness.facts()
             assertEquals(1, facts.count { it.name == "plugin.shutdown" }, "stop is deduplicated to one shutdown fact")
             assertEquals("app_close", facts.last { it.name == "plugin.shutdown" }.data.field("end_kind"))
+            open.end("success")
+            assertEquals(listOf(open.id), facts.single { it.name == "plugin.shutdown" }
+                .data.getValue("open_operations").jsonArray.map { it.jsonPrimitive.content })
             val late = harness.service.recorder.record(
                 Draft("plugin.started", "lifecycle", "critical", JsonObject(emptyMap())),
             )
