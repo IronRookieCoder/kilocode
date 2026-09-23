@@ -319,8 +319,9 @@ class StabilityService private constructor(
         }
         val store = policies ?: return
         val recorder = Recorder(identity, store, clock)
+        val diagnostics = Diagnostics(recorder, clock)
         activeRecorder = recorder
-        activeOperations = Operations(recorder, clock, scope)
+        activeOperations = Operations(recorder, clock, scope, diagnostics, null)
         // F1：standby接管点先行——从本run的recorder诞生起，激活前被长生命周期消费者捕获的
         // 引用即直投本run（启动窗口内的事实随writer ACTIVE后排空落盘），绝不滞留在无人
         // 排空的standby队列；启动失败路径随即断开，落回standby自身的关闭入口。
@@ -377,7 +378,6 @@ class StabilityService private constructor(
             return
         }
         // A6：安全异常入口与health摘要随run创建（去重缓存与计数随run生命周期绑定）。
-        val diagnostics = Diagnostics(recorder, clock)
         val faults = Faults(diagnostics)
         activeFaults = faults
         activeHealth = Health(recorder, writer, clock)

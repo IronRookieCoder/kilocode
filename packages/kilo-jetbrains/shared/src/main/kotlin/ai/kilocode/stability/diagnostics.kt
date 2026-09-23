@@ -51,6 +51,7 @@ class Diagnostics(
     private val capacity = maxRateKeys.coerceAtLeast(1)
     private val lock = Any()
     private val seen = LinkedHashMap<String, String>()
+    private val errors = LinkedHashMap<ErrorKey, String>()
     private val windows = LinkedHashMap<String, Rate>()
     private val overflow = Rate("overflow", "other", "error.reported")
 
@@ -70,10 +71,26 @@ class Diagnostics(
         }
     }
 
+    private fun key(input: DiagnosticInput, id: String): String {
+        val keys = causes(input.error).map(::ErrorKey)
+        val supplied = input.context["fault_id"] ?: input.context["incident_id"]
+        return hash(if (keys.isEmpty()) supplied ?: id else {
+            synchronized(lock) {
+                errors.entries.removeIf { entry -> entry.key.get() == null }
+                val token = supplied ?: keys.firstNotNullOfOrNull { errors[it] } ?: id
+                keys.forEach { key ->
+                    if (!errors.containsKey(key) && errors.size >= MAX_KEYS) errors.remove(errors.keys.first())
+                    errors[key] = token
+                }
+                token
+            }
+        })
+    }
+
     private fun collect(input: DiagnosticInput, id: String): String {
         val time = clock.wall() / WINDOW_MS
-        val key = hash(input.context["fault_id"] ?: input.context["incident_id"] ?: id)
         val error = input.error
+        val key = key(input, id)
         val frames = frames(error)
         val fingerprint = hash(
             (error?.javaClass?.name ?: input.component + ":" + input.attributes["code"]) +

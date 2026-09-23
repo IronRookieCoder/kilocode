@@ -347,7 +347,7 @@ class DiagnosticsTest {
                 val error = IllegalStateException("same")
                 val executor = Executors.newSingleThreadExecutor()
                 val first = CompletableFuture.runAsync({
-                    diagnostics.report(DiagnosticInput.error("shared", error = error))
+                    diagnostics.report(DiagnosticInput.error("shared", error = error, context = mapOf("fault_id" to "old-window")))
                 }, executor)
                 try {
                     assertTrue(entered.await(TIMEOUT, TimeUnit.SECONDS), "old window was not sampled")
@@ -357,7 +357,7 @@ class DiagnosticsTest {
                     }
                     release.countDown()
                     first.get(TIMEOUT, TimeUnit.SECONDS)
-                    repeat(3) { diagnostics.report(DiagnosticInput.error("shared", error = error)) }
+                    repeat(3) { index -> diagnostics.report(DiagnosticInput.error("shared", error = error, context = mapOf("fault_id" to "late-$index"))) }
                     fixture.advanceClock(61_000)
                     // 重复调用只触发汇总，不预留下一窗口的详情。
                     diagnostics.report(DiagnosticInput.error("shared", context = mapOf("fault_id" to "fault-0")))

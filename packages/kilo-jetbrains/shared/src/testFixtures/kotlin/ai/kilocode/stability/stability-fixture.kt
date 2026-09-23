@@ -14,6 +14,9 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.int
 
 /**
  * A4共享测试夹具（collector plan接口表）：真实临时目录、真实Recorder/PolicyStore/Writer，
@@ -72,6 +75,19 @@ class Fixture(
     fun flush() {
         writer.flush()
     }
+
+    fun enableDiagnostics() {
+        val data = Json.parseToJsonElement(defaultControl()).jsonObject +
+            ("accepted_fact_schema_majors" to JsonArray(listOf(JsonPrimitive(1), JsonPrimitive(2))))
+        controlFile.writeText(JsonObject(data).toString())
+        policies.refresh()
+    }
+
+    /** Read the persisted chunks, preserving their wire order. */
+    fun payload(kind: String): String = facts()
+        .filter { it.data["payload_kind"] == JsonPrimitive(kind) }
+        .sortedBy { it.data.getValue("chunk_index").jsonPrimitive.int }
+        .joinToString("") { it.data.getValue("content").jsonPrimitive.content }
 
     /** 读取追加文件全部整行（按行序）还原事实；文件不存在返回空列表。 */
     fun facts(): List<Fact> =

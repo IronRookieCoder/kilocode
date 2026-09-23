@@ -4,6 +4,9 @@ import ai.kilocode.backend.app.SseEvent
 import ai.kilocode.backend.cli.KiloCliDataParser
 import ai.kilocode.log.KiloLog
 import ai.kilocode.stability.Operations
+import ai.kilocode.stability.DiagnosticInput
+import ai.kilocode.stability.ErrorClassifier
+import kotlinx.coroutines.CancellationException
 import ai.kilocode.stability.ProtocolCode
 import ai.kilocode.stability.ProtocolStage
 import ai.kilocode.stability.ProtocolTransport
@@ -112,11 +115,25 @@ class CsCloudSseClient(
     /** Host file events are global; only forward events scoped to the active project. */
     private fun accept(data: String): Acceptance {
         val envelope = runCatching { decode(data) }.getOrElse {
+            if (it is CancellationException) throw it
+            val error = it
             // M15（C2）：真实SSE解码失败记一次protocol.error后照旧容忍转发（既有行为）。
             // 信封及其type/directory字段由同一解码边界处理一次；正常新增可选字段被
-            // 容忍，原始响应正文不入事实，observed防止下游再重复计数。
+            // 容忍；失败原文经诊断许可过滤后落盘，observed防止下游再重复计数。
             val observed = operations?.let {
-                it.protocolError(ProtocolTransport.SSE, ProtocolStage.DECODE, ProtocolCode.DECODE_FAILED)
+                val info = ErrorClassifier.classify(error)
+                val input = DiagnosticInput.error("sse.decode", info.code, error,
+                    attributes = info.attributes() + mapOf(
+                        "method" to "GET", "route" to "/api/v1/events",
+                        "http_status" to "200", "content_type" to "text/event-stream",
+                    ),
+                    payloads = mapOf("response" to { data }),
+                )
+                val incident = it.report(input)
+                it.protocolError(
+                    ProtocolTransport.SSE, ProtocolStage.DECODE, ProtocolCode.DECODE_FAILED,
+                    input.context + ("incident_id" to incident),
+                )
                 true
             } ?: false
             return Acceptance(accepted = true, observed = observed, kind = KiloCliDataParser.extractEventType(data))

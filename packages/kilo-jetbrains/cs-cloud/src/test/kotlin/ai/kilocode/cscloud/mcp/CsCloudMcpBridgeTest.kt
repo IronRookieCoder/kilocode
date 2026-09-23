@@ -81,8 +81,8 @@ class CsCloudMcpBridgeTest {
                 assertEquals(generation, requests.single { it.method == "DELETE" }.requestUrl?.queryParameter("generation"))
                 fixture.flush()
                 val facts = fixture.facts().filter { it.name == "ide.operation" }
-                assertEquals(listOf("start", "end"), facts.map { it.data.getValue("phase").jsonPrimitive.content })
-                assertEquals("cancelled", facts.last().data.getValue("result").jsonPrimitive.content)
+                assertEquals(setOf("start", "end"), facts.map { it.data.getValue("phase").jsonPrimitive.content }.toSet())
+                assertEquals("cancelled", facts.single { it.data["phase"]?.jsonPrimitive?.content == "end" }.data.getValue("result").jsonPrimitive.content)
                 assertEquals(facts.first().context["operation_id"], facts.last().context["operation_id"])
             } finally {
                 release.countDown()
@@ -309,6 +309,7 @@ class CsCloudMcpBridgeTest {
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
         val workspace = Files.createTempDirectory("cs-cloud-register-fail").toString()
         Fixture().use { fixture ->
+            fixture.enableDiagnostics()
             val bridge = CsCloudMcpBridge(
                 scope,
                 endpoint = { CsCloudEndpoint(server.url("/").toString().trimEnd('/'), null) },
@@ -336,6 +337,16 @@ class CsCloudMcpBridgeTest {
                 assertEquals(cause, ends.single().data.getValue("cause").jsonPrimitive.content)
                 assertEquals(code, ends.single().data.getValue("error_code").jsonPrimitive.content)
                 assertEquals(starts.single().context["operation_id"], ends.single().context["operation_id"])
+                val incident = fixture.facts().single { it.name == "diagnostic.reported" }
+                assertEquals(ends.single().context["operation_id"], incident.context["operation_id"])
+                assertEquals("PUT", incident.data.getValue("method").jsonPrimitive.content)
+                assertTrue(incident.data.getValue("route").jsonPrimitive.content.endsWith("/capabilities/ide"))
+                assertTrue(fixture.payload("request").contains("read_file"))
+                assertTrue(fixture.payload("stack").contains("CsCloudMcpBridge"))
+                assertTrue(!fixture.facts().joinToString().contains("test-token"))
+                if (response.socketPolicy == SocketPolicy.NO_RESPONSE) {
+                    assertEquals("timeout", incident.data.getValue("code").jsonPrimitive.content)
+                }
             } finally {
                 scope.cancel()
                 server.shutdown()

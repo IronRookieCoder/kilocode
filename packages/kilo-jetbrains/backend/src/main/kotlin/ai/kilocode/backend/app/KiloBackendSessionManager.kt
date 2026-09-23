@@ -21,6 +21,7 @@ import ai.kilocode.rpc.dto.SessionStatusDto
 import ai.kilocode.rpc.dto.SessionSummaryDto
 import ai.kilocode.rpc.dto.SessionTimeDto
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -145,15 +146,26 @@ class KiloBackendSessionManager(
         return SessionListDto(mapped, relevant)
     }
 
+    @Suppress("TooGenericExceptionCaught") // Capture adapter/transport/serializer failures and rethrow unchanged.
     fun recent(dir: String, limit: Int): SessionListDto {
         seed(dir)
-        val raw = requireClient().experimentalSessionList(
-            directory = dir,
-            worktrees = true,
-            roots = JsonPrimitive(true),
-            limit = limit.toDouble(),
-            archived = JsonPrimitive(false),
-        )
+        requireClient()
+        val capture = HttpCapture()
+        val api = DefaultApi(base!!, capture.client(http!!))
+        val raw = try {
+            api.experimentalSessionList(
+                directory = dir,
+                worktrees = true,
+                roots = JsonPrimitive(true),
+                limit = limit.toDouble(),
+                archived = JsonPrimitive(false),
+            )
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Exception) {
+            operations?.report(capture.input("session.recent", error))
+            throw error
+        }
         val mapped = raw.map(::dto)
         val ids = mapped.map { it.id }.toSet()
         val relevant = _statuses.value.filterKeys { it in ids }

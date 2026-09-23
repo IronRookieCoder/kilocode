@@ -72,6 +72,9 @@ import ai.kilocode.client.stability.Render
 import ai.kilocode.stability.Draft
 import ai.kilocode.stability.Operation
 import ai.kilocode.stability.Operations
+import ai.kilocode.stability.DiagnosticInput
+import ai.kilocode.stability.DiagnosticContextElement
+import ai.kilocode.stability.ErrorClassifier
 import ai.kilocode.stability.Resources
 import ai.kilocode.stability.StabilityService
 import ai.kilocode.log.ChatLogSummary
@@ -2827,7 +2830,8 @@ class SessionController(
         if (recentsState is RecentsState.Loaded && !force) return
         val state = RecentsState.Loading()
         setRecentSessionsState(state)
-        cs.launch {
+        val payload = { buildJsonObject { put("directory", directory); put("limit", RECENT_LIMIT) }.toString() }
+        cs.launch(DiagnosticContextElement(payloads = mapOf("request" to payload))) {
             try {
                 val items = sessions.recent(directory, RECENT_LIMIT)
                 edt {
@@ -2838,7 +2842,13 @@ class SessionController(
                     recentsSnapshot = items
                     setControllerViewState(SessionControllerEvent.ViewChanged.ShowEmpty)
                 }
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
+                val info = ErrorClassifier.classify(e)
+                operations.report(DiagnosticInput.error("session.recent", info.code, e,
+                    attributes = info.attributes(),
+                ))
                 LOG.warn("kind=session-recent dir=${ChatLogSummary.dir(directory)} failed message=${e.message}", e)
                 edt {
                     if (!canUseRecents()) return@edt

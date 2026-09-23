@@ -78,6 +78,7 @@ class SseObservationTest {
 
     private inner class Harness(workspace: java.nio.file.Path?) {
         val received = CopyOnWriteArrayList<SseEvent>()
+        val delivered = java.util.concurrent.LinkedBlockingQueue<SseEvent>()
         val opened = CountDownLatch(1)
         val client = CsCloudSseClient(
             http = OkHttpClient(),
@@ -85,7 +86,7 @@ class SseObservationTest {
             workspace = workspace,
             log = TestLog,
             onOpen = { opened.countDown() },
-            onEvent = { event -> received.add(event) },
+            onEvent = { event -> received.add(event); delivered.add(event) },
             onClosed = {},
             onFailure = { _, _ -> },
             operations = fixture.operations,
@@ -98,8 +99,7 @@ class SseObservationTest {
         }
 
         fun await(size: Int): Harness {
-            val deadline = System.currentTimeMillis() + 5_000
-            while (System.currentTimeMillis() < deadline && received.size < size) Thread.sleep(20)
+            repeat(size) { assertTrue(delivered.poll(5, TimeUnit.SECONDS) != null, "SSE delivery stopped: $received") }
             assertEquals(size, received.size, "expected $size events, got ${received.size}")
             return this
         }
@@ -107,6 +107,7 @@ class SseObservationTest {
 
     @Test
     fun `invalid json records one decode protocol error and is still forwarded`() {
+        fixture.enableDiagnostics()
         val harness = open("{not-json", """{"payload":{"type":"session.idle","properties":{"sessionID":"s1"}}}""").start()
 
         harness.await(2)
@@ -123,6 +124,12 @@ class SseObservationTest {
         assertEquals("diagnostic", fact.kind)
         assertEquals("critical", fact.channel)
         assertTrue(fact.purposes.isNotEmpty())
+        val incident = fixture.facts().single { it.name == "diagnostic.reported" }
+        assertEquals("/api/v1/events", incident.data.getValue("route").jsonPrimitive.content)
+        assertEquals("{not-json", fixture.payload("response"))
+        assertTrue(fixture.payload("stack").contains("SerializationException") || fixture.payload("stack").contains("JsonDecodingException"))
+        assertEquals(fact.context["incident_id"], incident.context["incident_id"])
+        assertTrue(fixture.facts().none { it.name == "rpc" })
     }
 
     @Test

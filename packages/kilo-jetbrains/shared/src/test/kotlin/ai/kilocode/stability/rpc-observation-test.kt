@@ -4,6 +4,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
+import kotlin.test.assertSame
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.jsonPrimitive
@@ -17,6 +18,67 @@ import kotlinx.serialization.json.long
  * api_group受控词表由Dictionary把关（非法组不产事实、业务不受影响）。
  */
 class RpcObservationTest {
+
+    @Test
+    fun `coroutine recovered exception remains the same incident after RPC context unwinds`() = runTest {
+        Fixture().use { fixture ->
+            fixture.enableDiagnostics()
+            val error = assertFailsWith<IllegalStateException> {
+                fixture.operations.rpc("session") {
+                    kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) { error("recent unavailable") }
+                }
+            }
+            fixture.operations.report(DiagnosticInput.error("session.recent", error = error))
+            fixture.flush()
+            assertEquals(1, fixture.facts().count { it.name == "diagnostic.reported" })
+        }
+    }
+
+    @Test
+    fun `typed rpc failure writes one correlated incident before original exception escapes`() = runTest {
+        Fixture().use { fixture ->
+            enable(fixture)
+            val error = HttpFailure(404, "missing recent sessions")
+            assertSame(error, assertFailsWith<HttpFailure> {
+                fixture.operations.rpc("session") { throw error }
+            })
+            fixture.flush()
+            val facts = fixture.facts()
+            val end = ends(fixture).single()
+            val incident = facts.single { it.name == "diagnostic.reported" }
+            assertEquals("agent_core", end.data.getValue("cause").jsonPrimitive.content)
+            assertEquals("not_found", end.data.getValue("error_code").jsonPrimitive.content)
+            assertEquals(end.context["operation_id"], incident.context["operation_id"])
+            assertTrue(facts.filter { it.name == "diagnostic.payload" }.all { it.context["operation_id"] == end.context["operation_id"] })
+            assertTrue(facts.joinToString().contains("missing recent sessions"))
+            assertTrue(facts.joinToString().contains("RpcObservationTest"))
+        }
+    }
+
+    @Test
+    fun `explicit report and mirror of one caught throwable reuse the original incident`() = runTest {
+        Fixture().use { fixture ->
+            enable(fixture)
+            val error = java.net.ConnectException("refused")
+            val bridge = DiagnosticBridge.install { fixture.operations.report(it) }
+            try {
+                assertFailsWith<java.net.ConnectException> {
+                    fixture.operations.rpc("workspace") {
+                        fixture.operations.report(DiagnosticInput.error("workspace", error = error, payloads = mapOf("request" to { "request payload" })))
+                        DiagnosticBridge.publish(DiagnosticInput.error("workspace", error = error))
+                        throw error
+                    }
+                }
+                DiagnosticBridge.await(bridge)
+                fixture.flush()
+                assertEquals(1, fixture.facts().count { it.name == "diagnostic.reported" })
+                assertEquals(1, fixture.facts().count { it.name == "error.reported" })
+                assertEquals(ends(fixture).single().context["operation_id"], fixture.facts().single { it.name == "diagnostic.reported" }.context["operation_id"])
+            } finally {
+                bridge.close()
+            }
+        }
+    }
 
     private fun rpcFacts(fixture: Fixture) = fixture.facts().filter { it.name == "rpc" }
 

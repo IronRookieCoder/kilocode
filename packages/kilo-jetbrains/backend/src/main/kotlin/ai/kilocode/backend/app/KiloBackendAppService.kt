@@ -34,6 +34,10 @@ import ai.kilocode.rpc.dto.CsCloudStartDto
 import ai.kilocode.rpc.dto.HealthDto
 import ai.kilocode.stability.Draft
 import ai.kilocode.stability.Operations
+import ai.kilocode.stability.DiagnosticInput
+import ai.kilocode.stability.DiagnosticRedactor
+import ai.kilocode.stability.ErrorClassifier
+import okio.buffer
 import com.intellij.openapi.Disposable
 import com.intellij.openapi.components.Service
 import com.intellij.openapi.components.service
@@ -97,6 +101,7 @@ import kotlin.coroutines.resumeWithException
  * Profile is optional — 401 (not logged in) is not an error.
  */
 @Service(Service.Level.APP)
+@Suppress("LongParameterList") // Existing connection dependencies plus the run-scoped diagnostic entry point.
 class KiloBackendAppService private constructor(
   private val cs: CoroutineScope,
   private val server: CliServer,
@@ -104,6 +109,7 @@ class KiloBackendAppService private constructor(
   private val loadTimeoutMs: Long,
   private val providers: List<KiloConnectionProvider>, // kilocode_change
   private val runtime: Boolean, // kilocode_change
+  private val operations: Operations? = runCatching { service<StabilityService>().operations }.getOrNull(),
 ) : Disposable {
 
     /** IntelliJ service injection entry point. */
@@ -123,6 +129,7 @@ class KiloBackendAppService private constructor(
         private const val READY_TIMEOUT_MS = 120_000L
 
         /** Test factory — no IntelliJ deps needed. */
+        @Suppress("LongParameterList")
         internal fun create(
             cs: CoroutineScope,
             server: CliServer,
@@ -130,7 +137,8 @@ class KiloBackendAppService private constructor(
             loadTimeoutMs: Long = APP_LOAD_TIMEOUT_MS,
             providers: List<KiloConnectionProvider> = emptyList(), // kilocode_change
             runtime: Boolean = true, // kilocode_change
-        ) = KiloBackendAppService(cs, server, log, loadTimeoutMs, providers, runtime)
+            operations: Operations? = null,
+        ) = KiloBackendAppService(cs, server, log, loadTimeoutMs, providers, runtime, operations)
 
         // kilocode_change start
         internal fun create(
@@ -669,7 +677,7 @@ class KiloBackendAppService private constructor(
      * 阻碍业务加载；观察deadline到点不取消业务本身（Operation定时器独立于load协程）。
      */
     private fun beginLoadOperation(recover: Boolean): Operation? = runCatching {
-        service<StabilityService>().operations.begin(
+        operations?.begin(
             LOAD_OPERATION_NAME,
             loadTimeoutMs,
             fields = buildJsonObject { put("trigger", loadTrigger(recover)) },
@@ -791,6 +799,8 @@ class KiloBackendAppService private constructor(
             ?: return FetchResult.fail("config", detail = "Not connected")
         val base = connection.target?.base
             ?: return FetchResult.fail("config", detail = "Connection target unavailable")
+        val capture = HttpCapture()
+        val context = loadOperation?.let { mapOf("operation_id" to it.id) }.orEmpty()
         return try {
             val request = Request.Builder()
                 .url("$base/global/config")
@@ -799,13 +809,12 @@ class KiloBackendAppService private constructor(
                 .build()
             val body = withContext(Dispatchers.IO) {
                 suspendCancellableCoroutine { cont ->
-                    val call = http.newCall(request)
+                    val call = capture.client(http).newCall(request)
                     cont.invokeOnCancellation { call.cancel() }
                     try {
                         val text = call.execute().use { response ->
                             val text = response.body?.string().orEmpty()
                             if (!response.isSuccessful) {
-                                log.warn("Global config fetch failed: HTTP ${response.code} ${response.message} $text")
                                 throw IllegalStateException("Global config fetch failed: HTTP ${response.code} ${response.message}")
                             }
                             text
@@ -820,6 +829,7 @@ class KiloBackendAppService private constructor(
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
+            operations?.report(capture.input("backend.config", e, context))
             log.warn("Global config fetch failed: ${e.message}", e)
             FetchResult.fail("config", e)
         }
@@ -1351,4 +1361,73 @@ internal fun loadFailureReason(errors: List<LoadError>): String = when (errors.f
     "config" -> LOAD_REASON_CONFIG
     "notifications" -> LOAD_REASON_NOTIFICATIONS
     else -> LOAD_REASON_OTHER
+}
+
+/** Captures the actual wire exchange before adapters transform or consume its response. */
+class HttpCapture(request: Request? = null, private val secrets: Set<String> = emptySet()) {
+    private var request: Request? = null
+    private var sent = byteArrayOf()
+    private var received = byteArrayOf()
+    private var status: Int? = null
+    private var type: String? = null
+    private var encoding: String? = null
+    private var headers = ""
+
+    init { request?.let(::capture) }
+
+    fun client(http: okhttp3.OkHttpClient): okhttp3.OkHttpClient = http.newBuilder()
+        .addInterceptor { chain ->
+            capture(chain.request())
+            chain.proceed(chain.request())
+        }
+        .addNetworkInterceptor { chain ->
+            capture(chain.request())
+            chain.proceed(chain.request()).also { response ->
+                status = response.code
+                type = response.body?.contentType()?.toString()
+                encoding = response.header("Content-Encoding")
+                headers += filtered(response.headers)
+                received = response.peekBody(Long.MAX_VALUE).bytes()
+            }
+        }.build()
+
+    private fun capture(value: Request) {
+        request = value
+        sent = value.body?.let { body -> okio.Buffer().also(body::writeTo).readByteArray() } ?: byteArrayOf()
+        headers = filtered(value.headers)
+    }
+
+    private fun filtered(values: okhttp3.Headers): String = values.joinToString("\n", postfix = "\n") {
+        "${it.first}: ${DiagnosticRedactor.field(it.first, it.second).text}"
+    }
+
+    private fun text(bytes: ByteArray, compressed: Boolean = false): String {
+        val body = if (compressed) {
+            okio.GzipSource(okio.Buffer().write(bytes)).buffer().use { it.readByteArray() }
+        } else bytes
+        return secrets.filter(String::isNotEmpty)
+            .fold(body.decodeToString()) { text, secret -> text.replace(secret, "<redacted:api-token>") }
+    }
+
+    fun input(component: String, error: Throwable, context: Map<String, String> = emptyMap()): DiagnosticInput {
+        val info = status?.takeIf { it >= java.net.HttpURLConnection.HTTP_BAD_REQUEST }
+            ?.let { ErrorClassifier.observe(error, it) } ?: ErrorClassifier.classify(error)
+        return DiagnosticInput.error(component, info.code, error, context = context, attributes = buildMap {
+            putAll(info.attributes())
+            request?.let {
+                put("method", it.method)
+                put("route", it.url.encodedPath)
+                it.body?.contentType()?.toString()?.let { value -> put("request_content_type", value) }
+            }
+            status?.let { put("http_status", it.toString()) }
+            (type ?: request?.body?.contentType()?.toString())?.let { put("content_type", it) }
+            encoding?.let { put("content_encoding", it) }
+            put("request_bytes", sent.size.toString())
+            put("response_bytes", received.size.toString())
+        }, payloads = mapOf(
+            "request" to { text(sent) },
+            "response" to { text(received, encoding.equals("gzip", ignoreCase = true)) },
+            "headers" to { headers },
+        ))
+    }
 }

@@ -25,8 +25,69 @@ import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
+import ai.kilocode.jetbrains.api.client.DefaultApi
+import ai.kilocode.backend.cli.KiloBackendHttpClients
+import ai.kilocode.stability.rpc
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.serialization.SerializationException
 
 class KiloBackendSessionManagerTest {
+
+    @Test
+    fun `recent HTTP 404 records exact failure body and query free route`() = runBlocking {
+        mock.recentSessionsStatus = 404
+        mock.recentSessions = """{"message":"recent not found","password":"hidden-secret"}"""
+        Fixture().use { fixture ->
+            fixture.enableDiagnostics()
+            val base = "http://127.0.0.1:${mock.start()}"
+            val http = KiloBackendHttpClients.api(mock.password)
+            val manager = KiloBackendSessionManager(scope, log, fixture.operations)
+            manager.start(DefaultApi(base, http), http, base, MutableSharedFlow())
+            try {
+                assertFailsWith<Exception> { fixture.operations.rpc("session") { manager.recent("/sensitive?token=query-secret", 5) } }
+                fixture.flush()
+                val facts = fixture.facts()
+                val incident = facts.single { it.name == "diagnostic.reported" }
+                assertEquals("404", incident.data.getValue("http_status").jsonPrimitive.content)
+                assertEquals("/experimental/session", incident.data.getValue("route").jsonPrimitive.content)
+                assertTrue(fixture.payload("response").contains("recent not found"))
+                assertTrue(fixture.payload("stack").contains("KiloBackendSessionManager"))
+                assertTrue(!facts.joinToString().contains("hidden-secret"))
+                assertTrue(!fixture.payload("attributes").contains("query-secret"))
+                val end = facts.single { it.name == "rpc" && it.data["phase"]?.jsonPrimitive?.content == "end" }
+                assertEquals(end.context["operation_id"], incident.context["operation_id"])
+                assertEquals("not_found", end.data.getValue("error_code").jsonPrimitive.content)
+            } finally {
+                manager.stop()
+                KiloBackendHttpClients.shutdown(http)
+            }
+        }
+    }
+
+    @Test
+    fun `recent real generated serializer failure records exact received payload`() = runBlocking {
+        mock.recentSessions = """[{"id":"ses_invalid","projectID":"prj_string","time":"wrong-object","project":null}]"""
+        Fixture().use { fixture ->
+            fixture.enableDiagnostics()
+            val base = "http://127.0.0.1:${mock.start()}"
+            val http = KiloBackendHttpClients.api(mock.password)
+            val manager = KiloBackendSessionManager(scope, log, fixture.operations)
+            manager.start(DefaultApi(base, http), http, base, MutableSharedFlow())
+            try {
+                assertFailsWith<SerializationException> { fixture.operations.rpc("session") { manager.recent("/repo", 5) } }
+                fixture.flush()
+                val incident = fixture.facts().single { it.name == "diagnostic.reported" }
+                assertEquals(mock.recentSessions, fixture.payload("response"))
+                assertEquals("$[0].time", incident.data.getValue("json_path").jsonPrimitive.content)
+                assertEquals("object", incident.data.getValue("expected_type").jsonPrimitive.content)
+                assertEquals("string", incident.data.getValue("actual_type").jsonPrimitive.content)
+                assertTrue(fixture.payload("stack").contains("GlobalSession"))
+            } finally {
+                manager.stop()
+                KiloBackendHttpClients.shutdown(http)
+            }
+        }
+    }
 
     private val mock = MockCliServer()
     private val log = TestLog()

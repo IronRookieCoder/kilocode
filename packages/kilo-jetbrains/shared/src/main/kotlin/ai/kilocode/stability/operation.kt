@@ -81,9 +81,14 @@ class Operations internal constructor(
     internal val recorder: Recorder,
     internal val clock: Clock,
     private val scope: CoroutineScope,
+    private val diagnostics: Diagnostics = Diagnostics(recorder, clock),
     private val current: (() -> Operations?)?,
 ) {
-    constructor(recorder: Recorder, clock: Clock, scope: CoroutineScope) : this(recorder, clock, scope, null)
+    constructor(recorder: Recorder, clock: Clock, scope: CoroutineScope) :
+        this(recorder, clock, scope, Diagnostics(recorder, clock), null)
+
+    /** Explicit failure capture shares the run's deduplication and rate budgets with its log mirror. */
+    fun report(input: DiagnosticInput): String = current?.invoke()?.report(input) ?: diagnostics.report(input)
 
     fun begin(
         name: String,

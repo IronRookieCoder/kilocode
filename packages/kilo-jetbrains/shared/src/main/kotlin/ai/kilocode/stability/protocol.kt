@@ -14,7 +14,12 @@ enum class ProtocolCode(val wire: String) {
     OTHER("other"),
 }
 
-fun Operations.protocolError(transport: ProtocolTransport, stage: ProtocolStage, code: ProtocolCode): Admission =
+fun Operations.protocolError(
+    transport: ProtocolTransport,
+    stage: ProtocolStage,
+    code: ProtocolCode,
+    context: Map<String, String> = emptyMap(),
+): Admission =
     record(
         Draft(
             "protocol.error",
@@ -25,5 +30,6 @@ fun Operations.protocolError(transport: ProtocolTransport, stage: ProtocolStage,
                 put("stage", stage.wire)
                 put("error_code", code.wire)
             },
+            context,
         ),
     )

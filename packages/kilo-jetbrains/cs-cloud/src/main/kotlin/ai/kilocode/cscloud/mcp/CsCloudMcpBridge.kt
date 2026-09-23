@@ -3,6 +3,8 @@ package ai.kilocode.cscloud.mcp
 import ai.kilocode.backend.app.CapabilityReleaseReason
 import ai.kilocode.backend.app.CapabilityResult
 import ai.kilocode.backend.app.KiloSessionCapabilities
+import ai.kilocode.backend.app.HttpCapture
+import ai.kilocode.stability.DiagnosticContextElement
 import ai.kilocode.cscloud.CsCloudEndpoint
 import ai.kilocode.cscloud.CsCloudRequestException
 import ai.kilocode.log.KiloLog
@@ -128,7 +130,11 @@ class CsCloudMcpBridge(
                 buildJsonObject { put("operation", "mcp_register") },
             )
             attempted = true
-            val failure = bind(id, workspace, generation, transport, tools)
+            val fields = operation?.let { mapOf("operation_id" to it.id) }.orEmpty()
+            val context = DiagnosticContextElement(context = fields)
+            val failure = withContext(context) {
+                bind(id, workspace, generation, transport, tools)
+            }
             if (failure != null) {
                 val blocked = failure == "ide_capability_unsupported"
                 operation?.end(
@@ -175,8 +181,9 @@ class CsCloudMcpBridge(
         val request = Request.Builder().url(url).header("X-Workspace-Directory", workspace)
             .put(json.encodeToString(spec).toRequestBody("application/json".toMediaType())).build()
         val bounded = http.newBuilder().callTimeout(timeout, TimeUnit.MILLISECONDS).build()
+        val capture = HttpCapture(request, setOf(transport.token))
         coroutineScope {
-            val call = bounded.newCall(request)
+            val call = capture.client(bounded).newCall(request)
             val cancellation = launch(start = CoroutineStart.UNDISPATCHED) {
                 try {
                     awaitCancellation()
@@ -189,6 +196,8 @@ class CsCloudMcpBridge(
                     onSuccess = { null },
                     onFailure = {
                         currentCoroutineContext().ensureActive()
+                        if (it is CancellationException) throw it
+                        operations?.report(capture.input("mcp.bind", it))
                         log.warn("IDE MCP bind failed conversation=${hash(id)} generation=${hash(generation)}", it)
                         capabilityBindReason(it)
                     },

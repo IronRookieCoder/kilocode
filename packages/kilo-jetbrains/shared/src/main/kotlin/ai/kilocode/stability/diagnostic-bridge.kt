@@ -29,9 +29,9 @@ class DiagnosticInput(
     payloads: Map<String, () -> String> = emptyMap(),
     val handled: Boolean = true,
 ) {
-    val context = context.toMap()
-    val attributes = attributes.toMap()
-    val payloads = payloads.toMap()
+    val context = DiagnosticContextElement.value()?.context.orEmpty() + context
+    val attributes = DiagnosticContextElement.value()?.attributes.orEmpty() + attributes
+    val payloads = DiagnosticContextElement.value()?.payloads.orEmpty() + payloads
     val thread = Thread.currentThread().name
     val threadId = Thread.currentThread().threadId()
 

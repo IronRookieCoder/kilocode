@@ -360,12 +360,15 @@ class ProducerTest {
             harness.service.start("monolith")
             harness.awaitReason("ok")
             val thread = Thread.currentThread().threadId()
-            DiagnosticBridge.publish(DiagnosticInput.error("test", message = "original message", payloads = mapOf("request" to { "original body" })))
+            val error = IllegalStateException("original message")
+            val incident = harness.service.operations.report(DiagnosticInput.error("test", error = error, payloads = mapOf("request" to { "original body" })))
+            DiagnosticBridge.publish(DiagnosticInput.error("test", error = error))
             DiagnosticBridge.await()
             harness.service.stop("unload")
             harness.awaitReason("stopped_unload")
             val facts = harness.facts()
             val parent = facts.single { it.name == "diagnostic.reported" }
+            assertEquals(incident, parent.context["incident_id"])
             assertEquals(thread.toString(), parent.data["thread_id"]?.jsonPrimitive?.content)
             assertTrue(facts.any { it.data["payload_kind"] == JsonPrimitive("request") && it.data["content"] == JsonPrimitive("original body") })
         }
