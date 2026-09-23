@@ -23,6 +23,12 @@ private val JWT = Regex("(?<![A-Za-z0-9_-])([A-Za-z0-9_-]+)\\.([A-Za-z0-9_-]+)\\
  * 防止秘密落在分片边界或JSON转义引号之后。调用方遇到异常必须拒绝详情草稿。
  */
 object DiagnosticRedactor {
+    /** 已知字段边界优先于自由文本扫描；敏感属性的整个值都属于凭证。 */
+    fun field(name: String, value: String): Redacted {
+        val match = KEY.matchEntire("$name=") ?: return clean(value)
+        return Redacted("<redacted:${type(match.groupValues[2])}>", true)
+    }
+
     fun clean(text: String): Redacted {
         val out = jwt(values(QUERY.replace(url(headers(PEM.replace(text, "<redacted:private-key>"))), "$1<redacted:api-token>")))
         return Redacted(out, out != text)

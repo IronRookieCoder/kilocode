@@ -5,6 +5,7 @@ import java.io.StringWriter
 import java.util.Base64
 import java.util.concurrent.CancellationException
 import java.util.concurrent.CompletableFuture
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
@@ -26,6 +27,127 @@ import kotlinx.serialization.json.long
 import kotlinx.serialization.json.longOrNull
 
 class DiagnosticsTest {
+    @Test
+    fun `sensitive attribute boundaries include spaces semicolons and multiple cookies`() {
+        Fixture().use { fixture ->
+            enable(fixture)
+            Diagnostics(fixture.recorder, fixture.clock).report(DiagnosticInput.error("shared", attributes = mapOf(
+                "password" to "first second-fragment",
+                "Cookie" to "sid=one; refresh=other-secret",
+                "Set-Cookie" to "session=alpha; token=beta; final=cookie-secret",
+            )))
+            fixture.flush()
+            val text = payload(fixture.facts(), "attributes")
+            listOf("first", "second-fragment", "sid=one", "other-secret", "alpha", "beta", "cookie-secret").forEach {
+                assertFalse(text.contains(it), "credential fragment survived: $it")
+            }
+            assertTrue(text.contains("redacted"))
+        }
+    }
+
+    @Test
+    fun `caller JWT incident id never reaches a redaction failure fallback`() {
+        Fixture().use { fixture ->
+            enable(fixture)
+            val id = Diagnostics(fixture.recorder, fixture.clock, redactor = { error("failed") }).report(
+                DiagnosticInput.error("shared", context = mapOf("incident_id" to JWT)),
+            )
+            fixture.flush()
+            assertEquals("diagnostic.redaction_failed", fixture.facts().single().name)
+            assertEquals(id, fixture.facts().single().context["incident_id"])
+            assertFalse(fixture.facts().joinToString().contains(JWT))
+        }
+    }
+
+    @Test
+    fun `caller JWT incident id is replaced consistently across the complete group`() {
+        Fixture().use { fixture ->
+            enable(fixture)
+            val diagnostics = Diagnostics(fixture.recorder, fixture.clock)
+            val input = DiagnosticInput.error("shared", error = IllegalStateException("body"), context = mapOf("incident_id" to JWT))
+            val id = diagnostics.report(input)
+            assertEquals(id, diagnostics.report(input), "duplicates return their original canonical incident")
+            fixture.flush()
+            val facts = fixture.facts()
+            assertEquals(1, facts.count { it.name == "diagnostic.reported" })
+            assertTrue(facts.all { it.context["incident_id"] == id })
+            assertTrue(facts.filter { it.name == "diagnostic.payload" }.all { it.data["incident_id"] == JsonPrimitive(id) })
+            assertFalse(facts.joinToString().contains(JWT))
+        }
+    }
+
+    @Test
+    fun `rate limited and v1 only outputs redact component and correlation JWTs`() {
+        listOf(true, false).forEach { v2 ->
+            Fixture().use { fixture ->
+                if (v2) enable(fixture)
+                val diagnostics = Diagnostics(fixture.recorder, fixture.clock)
+                repeat(4) { diagnostics.report(DiagnosticInput.error(JWT, error = IllegalStateException("body"), context = mapOf("trace_id" to JWT, "workspace_id" to "C:/Users/private/work"))) }
+                fixture.flush()
+                assertEquals(4, fixture.facts().count { it.channel == "critical" })
+                assertFalse(fixture.facts().joinToString().contains(JWT), "JWT leaked for v2=$v2")
+                assertFalse(fixture.facts().joinToString().contains("C:/Users/private/work"), "context IDs must stay opaque")
+            }
+        }
+    }
+
+    @Test
+    fun `another report does not wait for a blocked payload supplier`() {
+        Fixture().use { fixture ->
+            enable(fixture)
+            val diagnostics = Diagnostics(fixture.recorder, fixture.clock)
+            val entered = CountDownLatch(1)
+            val release = CountDownLatch(1)
+            val executor = Executors.newFixedThreadPool(2)
+            val first = CompletableFuture.runAsync({ diagnostics.report(DiagnosticInput.error("shared", payloads = mapOf("request" to {
+                entered.countDown()
+                release.await()
+                "body"
+            }))) }, executor)
+            try {
+                assertTrue(entered.await(TIMEOUT, TimeUnit.SECONDS), "first supplier did not enter")
+                CompletableFuture.runAsync({ Faults(diagnostics).report(IllegalStateException("second"), "shared", true) }, executor)
+                    .get(TIMEOUT, TimeUnit.SECONDS)
+            } finally {
+                release.countDown()
+                first.get(TIMEOUT, TimeUnit.SECONDS)
+                executor.shutdownNow()
+            }
+        }
+    }
+
+    @Test
+    fun `consent expiry during payload construction only discards its own purpose`() {
+        listOf("metrics", "logs").forEach { purpose ->
+            Fixture(autoStart = false).use { fixture ->
+                enable(fixture, "${purpose}_expires_at" to JsonPrimitive(fixture.clock.wall() + 1))
+                Diagnostics(fixture.recorder, fixture.clock).report(DiagnosticInput.error("shared", error = IllegalStateException("body"), payloads = mapOf("request" to {
+                    fixture.advanceClock(2)
+                    "body"
+                })))
+                fixture.writer.start()
+                fixture.flush()
+                assertEquals(if (purpose == "metrics") 0 else 1, fixture.facts().count { it.channel == "critical" }, purpose)
+                assertEquals(if (purpose == "logs") 0 else 1, fixture.facts().count { it.name == "diagnostic.reported" }, purpose)
+            }
+        }
+    }
+
+    @Test
+    fun `writer rechecks metrics and log groups independently after consent expiry`() {
+        listOf("metrics", "logs").forEach { purpose ->
+            Fixture(autoStart = false).use { fixture ->
+                enable(fixture, "${purpose}_expires_at" to JsonPrimitive(fixture.clock.wall() + 1))
+                Diagnostics(fixture.recorder, fixture.clock).report(DiagnosticInput.error("shared", error = IllegalStateException("body")))
+                fixture.advanceClock(2)
+                fixture.writer.start()
+                fixture.flush()
+                assertEquals(if (purpose == "metrics") 0 else 1, fixture.facts().count { it.channel == "critical" }, purpose)
+                assertEquals(if (purpose == "logs") 0 else 1, fixture.facts().count { it.name == "diagnostic.reported" }, purpose)
+            }
+        }
+    }
+
     @Test
     fun `metrics category rejection does not discard permitted diagnostic logs`() {
         Fixture().use { fixture ->
@@ -231,6 +353,11 @@ class DiagnosticsTest {
         val rows = facts.filter { it.data["payload_kind"] == JsonPrimitive(kind) }.sortedBy { it.data.getValue("chunk_index").jsonPrimitive.long }
         val text = rows.joinToString("") { it.data.getValue("content").jsonPrimitive.content }
         return if (rows.firstOrNull()?.data?.get("encoding") == JsonPrimitive("base64")) Base64.getDecoder().decode(text).decodeToString() else text
+    }
+
+    companion object {
+        private const val JWT = "eyJhbGciOiJIUzI1NiJ9.e30.c2ln"
+        private const val TIMEOUT = 5L
     }
 }
 

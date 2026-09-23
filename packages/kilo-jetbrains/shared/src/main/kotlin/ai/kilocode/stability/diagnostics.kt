@@ -25,33 +25,42 @@ private const val SCALAR_BYTES = 64
 private val IDENTIFIER = Regex("[A-Za-z0-9_.-]{1,128}")
 private val SCALAR = Regex("[A-Za-z0-9_.#$<> -]+")
 
-/** 完整诊断组的构建与准入；先脱敏所有原文，最后一次性发布parent、chunks和可用计数。 */
+private data class Fields(val component: String, val context: Map<String, String>, val frames: List<String>)
+private data class Batch(val count: Draft?, val logs: List<Draft>)
+
+/** 日志parent/chunks原子发布；指标独立准入。状态锁不覆盖过滤器、supplier、格式化或准入。 */
 class Diagnostics(
     private val recorder: Recorder,
     private val clock: Clock,
     maxRateKeys: Int = MAX_KEYS,
     private val redactor: (String) -> Redacted = DiagnosticRedactor::clean,
 ) {
-    private class Rate(val fingerprint: String, val frames: List<String>, val category: String, var name: String) {
+    private class Rate(val fingerprint: String, val category: String, var name: String) {
         var window = -1L
         var details = 0
         var extra = 0L
     }
 
+    private data class Slot(
+        val id: String,
+        val duplicate: Boolean,
+        val detail: Boolean,
+        val summaries: List<Pair<Rate, Long>>,
+    )
+
     private val capacity = maxRateKeys.coerceAtLeast(1)
     private val lock = Any()
-    private val seen = LinkedHashMap<String, Unit>()
+    private val seen = LinkedHashMap<String, String>()
     private val windows = LinkedHashMap<String, Rate>()
-    private val overflow = Rate("overflow", emptyList(), "other", "error.reported")
+    private val overflow = Rate("overflow", "other", "error.reported")
 
     fun report(input: DiagnosticInput): String {
         val error = input.error
         if (error is CancellationException) throw error
         if (error is VirtualMachineError || error is ThreadDeath) fatal(error)
-        val candidate = input.context["incident_id"] ?: input.context["fault_id"]
-        val id = candidate?.takeIf(IDENTIFIER::matches) ?: UUID.randomUUID().toString()
-        try {
-            synchronized(lock) { collect(input, id) }
+        val id = UUID.randomUUID().toString()
+        return try {
+            collect(input, id)
         } catch (failure: CancellationException) {
             throw failure
         } catch (failure: VirtualMachineError) {
@@ -59,15 +68,11 @@ class Diagnostics(
         } catch (failure: ThreadDeath) {
             fatal(failure)
         }
-        return id
     }
 
-    private fun collect(input: DiagnosticInput, id: String) {
+    private fun collect(input: DiagnosticInput, id: String): String {
         val time = clock.wall() / WINDOW_MS
-        flush(time)
-        val fault = input.context["fault_id"] ?: id
-        if (seen.put(fault, Unit) != null) return
-        if (seen.size > MAX_KEYS) seen.remove(seen.keys.first())
+        val key = hash(input.context["fault_id"] ?: input.context["incident_id"] ?: id)
         val error = input.error
         val frames = frames(error)
         val fingerprint = hash(
@@ -76,29 +81,36 @@ class Diagnostics(
         )
         val category = category(error)
         val name = if (input.handled) "error.reported" else "error.uncaught"
-        val context = input.context + mapOf("fault_id" to fault, "incident_id" to id)
-        val minimal = context.mapValues { (_, value) -> if (IDENTIFIER.matches(value)) value else hash(value) }
-        val count = if (error != null && "metrics" in recorder.beginSnapshot(clock.wall(), name).purposes) {
-            count(name, fingerprint, category, scalar(input.component), minimal)
-        } else null
+        val rate = Rate(fingerprint, category, name)
         val limit = recorder.limit("diagnostic.reported", 2)
         val legacy = limit == 0 && recorder.limit(name) > 0
         val quota = if (legacy) recorder.limit(name) else limit
-        val state = reserve(Rate(fingerprint, frames, category, name), time, quota)
-        when {
-            state == null -> count?.let(recorder::record)
-            legacy -> {
-                count?.let(recorder::record)
-                recorder.record(detail(state, 1, minimal))
+        val slot = synchronized(lock) {
+            val summaries = flush(time)
+            val previous = seen[key]
+            if (previous != null) Slot(previous, true, false, summaries)
+            else {
+                seen[key] = id
+                if (seen.size > MAX_KEYS) seen.remove(seen.keys.first())
+                Slot(id, false, reserve(rate, time, quota), summaries)
             }
-            else -> recorder.recordBatch(drafts(input, id, context, count))
         }
+        slot.summaries.forEach { summary ->
+            if (recorder.limit(summary.first.name) > 0) {
+                recorder.record(detail(summary.first, summary.second, emptyMap()))
+            }
+        }
+        if (slot.duplicate) return slot.id
+        val batch = drafts(input, slot, rate, legacy)
+        batch.count?.let(recorder::record)
+        if (batch.logs.isNotEmpty()) recorder.recordBatch(batch.logs)
+        return slot.id
     }
 
-    private fun reserve(rate: Rate, time: Long, quota: Int): Rate? {
-        if (quota == 0) return null
+    private fun reserve(rate: Rate, time: Long, quota: Int): Boolean {
+        if (quota == 0) return false
         val state = windows[rate.fingerprint] ?: if (windows.size < capacity) {
-            rate.also { windows[rate.fingerprint] = it }
+            Rate(rate.fingerprint, rate.category, rate.name).also { windows[rate.fingerprint] = it }
         } else overflow
         state.name = rate.name
         if (state.window != time) {
@@ -107,42 +119,52 @@ class Diagnostics(
         }
         return if (state === overflow || state.details >= quota) {
             state.extra++
-            null
+            false
         } else {
             state.details++
-            state
+            true
         }
     }
 
     // 任意过滤器/Throwable格式化故障必须fail closed；取消和致命错误在同一出口重新抛出。
     @Suppress("TooGenericExceptionCaught", "InstanceOfCheckForException")
-    private fun drafts(input: DiagnosticInput, id: String, context: Map<String, String>, count: Draft?): List<Draft> =
+    private fun drafts(input: DiagnosticInput, slot: Slot, rate: Rate, legacy: Boolean): Batch =
         try {
-            incident(input, id, context, count)
+            val fields = fields(input, slot.id, redactor)
+            val count = input.error?.let {
+                count(rate.name, rate.fingerprint, rate.category, fields.component, fields.context)
+            }
+            val logs = when {
+                !slot.detail -> emptyList()
+                legacy -> listOf(detail(rate, 1, fields.context, fields.frames))
+                else -> incident(input, slot.id, fields)
+            }
+            Batch(count, logs)
         } catch (failure: Throwable) {
             if (failure is CancellationException || failure is VirtualMachineError || failure is ThreadDeath) {
                 throw failure
             }
-            // 原始数据及失败异常都不能用于后备记录，亦不提交此前构建的计数或分片。
-            listOf(parent("diagnostic.redaction_failed", mapOf("incident_id" to id), buildJsonObject {
-                put("severity", "error")
-                put("component", "diagnostics")
-                put("code", "redaction_failed")
-                put("message", "Diagnostic redaction failed")
-                put("thread_name", "unknown")
-                put("thread_id", 0)
-                put("payload_refs", JsonArray(emptyList()))
-                put("truncated", true)
-            }))
+            // 取消/致命错误之外的预处理故障只保留安全后备；限频/旧schema仍不能绕过许可。
+            val logs = if (!slot.detail || legacy) emptyList() else listOf(
+                parent("diagnostic.redaction_failed", mapOf("incident_id" to slot.id), buildJsonObject {
+                    put("severity", "error")
+                    put("component", "diagnostics")
+                    put("code", "redaction_failed")
+                    put("message", "Diagnostic redaction failed")
+                    put("thread_name", "unknown")
+                    put("thread_id", 0)
+                    put("payload_refs", JsonArray(emptyList()))
+                    put("truncated", true)
+                }),
+            )
+            Batch(null, logs)
         }
 
-    private fun incident(input: DiagnosticInput, id: String, context: Map<String, String>, count: Draft?): List<Draft> {
+    private fun incident(input: DiagnosticInput, id: String, fields: Fields): List<Draft> {
         fun clean(text: String) = redactor(text).text
-        val component = scalar(clean(input.component))
         val attributes = input.attributes.entries.associate { (key, value) ->
-            clean(key) to clean("$key=$value").substringAfter('=')
+            clean(key) to clean(DiagnosticRedactor.field(key, value).text)
         }
-        val cleaned = context.mapValues { clean(it.value) }
         val content = content(input, redactor)
         if (attributes.isNotEmpty()) {
             content["attributes"] = JsonObject(attributes.mapValues { JsonPrimitive(it.value) }).toString()
@@ -160,13 +182,15 @@ class Diagnostics(
             pending -= value.size
             DiagnosticPayload.parts(id, kind, value, budget).let { result ->
                 result.copy(drafts = result.drafts.map {
-                    Draft(it.name, it.kind, it.channel, it.data, cleaned, it.epoch, it.purposes, it.schemaVersion)
+                    Draft(
+                        it.name, it.kind, it.channel, it.data, fields.context, it.epoch, it.purposes, it.schemaVersion,
+                    )
                 })
             }
         }
         val data = buildJsonObject {
             put("severity", input.severity.name.lowercase())
-            put("component", component)
+            put("component", fields.component)
             put("code", scalar(attributes["code"] ?: "other"))
             put("message", "Diagnostic detail in payloads")
             put("thread_name", scalar(clean(input.thread)))
@@ -180,12 +204,7 @@ class Diagnostics(
             put("payload_refs", JsonArray(bytes.keys.map(::JsonPrimitive)))
             put("truncated", parts.any { it.truncated })
         }
-        val counters = count?.let {
-            listOf(Draft(it.name, it.kind, it.channel, JsonObject(it.data + mapOf(
-                "component" to JsonPrimitive(component), "fault_id" to JsonPrimitive(cleaned.getValue("fault_id")),
-            )), cleaned, it.epoch, it.purposes, it.schemaVersion))
-        } ?: emptyList()
-        return counters + parent("diagnostic.reported", cleaned, data) + parts.flatMap { it.drafts }
+        return listOf(parent("diagnostic.reported", fields.context, data)) + parts.flatMap { it.drafts }
     }
 
     private fun suppressed(error: Throwable): Int {
@@ -203,19 +222,24 @@ class Diagnostics(
         return count
     }
 
-    private fun flush(time: Long) {
-        (windows.values + overflow).forEach { state ->
-            if (state.extra == 0L || state.window >= time) return@forEach
-            if (recorder.limit(state.name) > 0) recorder.record(detail(state, state.extra, emptyMap()))
+    private fun flush(time: Long): List<Pair<Rate, Long>> =
+        (windows.values + overflow).mapNotNull { state ->
+            if (state.extra == 0L || state.window >= time) return@mapNotNull null
+            val summary = Rate(state.fingerprint, state.category, state.name) to state.extra
             state.extra = 0
+            summary
         }
-    }
 
-    private fun detail(state: Rate, count: Long, context: Map<String, String>) = Draft(
+    private fun detail(
+        state: Rate,
+        count: Long,
+        context: Map<String, String>,
+        frames: List<String> = emptyList(),
+    ) = Draft(
         state.name, "diagnostic", "diagnostic", buildJsonObject {
             put("message", if (context.isNotEmpty()) "fault detail: error_class=${state.category}"
                 else "fault summary: error_class=${state.category} suppressed=$count")
-            put("frames", JsonArray(state.frames.map(::JsonPrimitive)))
+            put("frames", JsonArray(frames.map(::JsonPrimitive)))
             put("fingerprint", state.fingerprint)
             put("count", count)
         }, context, purposes = setOf("logs"),
@@ -239,6 +263,21 @@ private fun frames(error: Throwable?): List<String> = error?.stackTrace?.asSeque
     ?.map { "${it.className}#${it.methodName}" }
     ?.filter { SCALAR.matches(it) }
     ?.take(MAX_FRAMES)?.toList() ?: emptyList()
+
+/** 所有出口复用同一个安全字段快照；调用方incident ID仅参与内存去重，永不写入事实。 */
+private fun fields(input: DiagnosticInput, id: String, redactor: (String) -> Redacted): Fields {
+    fun clean(text: String) = redactor(text).text
+    val fault = input.context["fault_id"]?.let(redactor)
+        ?.takeIf { !it.changed && IDENTIFIER.matches(it.text) }?.text ?: id
+    val context = input.context.filterKeys { it != "incident_id" && it != "fault_id" }.mapValues {
+        val text = clean(it.value)
+        if (IDENTIFIER.matches(text)) text else hash(text)
+    } + mapOf("incident_id" to id, "fault_id" to fault)
+    return Fields(
+        scalar(clean(input.component)), context,
+        frames(input.error).map(::clean).filter { SCALAR.matches(it) },
+    )
+}
 
 private fun content(input: DiagnosticInput, redactor: (String) -> Redacted): LinkedHashMap<String, String> {
     fun clean(text: String) = redactor(text).text
