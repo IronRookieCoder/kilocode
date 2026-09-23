@@ -10,9 +10,10 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.intOrNull
 
-/** 分片必须有同一incident的父记录、完整连续索引，以及一致的重组元数据。 */
+/** 分片的data/context incident ID必须一致，并具有同一incident父记录与完整重组元数据。 */
 internal fun complete(facts: List<Fact>): Boolean {
     val chunks = facts.filter { it.name == "diagnostic.payload" }
+    if (chunks.any { it.data["incident_id"] != JsonPrimitive(it.context["incident_id"]) }) return false
     return chunks.groupBy { it.context["incident_id"] }.all { (id, parts) ->
         id != null && facts.any {
             it.context["incident_id"] == id && (it.name == "diagnostic.reported" || it.name.startsWith("error."))

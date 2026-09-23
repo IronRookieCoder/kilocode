@@ -16,6 +16,7 @@ import kotlin.test.assertNotEquals
 import kotlin.test.assertTrue
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
@@ -31,6 +32,39 @@ import kotlinx.serialization.json.put
  * 不保留只数行数的永真断言。
  */
 class WriterTest {
+
+    @Test
+    fun `rewrite evicts an existing incident with mismatched payload ids as a whole`() {
+        Fixture(autoStart = false, tickMs = 60_000L, maxFileBytes = 13_000).use { fixture ->
+            fixture.base.resolve("control.json").writeText(Fixture.defaultControl().dropLast(1) + ",\"accepted_fact_schema_majors\":[1,2]}")
+            fixture.policies.refresh()
+            val chunks = DiagnosticPayload.parts("parent-id", "response", "x".repeat(5000).encodeToByteArray()).drafts
+            assertEquals(Admission.QUEUED, fixture.recorder.recordBatch(listOf(v2Draft("parent-id")) + chunks))
+            val claim = requireNotNull(fixture.recorder.tryClaim(3, 1024 * 1024))
+            val facts = claim.records.map { it.fact }
+            claim.release()
+            val chunk = facts.last()
+            val mismatch = chunk.copy(data = JsonObject(chunk.data + ("incident_id" to JsonPrimitive("different-data-id"))))
+            val lines = (facts.dropLast(1) + mismatch).joinToString("", transform = { fact ->
+                factJson.encodeToString(Fact.serializer(), fact) + "\n"
+            })
+            fixture.storage.verifyLayout()
+            fixture.storage.atomicWrite(fixture.outboxDir.resolve(fixture.fileName), lines.encodeToByteArray())
+            fixture.writer.start()
+            repeat(20) {
+                fixture.recorder.record(Draft("resource.snapshot", "sample", "critical", buildJsonObject {
+                    put("resource", "subscription")
+                    put("count", 1)
+                }))
+            }
+            fixture.flush()
+            assertTrue(fixture.writer.stats().droppedEvicted > 0, "the existing file must undergo capacity rewrite")
+            assertTrue(fixture.facts().none { it.context["incident_id"] == "parent-id" })
+            assertTrue(fixture.facts().none { it.name == "diagnostic.payload" }, "even the matching chunk must be evicted")
+            assertEquals(3, fixture.writer.stats().droppedFailure)
+            assertTrue(Files.size(fixture.outboxDir.resolve(fixture.fileName)) <= fixture.maxFileBytes)
+        }
+    }
 
     @Test
     fun `interrupted partial group write still rolls back the file`() {

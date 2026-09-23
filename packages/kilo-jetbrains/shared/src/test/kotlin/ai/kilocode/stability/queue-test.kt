@@ -36,6 +36,32 @@ import kotlinx.serialization.json.putJsonArray
 class QueueTest {
 
     @Test
+    fun `batch rejects mismatched payload incident ids without publishing any records`() {
+        Fixture(autoStart = false).use { fixture ->
+            fixture.base.resolve("control.json").writeText(Fixture.defaultControl().dropLast(1) + ",\"accepted_fact_schema_majors\":[1,2]}")
+            fixture.policies.refresh()
+            val drafts = incident("parent-id")
+            val chunk = drafts.last()
+            val mismatch = Draft(
+                chunk.name, chunk.kind, chunk.channel,
+                JsonObject(chunk.data + ("incident_id" to JsonPrimitive("different-data-id"))),
+                chunk.context, chunk.epoch, chunk.purposes, chunk.schemaVersion,
+            )
+            val group = drafts.dropLast(1) + mismatch
+            assertTrue(Dictionary.violations(group).isEmpty(), "the mismatch passes individual field validation")
+            assertEquals(Admission.DROPPED, fixture.recorder.recordBatch(group))
+            assertEquals(3, fixture.recorder.health().droppedInvalid)
+            assertEquals(0, fixture.recorder.depth().items)
+            assertEquals(0, fixture.recorder.depth().bytes)
+            assertEquals(null, fixture.recorder.tryClaim(MAX_ITEMS, MAX_BYTES))
+            assertEquals(Admission.QUEUED, fixture.recorder.recordBatch(drafts))
+            val claim = assertNotNull(fixture.recorder.tryClaim(MAX_ITEMS, MAX_BYTES))
+            assertEquals(3, claim.records.size)
+            claim.release()
+        }
+    }
+
+    @Test
     fun `one hundred concurrent incidents evict samples without losing failures`() {
         Fixture(autoStart = false).use { fixture ->
             fixture.base.resolve("control.json").writeText(Fixture.defaultControl().dropLast(1) + ",\"accepted_fact_schema_majors\":[1,2]}")
