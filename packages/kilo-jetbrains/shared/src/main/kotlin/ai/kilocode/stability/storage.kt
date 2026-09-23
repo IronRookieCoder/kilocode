@@ -55,19 +55,15 @@ class Storage(private val root: Path) {
     @Volatile var beforeMove: ((Path, Path) -> Unit)? = null
 
     /**
-     * 校验并按需创建producer根目录：已存在祖先逐一排除symlink/reparse，创建后真实路径必须
-     * 仍落在已核验祖先之内（真实路径范围），根目录所有者与权限核验（Windows为配置后核验）
-     * 通过才返回真实路径。
+     * 校验并按需创建producer根目录：创建前后均检查目标自身及全部祖先，排除symlink/reparse；
+     * 路径解析和权限视图不跟随末级链接，权限修改前再次核验。根目录所有者与权限核验
+     * （Windows为配置后核验）通过才返回路径。
      * （每类失败点各一个throw，统一包装为不可验证域异常——见verifyNoLinks前的Suppress说明。）
      */
     @Suppress("ThrowsCount")
     fun verifyLayout(): Path {
         val absolute = root.toAbsolutePath().normalize()
-        var anchor = absolute
-        while (!Files.exists(anchor, LinkOption.NOFOLLOW_LINKS)) {
-            anchor = anchor.parent ?: break
-        }
-        verifyNoLinks(anchor, absolute.parent)
+        verifyNoLinks(absolute)
         try {
             Files.createDirectories(absolute)
         } catch (exception: FileAlreadyExistsException) {
@@ -75,13 +71,11 @@ class Storage(private val root: Path) {
         } catch (exception: IOException) {
             throw StorageUnverifiedException("producer root cannot be created: ${exception.message}", exception)
         }
+        verifyNoLinks(absolute)
         val real = try {
-            absolute.toRealPath()
+            absolute.toRealPath(LinkOption.NOFOLLOW_LINKS)
         } catch (exception: IOException) {
             throw StorageUnverifiedException("producer root real path unavailable: ${exception.message}", exception)
-        }
-        if (!real.startsWith(anchor.toRealPath())) {
-            throw StorageUnverifiedException("producer root escapes the verified ancestor: $real")
         }
         // 根目录走"配置后核验"（Windows整体替换最小DACL，POSIX置位0700）；子项只核验（继承）。
         verifyPermissions(real, isDirectory = true, configure = true)
@@ -90,8 +84,9 @@ class Storage(private val root: Path) {
 
     /** 追加打开事实文件（存在则追加，绝不truncate；不存在则创建）并核验0600/ACL。 */
     fun openAppend(path: Path): FileChannel {
+        verifyNoLinks(path.toAbsolutePath().normalize())
         val channel = try {
-            FileChannel.open(path, StandardOpenOption.CREATE, StandardOpenOption.WRITE, StandardOpenOption.APPEND)
+            FileChannel.open(path, StandardOpenOption.CREATE, StandardOpenOption.WRITE, StandardOpenOption.APPEND, LinkOption.NOFOLLOW_LINKS)
         } catch (exception: IOException) {
             throw StorageUnverifiedException("outbox file cannot be opened: ${exception.message}", exception)
         }
@@ -127,6 +122,7 @@ class Storage(private val root: Path) {
      * 原子改名到目标；不支持原子改名时删除临时文件并失败，不降级普通rename假装成功。
      */
     fun atomicWrite(target: Path, bytes: ByteArray) {
+        verifyNoLinks(target.toAbsolutePath().normalize())
         val directory = target.toAbsolutePath().parent
         val temp = Files.createTempFile(directory, target.fileName.toString(), ".tmp")
         var moved = false
@@ -135,6 +131,7 @@ class Storage(private val root: Path) {
                 temp,
                 StandardOpenOption.WRITE,
                 StandardOpenOption.TRUNCATE_EXISTING,
+                LinkOption.NOFOLLOW_LINKS,
             ).use { channel ->
                 writeAll(channel, ByteBuffer.wrap(bytes))
                 force(channel)
@@ -157,15 +154,13 @@ class Storage(private val root: Path) {
  * 已存在祖先逐一排除symlink；Windows（无POSIX视图）进一步以真实路径等价性侦测
  * junction/reparse（NIO不直接暴露reparse标志）。不存在的中间组件留给创建后的范围核验。
  */
-private fun verifyNoLinks(anchor: Path, bottom: Path?) {
-    val start = bottom ?: return
-    val windowsLike = POSIX !in start.fileSystem.supportedFileAttributeViews()
-    var current: Path = start
-    while (current != anchor) {
-        checkNoLink(current, windowsLike)
-        current = current.parent ?: return
+private fun verifyNoLinks(path: Path) {
+    val windows = POSIX !in path.fileSystem.supportedFileAttributeViews()
+    var current: Path? = path
+    while (current != null) {
+        checkNoLink(current, windows)
+        current = current.parent
     }
-    checkNoLink(anchor, windowsLike)
 }
 
 @Suppress("ThrowsCount")
@@ -191,6 +186,7 @@ private fun checkNoLink(path: Path, windowsLike: Boolean) {
  */
 @Suppress("ThrowsCount")
 private fun verifyPermissions(path: Path, isDirectory: Boolean, configure: Boolean = false) {
+    verifyNoLinks(path.toAbsolutePath().normalize())
     val views = path.fileSystem.supportedFileAttributeViews()
     when {
         POSIX in views -> verifyPosix(path, isDirectory)
@@ -198,7 +194,7 @@ private fun verifyPermissions(path: Path, isDirectory: Boolean, configure: Boole
         else -> throw StorageUnverifiedException("no verifiable permission model for $path")
     }
     val owner = try {
-        Files.getOwner(path).name
+        Files.getOwner(path, LinkOption.NOFOLLOW_LINKS).name
     } catch (exception: IOException) {
         throw StorageUnverifiedException("owner unavailable for $path: ${exception.message}", exception)
     }
@@ -209,7 +205,7 @@ private fun verifyPermissions(path: Path, isDirectory: Boolean, configure: Boole
 
 @Suppress("ThrowsCount")
 private fun verifyPosix(path: Path, isDirectory: Boolean) {
-    val view = Files.getFileAttributeView(path, PosixFileAttributeView::class.java)
+    val view = Files.getFileAttributeView(path, PosixFileAttributeView::class.java, LinkOption.NOFOLLOW_LINKS)
         ?: throw StorageUnverifiedException("posix view unavailable for $path")
     val expected = if (isDirectory) DIRECTORY_PERMISSIONS else FILE_PERMISSIONS
     try {
@@ -229,7 +225,7 @@ private fun verifyPosix(path: Path, isDirectory: Boolean) {
  */
 @Suppress("ThrowsCount")
 private fun verifyAcl(path: Path) {
-    val view = Files.getFileAttributeView(path, AclFileAttributeView::class.java)
+    val view = Files.getFileAttributeView(path, AclFileAttributeView::class.java, LinkOption.NOFOLLOW_LINKS)
         ?: throw StorageUnverifiedException("acl view unavailable for $path")
     val acl = try {
         view.acl
@@ -254,7 +250,7 @@ private fun verifyAcl(path: Path) {
  */
 @Suppress("ThrowsCount")
 private fun configureAcl(path: Path) {
-    val view = Files.getFileAttributeView(path, AclFileAttributeView::class.java)
+    val view = Files.getFileAttributeView(path, AclFileAttributeView::class.java, LinkOption.NOFOLLOW_LINKS)
         ?: throw StorageUnverifiedException("acl view unavailable for $path")
     val configured = minimalAcl(view, path)
     try {

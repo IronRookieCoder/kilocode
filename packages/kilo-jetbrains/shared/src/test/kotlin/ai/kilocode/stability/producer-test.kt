@@ -26,6 +26,9 @@ private const val FAR_EXPIRES = 9_000_000_000_000L
 /** 测试/fixture共用的Json实例约定（writer-test同款）：默认值随wire记录一并编码。 */
 private val factJson = Json { encodeDefaults = true }
 
+private fun Fact.phase(): String = data.getValue("phase").jsonPrimitive.content
+private fun Fact.text(key: String): String = data.getValue(key).jsonPrimitive.content
+
 /**
  * 13字段闭集控制文件（control-schema.json）的最小合法构造（brief Step 1）。
  * expiresAt由调用方传入；本文件统一用[FAR_EXPIRES]（brief示例字面9_999_999_999相对
@@ -170,6 +173,71 @@ private fun startedDraft(): Draft =
 private fun JsonObject.field(key: String): String = this[key]?.jsonPrimitive?.contentOrNull ?: error("missing $key")
 
 class ProducerTest {
+
+    @Test
+    fun `active consumer survives revoke and reopen without rebinding old operations`() {
+        Harness().use { harness ->
+            harness.writeControl(validControl())
+            harness.service.start("monolith")
+            harness.awaitReason("ok")
+            val consumer = harness.service.operations
+            val old = consumer.begin("rpc", 60_000, buildJsonObject { put("api_group", "other") })
+            harness.awaitFacts(15_000) { it.any { fact -> fact.context["operation_id"] == old.id } }
+            val previous = harness.facts().first().run_id
+            harness.writeControl(disabledControl())
+            harness.awaitReason("unbound")
+            harness.writeControl(validControl())
+            harness.awaitReason("ok")
+            old.end("success")
+            val fresh = consumer.begin("rpc", 60_000, buildJsonObject { put("api_group", "other") })
+            fresh.end("success")
+            consumer.protocolError(ProtocolTransport.SSE, ProtocolStage.DECODE, ProtocolCode.DECODE_FAILED)
+            harness.service.stop("unload")
+            harness.awaitReason("stopped_unload")
+            val facts = harness.facts()
+            assertTrue(facts.none { it.context["operation_id"] == old.id }, "old handles never enter the new run")
+            assertEquals(listOf("start", "end"), facts.filter { it.context["operation_id"] == fresh.id }.map { it.phase() })
+            assertEquals(1, facts.count { it.name == "protocol.error" })
+            assertTrue(facts.all { it.run_id != previous })
+            assertTrue(consumer === harness.service.operations, "the entry is stable across runs")
+        }
+    }
+
+    @Test
+    fun `provider update during writer startup belongs to the next run`() {
+        val entered = java.util.concurrent.CountDownLatch(1)
+        val release = java.util.concurrent.CountDownLatch(1)
+        val hook = { writer: Writer ->
+            val active = defaultAwaitActive(writer)
+            entered.countDown()
+            assertTrue(release.await(15, java.util.concurrent.TimeUnit.SECONDS))
+            active
+        }
+        Harness(awaitActiveHook = hook).use { harness ->
+            try {
+                harness.service.noteConnectionProvider("kilo-cli")
+                harness.writeControl(validControl())
+                harness.service.start("monolith")
+                assertTrue(entered.await(15, java.util.concurrent.TimeUnit.SECONDS))
+                harness.service.noteConnectionProvider("cs-cloud")
+                release.countDown()
+                harness.awaitReason("ok")
+                harness.awaitFacts(15_000) { it.any { fact -> fact.name == "plugin.started" } }
+                assertTrue(harness.facts().all { it.connection_provider == "kilo-cli" })
+                harness.writeControl(disabledControl())
+                harness.awaitReason("unbound")
+                harness.writeControl(validControl())
+                harness.awaitReason("ok")
+                harness.service.operations.begin("plugin.readiness", 60_000).end("success")
+                harness.service.stop("unload")
+                harness.awaitReason("stopped_unload")
+                assertTrue(harness.facts().isNotEmpty())
+                assertTrue(harness.facts().all { it.connection_provider == "cs-cloud" })
+            } finally {
+                release.countDown()
+            }
+        }
+    }
 
     @Test
     fun `outbox holds one scope-producer jsonl and no registrations`() {
@@ -408,6 +476,75 @@ class ProducerTest {
                 facts.all { it.run_id == runId },
                 "every fact lands in the active run, got ${facts.map { it.run_id }.toSet()}",
             )
+        }
+    }
+
+    @Test
+    fun `provider noted after prewarm is captured by the first run`() {
+        Harness().use { harness ->
+            val operations = harness.service.operations
+            harness.service.noteConnectionProvider("cs-cloud")
+            harness.writeControl(validControl())
+            harness.service.start("monolith")
+            harness.awaitReason("ok")
+            operations.begin("plugin.readiness", 60_000)
+            harness.awaitFacts(15_000) { facts -> facts.any { it.name == "plugin.readiness" } }
+
+            val facts = harness.facts()
+            assertEquals("cs-cloud", facts.first { it.name == "plugin.started" }.connection_provider)
+            assertEquals("cs-cloud", facts.first { it.name == "plugin.readiness" }.connection_provider)
+        }
+    }
+
+    @Test
+    fun `provider is normalized and frozen for an active run`() {
+        Harness().use { harness ->
+            val operations = harness.service.operations
+            harness.service.noteConnectionProvider("other")
+            harness.writeControl(validControl())
+            harness.service.start("monolith")
+            harness.awaitReason("ok")
+            operations.begin("plugin.readiness", 60_000)
+            harness.awaitFacts(15_000) { facts -> facts.any { it.name == "plugin.readiness" } }
+
+            harness.service.noteConnectionProvider("kilo-cli")
+            operations.begin("plugin.readiness", 60_000)
+            harness.awaitFacts(15_000) { facts -> facts.count { it.name == "plugin.readiness" } >= 2 }
+            assertTrue(harness.facts().filter { it.name != "plugin.shutdown" }.all { it.connection_provider == "unknown" })
+
+            harness.writeControl(disabledControl())
+            harness.awaitReason("unbound")
+            harness.writeControl(validControl())
+            harness.awaitReason("ok")
+            harness.service.stop("unload")
+            harness.awaitReason("stopped_unload")
+            assertEquals("kilo-cli", harness.facts().first { it.name == "plugin.started" }.connection_provider)
+        }
+    }
+
+    @Test
+    fun `standby captured rpc timeout reaches the active run`() {
+        Harness().use { harness ->
+            val operations = harness.service.operations
+            harness.writeControl(validControl())
+            harness.service.start("monolith")
+            harness.awaitReason("ok")
+
+            val operation = operations.begin(
+                "rpc",
+                100,
+                buildJsonObject { put("api_group", "other") },
+            )
+            harness.awaitFacts(15_000) { facts ->
+                facts.any { it.context[CONTEXT_OPERATION_ID] == operation.id && it.phase() == "end" }
+            }
+
+            val facts = harness.facts()
+            val rpc = facts.filter { it.context[CONTEXT_OPERATION_ID] == operation.id }
+            val run = facts.first { it.name == "plugin.started" }.run_id
+            assertEquals(listOf("start", "end"), rpc.map { it.phase() })
+            assertEquals("timeout", rpc.last().text("result"))
+            assertTrue(rpc.all { it.run_id == run }, "captured rpc terminal reaches the active run")
         }
     }
 

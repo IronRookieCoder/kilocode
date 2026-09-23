@@ -7,11 +7,19 @@ import ai.kilocode.cscloud.CsCloudEndpoint
 import ai.kilocode.cscloud.CsCloudRequestException
 import ai.kilocode.log.KiloLog
 import ai.kilocode.stability.Operations
+import ai.kilocode.stability.Operation
 import com.intellij.openapi.project.ProjectManager
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -35,8 +43,10 @@ import java.nio.file.Path
 import java.security.MessageDigest
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.TimeUnit
 
 internal const val MCP_REGISTER_DEADLINE_MS = 30_000L
+private const val MCP_BIND_TIMEOUT_MS = MCP_REGISTER_DEADLINE_MS - 5_000L
 
 internal suspend fun runLease(
     ready: CompletableDeferred<IdeMcpTransport>,
@@ -66,6 +76,7 @@ class CsCloudMcpBridge(
     // M23（C5）：采集入口来源（生产由CsCloudConnectionService传入，测试注入fixture）；
     // null=采集不可用，业务照常。
     private val operations: Operations? = null,
+    private val timeout: Long = MCP_BIND_TIMEOUT_MS,
 ) : KiloSessionCapabilities {
     private data class Lease(val workspace: String, val generation: String, val tools: Set<String>, val job: Job, val epoch: Long)
     private val leases = ConcurrentHashMap<String, Lease>()
@@ -98,30 +109,52 @@ class CsCloudMcpBridge(
                 }
             }
         }
-        val transport = runCatching { withTimeout(30_000) { ready.await() } }.getOrElse {
-            job.cancel()
-            return@withLock CapabilityResult.Unavailable(code(it))
-        }
-        val failure = bind(id, workspace, generation, transport, tools)
-        if (failure != null) {
-            job.cancel()
-            return@withLock CapabilityResult.Unavailable(failure)
-        }
-        val old = leases.put(id, Lease(workspace, generation, tools, job, currentEpoch))
-        old?.job?.cancel()
-        old?.let { clear(id, it.generation, it.workspace) }
-        // M23 mcp_register（C5）：仅新绑定成功计一次注册（CapabilityResult.Ready返回之前结算）；
-        // 缓存lease复用绝不是注册（分母不增），绑定失败不开分母。begin与end都在实际处理器
-        // （ensure的新绑定成功分支）完成，调用方与backend实现绝不双计。
-        operations?.let { ops ->
-            val operation = ops.begin(
+        var committed = false
+        var attempted = false
+        var operation: Operation? = null
+        try {
+            val transport = try {
+                withTimeout(30_000) { ready.await() }
+            } catch (error: TimeoutCancellationException) {
+                return@withLock CapabilityResult.Unavailable(code(error))
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                return@withLock CapabilityResult.Unavailable(code(error))
+            }
+            operation = operations?.begin(
                 "ide.operation",
                 MCP_REGISTER_DEADLINE_MS,
                 buildJsonObject { put("operation", "mcp_register") },
             )
-            operation.end("success", "bind")
+            attempted = true
+            val failure = bind(id, workspace, generation, transport, tools)
+            if (failure != null) {
+                val blocked = failure == "ide_capability_unsupported"
+                operation?.end(
+                    if (blocked) "blocked" else "failure", "bind",
+                    if (blocked) "environment" else "cs_cloud", failure,
+                )
+                return@withLock CapabilityResult.Unavailable(failure)
+            }
+            currentCoroutineContext().ensureActive()
+            val old = leases.put(id, Lease(workspace, generation, tools, job, currentEpoch))
+            committed = true
+            operation?.end("success", "bind")
+            old?.job?.cancel()
+            old?.let { clear(id, it.generation, it.workspace) }
+            CapabilityResult.Ready(generation, tools)
+        } catch (error: CancellationException) {
+            operation?.end("cancelled", "bind")
+            throw error
+        } finally {
+            if (!committed) withContext(NonCancellable) {
+                job.cancelAndJoin()
+                // The daemon may have accepted PUT before cancellation/transport failure.
+                // Generation-scoped DELETE is valid only for the original connection epoch.
+                if (attempted && epoch() == currentEpoch) clear(id, generation, workspace)
+            }
         }
-        CapabilityResult.Ready(generation, tools)
     }
 
     override suspend fun release(id: String, reason: CapabilityReleaseReason) = locks.getOrPut(id) { Mutex() }.withLock { releaseLocked(id) }
@@ -141,13 +174,29 @@ class CsCloudMcpBridge(
         val url = base.toHttpUrl().newBuilder().addPathSegments("api/v1/conversations").addPathSegment(id).addPathSegments("capabilities/ide").build()
         val request = Request.Builder().url(url).header("X-Workspace-Directory", workspace)
             .put(json.encodeToString(spec).toRequestBody("application/json".toMediaType())).build()
-        runCatching { http.newCall(request).execute().close() }.fold(
-            onSuccess = { null },
-            onFailure = {
-                log.warn("IDE MCP bind failed conversation=${hash(id)} generation=${hash(generation)}", it)
-                capabilityBindReason(it)
-            },
-        )
+        val bounded = http.newBuilder().callTimeout(timeout, TimeUnit.MILLISECONDS).build()
+        coroutineScope {
+            val call = bounded.newCall(request)
+            val cancellation = launch(start = CoroutineStart.UNDISPATCHED) {
+                try {
+                    awaitCancellation()
+                } finally {
+                    call.cancel()
+                }
+            }
+            try {
+                runCatching { call.execute().close() }.fold(
+                    onSuccess = { null },
+                    onFailure = {
+                        currentCoroutineContext().ensureActive()
+                        log.warn("IDE MCP bind failed conversation=${hash(id)} generation=${hash(generation)}", it)
+                        capabilityBindReason(it)
+                    },
+                )
+            } finally {
+                cancellation.cancel()
+            }
+        }
     }
 
     private suspend fun supported(): Boolean = withContext(Dispatchers.IO) {
@@ -168,7 +217,8 @@ class CsCloudMcpBridge(
         val http = client() ?: return@withContext
         val url = base.toHttpUrl().newBuilder().addPathSegments("api/v1/conversations").addPathSegment(id)
             .addPathSegments("capabilities/ide").addQueryParameter("generation", generation).build()
-        runCatching { http.newCall(Request.Builder().url(url).header("X-Workspace-Directory", workspace).delete().build()).execute().close() }
+        val bounded = http.newBuilder().callTimeout(timeout, TimeUnit.MILLISECONDS).build()
+        runCatching { bounded.newCall(Request.Builder().url(url).header("X-Workspace-Directory", workspace).delete().build()).execute().close() }
             .onFailure { log.warn("IDE MCP release failed conversation=${hash(id)} generation=${hash(generation)}", it) }
     }
 

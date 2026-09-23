@@ -11,6 +11,12 @@ import ai.kilocode.backend.workspace.AgentInfo
 import ai.kilocode.backend.workspace.KiloBackendWorkspaceManager
 import ai.kilocode.backend.workspace.KiloWorkspaceState
 import ai.kilocode.log.KiloLog
+import ai.kilocode.stability.Operations
+import ai.kilocode.stability.ProtocolCode
+import ai.kilocode.stability.ProtocolStage
+import ai.kilocode.stability.ProtocolTransport
+import ai.kilocode.stability.StabilityService
+import ai.kilocode.stability.protocolError
 import ai.kilocode.jetbrains.api.model.Agent
 import ai.kilocode.rpc.KiloWorkspaceRpcApi
 import ai.kilocode.rpc.isManagedWorktreeStorage
@@ -48,6 +54,7 @@ import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.SerializationException
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.json.Json
 import okhttp3.Request
@@ -74,6 +81,7 @@ import kotlin.coroutines.resume
  */
 class KiloWorkspaceRpcApiImpl internal constructor(
     private val svc: KiloBackendAppService? = null,
+    private val operations: Operations? = runCatching { service<StabilityService>().operations }.getOrNull(),
 ) : KiloWorkspaceRpcApi {
     companion object {
         private val LOG = KiloLog.create(KiloWorkspaceRpcApiImpl::class.java)
@@ -242,7 +250,13 @@ class KiloWorkspaceRpcApiImpl internal constructor(
                 body
             }
         }
-        return JSON.decodeFromString<List<String>>(raw)
+        val paths = try {
+            KiloCliDataParser.parseStrings(raw)
+        } catch (_: SerializationException) {
+            operations?.protocolError(ProtocolTransport.HTTP, ProtocolStage.DECODE, ProtocolCode.DECODE_FAILED)
+            return emptyList()
+        }
+        return paths
             .asSequence()
             .map { it.trimEnd('/') }
             .filter { it.isNotBlank() && !isManagedWorktreeStorage(it) }

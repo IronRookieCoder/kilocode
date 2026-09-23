@@ -106,6 +106,8 @@ cs-cloud的消费组件随daemon启动，在agent初始化之前完成组装，�
 | 读取 | 对每个文件从持久化位移继续读取；按6.1校验每行，跳过无LF的残缺尾行，中间坏行隔离计数；按event_id去重 | 6.1、7.2、7.3 |
 | 接收 | 去重后的记录持久保存，随后原子提交该文件的新位移——到这里插件的责任就结束了 | 7.2 |
 
+`purposes` 表示同一事实获准进入的用途集合，不表示事实本身“是指标”或“是日志”。`["metrics","logs"]` 时插件只采集、落盘和交接一次，cs-cloud 按数组成员以同一输入 `event_id` 分别进入指标转换链和日志转换链；两条链生成各自的输出 ID、独立确认和重试，不能用日志受理次数反推指标分母。
+
 位移提交与持久入队必须在同一可恢复事务内完成。文件变短或被写者重写（文件身份变化）时位移归零重读，重复读取由event_id去重吸收，因此读取是幂等的；多个daemon并发读同一文件也是安全的，部署上仍建议单消费者，属资源建议而非协议要求。
 
 控制文件的发布（第8章）与文件消费可以共用同一轮扫描结果，但两件事互不阻塞；身份代际（account_epoch）同样由cs-cloud发布（见8.1）。
@@ -116,7 +118,7 @@ cs-cloud的消费组件随daemon启动，在agent初始化之前完成组装，�
 
 单体IDE同一JVM内前后端共享一个采集器。Split Mode前后端可能在不同机器，各自有producer、时钟、文件和消费器；backend机器的cs-cloud不能直接读取frontend文件。
 
-v1目标支持单体完整采集，前提是插件与cs-cloud均实现本文新协议；当前版本尚不具备该链路。远程完整覆盖要求两端各有cs-cloud文件消费能力。前端仅运行采集组件而不启动Agent Core是待新增部署能力：当前daemon/serve均启动默认agent，不能直接用现有命令宣称实现。该模式未交付时应明确前端未接入，不为补遥测强制启动额外agent。
+插件侧已实现单体采集的追加式NDJSON、控制策略、health增量、`edt.stall`及事实交接；cs-cloud侧文件消费、指标/日志转换和发送仍未实现，不能把本地落盘描述为云端已接入。远程完整覆盖仍要求两端各有cs-cloud文件消费能力。前端仅运行采集组件而不启动Agent Core是待新增部署能力：当前daemon/serve均启动默认agent，不能直接用现有命令宣称实现。该模式未交付时应明确前端未接入，不为补遥测强制启动额外agent。
 
 策略与消费能力都是机器局部的：若frontend机器没有本机消费组件，就没有策略来源，按第8章无有效策略处理——默认不限制，照常采集并落盘；没有本机消费者，数据仅受每producer容量与保留期约束，最终由清理回收。覆盖状态必须显示“前端未接入”，不能把缺失当无故障。RPC文件转运不隐含在v1内，需另行定义持久确认和断连重放。
 
@@ -147,7 +149,7 @@ producer_id为每JVM采集实例的随机标识，run_id为每次采集生命周
 | 事实文件 | `~/.costrict/telemetry/outbox/<scope-id>-<producer-id>.jsonl` | 插件单写者追加→cs-cloud按位移读取 | NDJSON v1：UTF-8无BOM、LF结尾、每行一个JSON对象、一行一write、普通记录≤32KiB；字段闭集与示例 | 6.1、7.1 |
 | 读取与位移 | cs-cloud自有状态存储（不写入outbox目录） | cs-cloud自管 | 每文件持久位移，与可靠接收原子提交；文件变短或身份变化即归零重读，重复由event_id去重吸收 | 7.2 |
 | 采集控制 | `~/.costrict/telemetry/control/jetbrains.json` | cs-cloud原子写→插件后台每30秒轮询 | control v1单JSON对象：开关、分用途有效期、account_epoch、account_state、允许事件类别及日志诊断限频；无有效策略（缺失、空、畸形、未知major）默认不限制，限制仅来自当前有效的显式策略 | 8 |
-| 机器可读wire契约 | `packages/kilo-jetbrains/shared/src/test/resources/stability/` | 双方共同冻结 | fact-schema.json与control-schema.json为JSON Schema；本目录文件尚未随协议修订，待实现任务同步：fact-schema补edt.stall，control-schema的默认策略语义需反转（现为fail-closed描述）并补unbound占位说明，contract.json的锁验证条目废止重组 | 12 |
+| 机器可读wire契约 | `packages/kilo-jetbrains/shared/src/test/resources/stability/` | 双方共同冻结 | `fact-schema.json`与`control-schema.json`为JSON Schema，已与追加式NDJSON、health增量、`edt.stall`及无有效策略的`unbound`占位语义同步；契约测试覆盖字段、枚举、用途和追加文件形态。cs-cloud仍未实现消费与发送 | 9.1、12 |
 
 唯一根路径为`~/.costrict/telemetry`（默认profile边界、机器局部）：`control/`只存放cs-cloud发布的控制文件，`outbox/`只存放插件追加的事实文件，两个子目录职责不混用——Split Mode下backend机器的cs-cloud读不到frontend机器的outbox（5.1）。事实行内禁止路径与凭据（6.1白名单）；consumer只接受outbox目录下的平铺常规文件并校验解析结果不越界，拒绝符号链接/重解析点（5.2）。
 
@@ -340,12 +342,15 @@ account_epoch是daemon给当前已验证账户或租户的随机本机代号，�
 
 kind=diagnostic只是数据形态；error/protocol/violation的最小计数事实写critical，受指标许可控制，不因详细日志限频丢计数。详细message/安全栈帧仅在日志许可允许时写diagnostic，引用相同fault_id但不同event_id，不能再次增加故障次数。
 
+当前实现对 `session.status`、SSE 信封字段形状与 file-search 的解码错误均写入一条 `protocol.error`，跨层重复解析不重复计数；包装型 file-search 正常响应不产出协议错误。provider hint 与 recorder 身份创建共用同步锁：创建 recorder 时冻结本次 run，之前到达的提示用于本次，writer 启动等待期间及之后到达的提示只用于下一次 run。长期消费者持有稳定 `Operations` 入口，新操作解析当前 run，已经开始的操作保留原 run。READY 但 profile 为空时，readiness/availability 以 `blocked` 表达，app 状态订阅即时切换可用性区间；真实 MCP bind 以有界的 `ide.operation` start/end 记录 success、failure、blocked 或 cancelled，未提交的监听器在所有退出路径回收，可能已接受的远端绑定按原 epoch/generation 清理。
+
 operation.end包含公共result、duration_ms、cause，未在表内逐行重复。非operation的环境变化、健康和样本字段按上述固定白名单校验，禁止透传任意对象。
 
 事件data可包含未列入指标聚合维度的明细字段（如stage、error_code），明细用于日志与诊断。M16的observation_total由插件侧终态事实直接构成：run级复用plugin.started/shutdown/unclean，操作级复用各operation的end/timeout终态；cs-cloud不配对结算、不推断丢失终态（见10.2），不新增插件业务埋点。M20的stall由插件产出edt.stall；M17为接收侧自观测，不登记插件事实。
 
 ## 第三部分：指标事实采集
 
+<a id="metrics-pipeline"></a>
 ### 10. 指标事实
 
 #### 10.1 采集范围
@@ -370,6 +375,7 @@ edt.delay包含observation_id、probe_seq、scheduled_mono_ms、completed_mono_m
 
 ## 第四部分：日志事实采集
 
+<a id="logs-pipeline"></a>
 ### 11. 日志事实
 
 插件不请求网络地址、不读取传输凭据，也不写第二套日志文件；critical/diagnostic事实经同一outbox交接。指标关闭但日志允许时仍采集有排障价值的日志用途事实；日志关闭但指标允许时只保留必要计数事实，禁止附带诊断详情。日志事实数量不得作为业务指标分母。
@@ -380,7 +386,7 @@ info：正常生命周期和恢复；warn：可自愈退化、风险或采集丢
 
 message使用固定模板加安全枚举，禁止直接截取异常首行。原始异常可能含凭据、代码、用户名和路径，截短不等于脱敏。v1不采集完整堆栈；最多5个脱敏插件类或方法帧和fingerprint提供归因，深度诊断包另行由用户明确导出。
 
-同fingerprint每分钟最多3份详情，额外次数汇入摘要；异常指标次数不被详情限频改变。采集器错误只向独立本地日志限频输出，不递归调用自身写入。
+同fingerprint每分钟默认最多3份详情，由有效策略的 `log_detail_rate_limit.per_fingerprint_max_per_minute`（0～60）覆盖；窗口内收紧立即生效，0 不采详情或摘要。类别许可按记录形态判断，critical-only 不放行同名事件的诊断详情；准入和入盘前均复查类别及许可。额外次数汇入摘要，异常指标次数不被详情限频改变。采集器错误只向独立本地日志限频输出，不递归调用自身写入。
 
 #### 11.2 日志采集范围
 
@@ -391,7 +397,9 @@ message使用固定模板加安全枚举，禁止直接截取异常首行。原�
 
 ### 12. 实施顺序与边界
 
-本轮交付为文档修订：交接协议由分段文件、状态机与锁改为追加日志和位移消费，并同步简化派生语义。插件侧采集器已按旧版分段协议在分支上实现并测试，需按本版协议调整落盘布局与事件字典（health增量、edt.stall等）；cs-cloud侧文件消费尚未实现。
+插件侧已实现本版追加式NDJSON交接、控制 schema、事实 schema、health 增量、`edt.stall`以及相应的稳定性观测修复；本轮文档同步这些已审查实现。cs-cloud侧消费、指标/日志转换和发送尚未实现，设计中的 Draft/提案只表示后续对接方向，不能写成已上线能力。下列为后续交付分期。
+
+本次已审查的插件侧实现包括：稳定性 RPC 操作以唯一 deadline 结算 `timeout`；仅撤销一个用途且另一用途仍获准时，终态缺口可由 `telemetry.health` 增量表达，而公共关闭或双用途到期会结束 run、清理文件，不要求随后仍有该增量；`session.status` 与 file-search 解码错误统一产出、跨层去重的 `protocol.error`；provider 预热提示和后续 run hint 均保留实际 `connection_provider`；READY 但 profile 为空以及凭据未就绪均表达为 `blocked`；真实 MCP bind 记录 `start` 及 `success`/`failure`/`blocked` 终态，bind 请求本身有界。
 
 | 阶段 | 共用设施 | 指标事实 | 日志事实 |
 |---|---|---|---|
@@ -406,7 +414,7 @@ message使用固定模板加安全枚举，禁止直接截取异常首行。原�
 
 #### 12.1 cs-cloud文件接入边界
 
-本节只列文件交接所需任务，不规定cs-cloud接收数据后的处理方式。
+以下为后续 cs-cloud 接入任务；其源码和提案不在本次变更范围内，当前仍不能视为已上线能力。
 
 | 接入任务 | 约束 |
 |---|---|

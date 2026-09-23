@@ -216,6 +216,25 @@ class OperationTest {
         assertEquals(2, fixture.claimAll().size)
     }
 
+    @Test
+    fun `rpc reaches one timeout terminal while metrics permission remains active`() = runTest {
+        val clock = schedulerClock(testScheduler)
+        val fixture = newFixture(clock)
+        val operations = Operations(fixture.recorder, clock, backgroundScope)
+        val operation = operations.begin(
+            "rpc",
+            100,
+            buildJsonObject { put("api_group", "other") },
+        )
+
+        advanceTimeBy(100)
+        runCurrent()
+
+        val facts = fixture.claimAll().filter { it.context[CONTEXT_OPERATION_ID] == operation.id }
+        assertEquals(listOf("start", "end"), facts.map { it.phase() })
+        assertEquals("timeout", facts.last().text("result"))
+    }
+
     // ---------- epoch与用途快照 ----------
 
     @Test
@@ -249,6 +268,38 @@ class OperationTest {
         val facts = fixture.claimAll()
         assertEquals(2, facts.size)
         facts.forEach { fact -> assertEquals(setOf("metrics"), fact.purposes) }
+    }
+
+    @Test
+    fun `metrics revocation drops the rpc terminal and increments disabled policy`() = runTest {
+        val clock = schedulerClock(testScheduler)
+        val fixture = newFixture(clock, controlJson(logsEnabled = false))
+        val operations = Operations(fixture.recorder, clock, backgroundScope)
+        operations.begin("rpc", 100, buildJsonObject { put("api_group", "other") })
+
+        fixture.replaceControl(controlJson(metricsEnabled = false, logsEnabled = true))
+        fixture.store.refresh()
+        advanceTimeBy(100)
+        runCurrent()
+
+        val facts = fixture.claimAll()
+        assertEquals(listOf("start"), facts.map { it.phase() })
+        assertEquals(1L, fixture.recorder.health().disabledPolicy)
+    }
+
+    @Test
+    fun `metrics permission retains one rpc terminal through its deadline`() = runTest {
+        val clock = schedulerClock(testScheduler)
+        val fixture = newFixture(clock, controlJson(logsEnabled = false))
+        val operations = Operations(fixture.recorder, clock, backgroundScope)
+        operations.begin("rpc", 100, buildJsonObject { put("api_group", "other") })
+
+        advanceTimeBy(100)
+        runCurrent()
+
+        val facts = fixture.claimAll()
+        assertEquals(listOf("start", "end"), facts.map { it.phase() })
+        assertEquals("timeout", facts.last().text("result"))
     }
 
     // ---------- progress与fields白名单 ----------

@@ -233,7 +233,84 @@ class FaultTest {
         }
     }
 
-    private fun controlJson(metrics: Boolean, logs: Boolean): String = buildJsonObject {
+    @Test
+    fun `zero and one detail quotas preserve every fault count`() {
+        listOf(0, 1).forEach { limit ->
+            Fixture().use { fixture ->
+                fixture.base.resolve("control.json").writeText(controlJson(true, true, limit))
+                fixture.policies.refresh()
+                val faults = Faults(fixture.recorder, fixture.clock)
+                repeat(4) { faults.report(FaultA(), "other", true) }
+                fixture.flush()
+                assertEquals(4, fixture.facts().count { it.channel == "critical" })
+                assertEquals(limit, fixture.facts().count { it.channel == "diagnostic" })
+            }
+        }
+    }
+
+    @Test
+    fun `tightening quota in the same minute takes effect immediately`() {
+        Fixture().use { fixture ->
+            val faults = Faults(fixture.recorder, fixture.clock)
+            faults.report(FaultA(), "other", true)
+            fixture.flush()
+            fixture.base.resolve("control.json").writeText(controlJson(true, true, 1))
+            fixture.policies.refresh()
+            repeat(4) { faults.report(FaultA(), "other", true) }
+            fixture.flush()
+            assertEquals(5, fixture.facts().count { it.channel == "critical" })
+            assertEquals(1, fixture.facts().count { it.channel == "diagnostic" })
+            fixture.base.resolve("control.json").writeText(controlJson(true, true, 0))
+            fixture.policies.refresh()
+            fixture.advanceClock(WINDOW_STEP_MS)
+            faults.report(FaultA(), "other", true)
+            fixture.flush()
+            assertEquals(6, fixture.facts().count { it.channel == "critical" })
+            assertEquals(1, fixture.facts().count { it.channel == "diagnostic" }, "zero also forbids summaries")
+        }
+    }
+
+    @Test
+    fun `critical only logs forbid error details including channel disguises`() {
+        Fixture().use { fixture ->
+            val faults = Faults(fixture.recorder, fixture.clock)
+            faults.report(FaultA(), "other", true)
+            fixture.flush()
+            val detail = fixture.facts().single { it.channel == "diagnostic" }
+            fixture.base.resolve("control.json").writeText(controlJson(false, true, categories = listOf("critical")))
+            fixture.policies.refresh()
+            faults.report(FaultB(), "other", true)
+            assertEquals(Admission.DISABLED, fixture.recorder.record(Draft(
+                detail.name, detail.kind, "critical", detail.data, detail.context,
+            )))
+            assertEquals(Admission.QUEUED, fixture.operations.protocolError(
+                ProtocolTransport.SSE, ProtocolStage.DECODE, ProtocolCode.DECODE_FAILED,
+            ))
+            fixture.flush()
+            assertEquals(1, fixture.facts().count { it.channel == "diagnostic" })
+            assertEquals(setOf("logs"), fixture.facts().last().purposes)
+        }
+    }
+
+    @Test
+    fun `writer rechecks queued detail category and zero quota`() {
+        listOf(
+            controlJson(true, true, categories = listOf("critical")),
+            controlJson(true, true, limit = 0),
+        ).forEach { policy ->
+            Fixture(autoStart = false).use { fixture ->
+                Faults(fixture.recorder, fixture.clock).report(FaultA(), "other", true)
+                fixture.base.resolve("control.json").writeText(policy)
+                fixture.policies.refresh()
+                fixture.writer.start()
+                fixture.flush()
+                assertEquals(1, fixture.facts().size)
+                assertEquals("critical", fixture.facts().single().channel)
+            }
+        }
+    }
+
+    private fun controlJson(metrics: Boolean, logs: Boolean, limit: Int = 3, categories: List<String> = listOf("critical", "diagnostic")): String = buildJsonObject {
         put("schema_major", 1)
         put("revision", 12L)
         put("enabled", true)
@@ -242,11 +319,11 @@ class FaultTest {
         put("metrics_allowed_categories", JsonArray(listOf("critical", "diagnostic").map { JsonPrimitive(it) }))
         put("logs_enabled", logs)
         put("logs_expires_at", 9_000_000_000_000L)
-        put("logs_allowed_categories", JsonArray(listOf("critical", "diagnostic").map { JsonPrimitive(it) }))
+        put("logs_allowed_categories", JsonArray(categories.map { JsonPrimitive(it) }))
         put("account_epoch", "acct-a")
         put("account_state", "ready")
         put("expires_at", 9_000_000_000_000L)
-        put("log_detail_rate_limit", buildJsonObject { put("per_fingerprint_max_per_minute", 3) })
+        put("log_detail_rate_limit", buildJsonObject { put("per_fingerprint_max_per_minute", limit) })
     }.toString()
 
     private class FaultA : IllegalStateException("secret-a")

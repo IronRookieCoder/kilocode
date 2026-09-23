@@ -1122,6 +1122,48 @@ class KiloCliDataParserTest {
         }
 
         @Test
+        fun `parseSessionStatus - empty status defaults to idle`() {
+            val result = KiloCliDataParser.parseSessionStatus("""{"sessionID":"ses_xyz","status":{}}""")
+            assertNotNull(result)
+            assertEquals("idle", result.second.type)
+            assertNull(result.second.message)
+        }
+
+        @Test
+        fun `parseSessionStatusStrict rejects malformed and incomplete events`() {
+            assertFailsWith<kotlinx.serialization.SerializationException> {
+                KiloCliDataParser.parseSessionStatusStrict("{not-json")
+            }
+            assertFailsWith<kotlinx.serialization.SerializationException> {
+                KiloCliDataParser.parseSessionStatusStrict("""{"status":{"type":"idle"}}""")
+            }
+            assertFailsWith<kotlinx.serialization.SerializationException> {
+                KiloCliDataParser.parseSessionStatusStrict("""{"sessionID":"ses_1","status":"idle"}""")
+            }
+            assertFailsWith<kotlinx.serialization.SerializationException> {
+                KiloCliDataParser.parseSessionStatusStrict("""{"sessionID":{},"status":{"type":"idle"}}""")
+            }
+            assertFailsWith<kotlinx.serialization.SerializationException> {
+                KiloCliDataParser.parseSessionStatusStrict("""{"sessionID":"ses_1","status":{}}""")
+            }
+            assertFailsWith<kotlinx.serialization.SerializationException> {
+                KiloCliDataParser.parseSessionStatusStrict("""{"sessionID":"ses_1","status":{"type":{}}}""")
+            }
+        }
+
+        @Test
+        fun `parseStrings accepts arrays and wrapped arrays`() {
+            assertFailsWith<kotlinx.serialization.SerializationException> {
+                KiloCliDataParser.parseStrings("""{"ok":"true","data":["src/Main.kt"]}""")
+            }
+            assertEquals(listOf("src/Main.kt"), KiloCliDataParser.parseStrings("""["src/Main.kt"]"""))
+            assertEquals(listOf("src/Main.kt"), KiloCliDataParser.parseStrings("""{"ok":true,"data":["src/Main.kt"]}"""))
+            assertFailsWith<kotlinx.serialization.SerializationException> {
+                KiloCliDataParser.parseStrings("""{"ok":false,"data":"not-an-array"}""")
+            }
+        }
+
+        @Test
         fun `parseSessionStatus - retry preserves attempt and next`() {
             val data = globalEvent("""
                 "type": "session.status",

@@ -2,9 +2,11 @@
 
 本文是指标口径与使用优先级（P0/P1）的唯一维护位置，定义指标的业务含义、衡量起止、统计规则、等级与登记约定。总体决策、事件字典、文件协议、源码接入点与交付分期见[稳定性设计与采集协议](./jetbrains-stability-design.md)。
 
-本文仅定义指标，不定义日志等级、日志目录或日志上传规则。指标链路见[设计第10章](./jetbrains-stability-design.md#10-指标链路)，日志链路单独见[设计第11章](./jetbrains-stability-design.md#11-日志链路)；两者分别控制、转换、上报和验收。
+本文仅定义指标，不定义日志等级、日志目录或日志上传规则。指标链路见[设计指标链路](./jetbrains-stability-design.md#metrics-pipeline)，日志链路见[设计日志链路](./jetbrains-stability-design.md#logs-pipeline)；两者分别控制、转换、上报和验收。
 
 与cs-cloud指标的边界：Agent Core的任务、模型回答、工具调用、Token和费用归cs-cloud侧指标设计负责，本文不重复统计。这是职责划分，不代表统一指标上报已实现；cs-cloud源码及Draft提案的核验结果见[设计2.1](./jetbrains-stability-design.md#21-cs-cloud源码核验)。插件“发送成功”只表示请求被接收且界面正确更新，不表示模型回答正确或任务完成。
+
+插件侧已按设计落盘追加式事实、控制 schema、事实 schema、health 增量和 `edt.stall`；cs-cloud 消费、指标/日志转换及发送仍未实现，Draft/规划项不等于已上线能力。
 
 ## 指标总览
 

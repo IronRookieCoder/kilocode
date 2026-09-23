@@ -81,6 +81,7 @@ import ai.kilocode.rpc.dto.TodoViewDto
 import ai.kilocode.rpc.dto.TokensDto
 import ai.kilocode.rpc.dto.ToolRefDto
 import ai.kilocode.rpc.dto.WatcherConfigDto
+import kotlinx.serialization.SerializationException
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
@@ -370,17 +371,53 @@ object KiloCliDataParser {
         private data class Key(val messageID: String, val partID: String)
     }
 
-    /**
-     * Parse an SSE `session.status` event into a (sessionID, [SessionStatusDto]) pair.
-     * Returns null if the required fields are missing.
-     */
-    fun parseSessionStatus(data: String): Pair<String, SessionStatusDto>? {
-        val obj = tryParseObject(data) ?: return null
+    fun parseSessionStatusStrict(data: String): Pair<String, SessionStatusDto> {
+        val obj = json.parseToJsonElement(data) as? JsonObject
+            ?: throw SerializationException("Session status must be an object")
+        val payload = obj["payload"]?.strictObject("Session status payload must be an object") ?: obj
+        val props = payload["properties"]?.strictObject("Session status properties must be an object") ?: obj
+        val id = props["sessionID"]?.strictString("Session status sessionID must be a string")
+            ?: throw SerializationException("Session status requires sessionID")
+        val status = props["status"]?.strictObject("Session status must be an object")
+            ?: throw SerializationException("Session status requires status")
+        val type = status["type"]?.strictString("Session status type must be a string")
+            ?: throw SerializationException("Session status requires type")
+        return id to SessionStatusDto(
+            type = type,
+            message = status.optionalString("message", "Session status message must be a string"),
+            attempt = status.optionalLong("attempt", "Session status attempt must be an integer")?.safeInt(),
+            next = status.optionalLong("next", "Session status next must be an integer"),
+            requestID = status.optionalString("requestID", "Session status requestID must be a string"),
+        )
+    }
+
+    /** Parse a status event tolerantly for existing callers that do not observe protocol failures. */
+    fun parseSessionStatus(data: String): Pair<String, SessionStatusDto>? = runCatching {
+        val obj = tryParseObject(data) ?: return@runCatching null
         val payload = obj["payload"]?.jsonObject ?: obj
         val props = payload["properties"]?.jsonObject ?: obj
-        val id = props.str("sessionID") ?: return null
-        val st = props["status"]?.jsonObject ?: return id to SessionStatusDto("idle")
-        return id to parseStatus(st)
+        val id = props.str("sessionID") ?: return@runCatching null
+        val status = props["status"]?.jsonObject ?: return@runCatching id to SessionStatusDto("idle")
+        id to parseStatus(status)
+    }.getOrNull()
+
+    fun parseStrings(raw: String): List<String> {
+        val data = when (val root = json.parseToJsonElement(raw)) {
+            is JsonArray -> root
+            is JsonObject -> {
+                val ok = root["ok"] as? JsonPrimitive
+                if (ok?.isString != false || ok.booleanOrNull != true) {
+                    throw SerializationException("String response wrapper must be successful")
+                }
+                root["data"] as? JsonArray ?: throw SerializationException("String response data must be an array")
+            }
+            else -> throw SerializationException("String response must be an array or object")
+        }
+        return data.map { value ->
+            val item = value as? JsonPrimitive
+            if (item?.isString == true) item.content
+            else throw SerializationException("String response array values must be strings")
+        }
     }
 
     // ================================================================
@@ -1819,6 +1856,29 @@ object KiloCliDataParser {
 
     private fun tryParseArray(raw: String): kotlinx.serialization.json.JsonArray? =
         try { json.parseToJsonElement(raw).jsonArray } catch (_: Exception) { null }
+
+    private fun JsonElement.strictObject(message: String): JsonObject =
+        this as? JsonObject ?: throw SerializationException(message)
+
+    private fun JsonElement.strictString(message: String): String {
+        val value = this as? JsonPrimitive
+        if (value?.isString == true) return value.content
+        throw SerializationException(message)
+    }
+
+    private fun JsonObject.optionalString(key: String, message: String): String? {
+        val value = this[key] ?: return null
+        if (value is JsonNull) return null
+        return value.strictString(message)
+    }
+
+    private fun JsonObject.optionalLong(key: String, message: String): Long? {
+        val value = this[key] ?: return null
+        if (value is JsonNull) return null
+        val item = value as? JsonPrimitive
+        if (item?.isString == false) return item.longOrNull ?: throw SerializationException(message)
+        throw SerializationException(message)
+    }
 
     /** Escape and double-quote a string for manual JSON building. */
     private fun escape(value: String): String {

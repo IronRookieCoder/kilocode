@@ -53,7 +53,7 @@ private val REGISTERED_NAMES = Dictionary.names.toSet()
  * 独立截止（UTC毫秒），[names]为该用途允许的事件name集合。wire字段（metrics_enabled、
  * metrics_expires_at、*_allowed_categories）到内部名的翻译由[PolicyStore]完成。
  */
-data class Permit(val enabled: Boolean, val expires: Long, val names: Set<String>)
+data class Permit(val enabled: Boolean, val expires: Long, val names: Set<String>, val categories: Set<String> = CATEGORIES)
 
 /**
  * 一次控制文件读取得到的不可变策略快照（设计第8章）：公共策略加两个用途的独立许可。
@@ -71,17 +71,21 @@ data class Policy(
     val expires: Long,
     val metrics: Permit?,
     val logs: Permit?,
+    val limit: Int = 3,
 ) {
     /**
      * 即时判期：事件[name]在时刻[now]（UTC毫秒）允许的用途集合。
      * 每次record及writer入盘前都必须以当前时刻重新调用，不得缓存上一次结论等下一次轮询。
      */
-    fun permit(now: Long, name: String): Set<String> {
+    fun permit(now: Long, name: String, category: String? = null): Set<String> {
         val commonOpen = major == SUPPORTED_MAJOR && enabled && state == STATE_READY && now < expires
         if (!commonOpen) return emptySet()
         return buildSet {
-            if (metrics?.let { it.enabled && now < it.expires && name in it.names } == true) add(PURPOSE_METRICS)
-            if (logs?.let { it.enabled && now < it.expires && name in it.names } == true) add(PURPOSE_LOGS)
+            if (metrics?.let { it.enabled && now < it.expires && name in it.names &&
+                    (category == null || category in it.categories) } == true) add(PURPOSE_METRICS)
+            if (logs?.let { it.enabled && now < it.expires && name in it.names &&
+                    (category == null || category in it.categories) &&
+                    (category != CATEGORY_DIAGNOSTIC || limit > 0) } == true) add(PURPOSE_LOGS)
         }
     }
 }
@@ -277,6 +281,7 @@ private fun policyOf(root: JsonObject, fields: CommonFields): Policy = Policy(
     expires = fields.expires,
     metrics = permitOf(root, "metrics_enabled", "metrics_expires_at", "metrics_allowed_categories"),
     logs = permitOf(root, "logs_enabled", "logs_expires_at", "logs_allowed_categories"),
+    limit = (root.getValue("log_detail_rate_limit") as JsonObject).long("per_fingerprint_max_per_minute")!!.toInt(),
 )
 
 /** 公共字段逐项严格校验；任何一项不合法整份文件无效。 */
@@ -299,7 +304,7 @@ private fun permitOf(root: JsonObject, enabledKey: String, expiresKey: String, c
     val expires = root.long(expiresKey)?.takeIf { value -> value >= 0 }
     val categories = root.categories(categoriesKey)
     return if (enabled != null && expires != null && categories != null) {
-        Permit(enabled, expires, allowedNames(categories))
+        Permit(enabled, expires, allowedNames(categories), categories)
     } else {
         null
     }

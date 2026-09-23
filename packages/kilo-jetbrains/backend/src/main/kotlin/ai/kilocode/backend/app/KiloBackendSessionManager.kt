@@ -3,6 +3,13 @@ package ai.kilocode.backend.app
 import ai.kilocode.backend.cli.KiloCliDataParser
 import ai.kilocode.log.ChatLogSummary
 import ai.kilocode.log.KiloLog
+import ai.kilocode.stability.Operations
+import ai.kilocode.stability.ProtocolCode
+import ai.kilocode.stability.ProtocolStage
+import ai.kilocode.stability.ProtocolTransport
+import ai.kilocode.stability.StabilityService
+import ai.kilocode.stability.protocolError
+import com.intellij.openapi.components.service
 import ai.kilocode.jetbrains.api.client.DefaultApi
 import ai.kilocode.jetbrains.api.model.GlobalSession
 import ai.kilocode.jetbrains.api.model.SessionStatus
@@ -23,6 +30,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.SerializationException
 import kotlinx.serialization.json.JsonPrimitive
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.MediaType.Companion.toMediaType
@@ -48,6 +56,7 @@ import java.util.concurrent.ConcurrentHashMap
 class KiloBackendSessionManager(
     private val cs: CoroutineScope,
     private val log: KiloLog,
+    private val operations: Operations? = runCatching { service<StabilityService>().operations }.getOrNull(),
 ) {
     /** Per-session directory overrides (sessionId → worktree path). */
     private val directories = ConcurrentHashMap<String, String>()
@@ -73,21 +82,27 @@ class KiloBackendSessionManager(
         watcher = cs.launch {
             events.collect { event ->
                 if (event.type == "session.status") {
-                    val pair = KiloCliDataParser.parseSessionStatus(event.data)
-                    if (pair != null) {
-                        val prev = _statuses.value[pair.first]
-                        _statuses.update { it + pair }
-                        if (pair.second.type == "idle" && prev?.type != "idle") {
-                            capabilities?.release(pair.first, CapabilityReleaseReason.IDLE)
+                    val pair = try {
+                        KiloCliDataParser.parseSessionStatusStrict(event.data)
+                    } catch (_: SerializationException) {
+                        if (!event.observed) {
+                            operations?.protocolError(ProtocolTransport.SSE, ProtocolStage.DECODE, ProtocolCode.DECODE_FAILED)
                         }
-                        val total = _statuses.value.size
-                        log.debug { "${ChatLogSummary.sid(pair.first)} evt=session.status ${ChatLogSummary.status(pair.second)}" }
-                        if (pair.second.type != "busy") {
-                            log.info(
-                                "${ChatLogSummary.sid(pair.first)} kind=status route=session-map " +
-                                    "${ChatLogSummary.status(pair.second)} prev=${prev?.type ?: "none"} total=$total bytes=${event.data.length}",
-                            )
-                        }
+                        log.warn("SSE session status decode failed")
+                        return@collect
+                    }
+                    val prev = _statuses.value[pair.first]
+                    _statuses.update { it + pair }
+                    if (pair.second.type == "idle" && prev?.type != "idle") {
+                        capabilities?.release(pair.first, CapabilityReleaseReason.IDLE)
+                    }
+                    val total = _statuses.value.size
+                    log.debug { "${ChatLogSummary.sid(pair.first)} evt=session.status ${ChatLogSummary.status(pair.second)}" }
+                    if (pair.second.type != "busy") {
+                        log.info(
+                            "${ChatLogSummary.sid(pair.first)} kind=status route=session-map " +
+                                "${ChatLogSummary.status(pair.second)} prev=${prev?.type ?: "none"} total=$total bytes=${event.data.length}",
+                        )
                     }
                 }
             }
