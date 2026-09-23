@@ -1,7 +1,7 @@
 # JetBrains 插件稳定性采集·人工测试指南（插件端）
 
 - 依据：[稳定性设计与采集协议](./jetbrains-stability-design.md)（下称"设计文档"，章节号 §x 均指该文）。
-- 范围：**插件端全流程**——从控制文件许可、IDE 启动登记、结构化事实采集，到 outbox 追加式 NDJSON 落盘与优雅关闭。cs-cloud 消费端（文件消费、指标/日志转换和发送）尚未交付，不在本指南范围内；测试验证到“事实已写入 outbox、可供消费”为止。
+- 范围：**插件端全流程**——从控制文件许可、IDE 启动采集、结构化事实采集，到 outbox 追加式 NDJSON 落盘与优雅关闭。cs-cloud 消费端（文件消费、指标/日志转换和发送）尚未交付，不在本指南范围内；测试验证到“事实已写入 outbox、可供消费”为止。
 - 方式：真实 IDE、真实用户环境（不隔离 home），测试者**手工扮演 cs-cloud 发布控制文件**，操作 IDE 触发业务，检查磁盘产物。
 - 全类型口径：**31 个登记事件名、7 种 kind、critical/diagnostic 两个通道、metrics-only / logs-only / dual 三类用途投影**全部落盘核对（场景 E）。
 
@@ -13,7 +13,7 @@
 2. 启动 IDE、打开项目、打开 Costrict 工具窗（§4 场景 A 步骤 3~7）；
 3. 发送一条消息给智能体（§5 场景 B 第 1 行）；
 4. 正常关闭 IDE；
-5. 用 §9 命令核对：outbox 中有且仅有本次 producer 的 `.jsonl` 文件、恰 1 条 `plugin.started` + 1 条 `plugin.shutdown`、seq 连续、`action`/`rpc`/`render.apply` 均落盘。
+5. 用 §10 命令核对：outbox 中有且仅有本次 producer 的 `.jsonl` 文件、恰 1 条 `plugin.started` + 1 条 `plugin.shutdown`、seq 连续、`action`/`rpc`/`render.apply` 均落盘。
 
 全绿即通过最小链路；完整口径继续 §4~§8。
 
@@ -42,10 +42,11 @@ IDE 启动 → StabilityService 后台初始化 → 读控制文件（30 秒轮�
 | 控制文件 | `~/.costrict/telemetry/control/jetbrains.json`，cs-cloud 发布的采集策略；人工测试手工编写 |
 | producer 文件 | `~/.costrict/telemetry/outbox/<scope-id>-<producer-id>.jsonl`，目录即发现入口 |
 | producer / run | producer=每 JVM 采集实例（`pr-` 前缀）；run=每次采集生命周期（`run-` 前缀），撤销许可重开会换新 run |
+| scope-id | 每个 IDE 安装范围持久的随机标识（存于 IDE 持久设置），同一 IDE 多次启动共享、不同 IDE 互不相同；追加文件名的 scope 段，用于识别前任文件（`plugin.unclean` 判定，§7.3）与同源清理归属（§7.4） |
 | 通道 channel | critical=计数/结果/生命周期事实；diagnostic=限频诊断详情 |
 | 用途 purposes | metrics（指标链）/ logs（日志链），一条事实可兼有 |
 | 追加文件 | 单写者追加式 NDJSON；无 `.open`/`.ready`/`.claimed`/`.done` 状态机，消费端按字节位移读取 |
-| device_id | 随机安装标识，持久保存在 IDE 设置中，重装插件不变 |
+| device_id | 随机安装标识，持久保存在 IDE 持久设置中；重装是否更换取决于该设置是否保留，不能承诺重装必变（§5.2） |
 
 ## 2. 环境准备
 
@@ -73,11 +74,11 @@ IDE 中 `Settings → Plugins → ⚙ → Install Plugin from Disk...` 选择该
 ### 2.3 工具
 
 - 文本编辑器（VS Code 等，按 UTF-8 打开）；
-- PowerShell（校验命令见 §9，无需额外安装）或 git-bash + `jq`。
+- PowerShell（校验命令见 §10，无需额外安装）或 git-bash + `jq`。
 
 ### 2.4 环境说明
 
-- 本机部署的 cs-cloud daemon 当前版本**没有**遥测消费能力，不会读写这些测试文件；测试结束后仍按 §11 清理，避免将来 daemon 升级后消费到测试数据。
+- 本机部署的 cs-cloud daemon 当前版本**没有**遥测消费能力，不会读写这些测试文件；测试结束后仍按 §12 清理，避免将来 daemon 升级后消费到测试数据。
 - 场景 B（业务事实）需要可用的 cs-cloud 连接。凭据缺失期间，`availability` 必须为 `blocked`，相关操作可表现为 `blocked/credentials_missing`，这本身是合法终态，可照常核对。
 
 ## 3. 控制文件手册（手工扮演 cs-cloud）
@@ -126,7 +127,10 @@ $(( $(date +%s%3N) + 7200000 ))
 | 仅日志 | `"metrics_enabled": false` | 场景 C6 |
 | 撤销 | `"enabled": false`（或删文件，效果见 C1/C3 差异） | 场景 C3 |
 | 换账户 | `"account_epoch": "acct-manual-02"`，`revision` +1 | 场景 C8 |
-| 单类别 | `*_allowed_categories` 只留 `["critical"]`（diagnostic 类别不放行，error 详情不采） | 可选 |
+| 账户未就绪 | `"account_state": "pending"`（或 `"disabled"`） | 场景 C10 |
+| 单用途过期 | 仅把 `logs_expires_at`（或对称地 `metrics_expires_at`）改为过去，其余期限保持未来 | 场景 C11 |
+| 详情限频关闭 | `"log_detail_rate_limit": {"per_fingerprint_max_per_minute": 0}`（合法区间 0~60，0 不采详情或摘要） | 场景 C12 |
+| 单类别 | `*_allowed_categories` 只留 `["critical"]`（diagnostic 类别不放行，同名事件的诊断详情不采） | 可选 |
 
 ### 3.3 控制文件与安全边界
 
@@ -146,7 +150,7 @@ $(( $(date +%s%3N) + 7200000 ))
 | A6 | 打开 Costrict 工具窗，正常等待 1~2 分钟 | 自然事实持续追加：`plugin.readiness`、`connection`/`connection.attempt`、`connection.state_changed`、`availability`、`backend.load`、`toolwindow.setup`、`rpc`、`edt.delay`、`render.apply`、`telemetry.health`（约 30 秒节奏）、`resource.snapshot`（每 30 秒 3 条：subscription/controller/editor） |
 | A7 | 观察追加时效 | 非空队列最迟 30 秒 flush/fsync，或累计 16 条/64KiB 即 flush；文件持续追加，不存在分段封存动作 |
 | A8 | 正常关闭 IDE | `plugin.shutdown` 恰 1 条、`end_kind=app_close`；文件最后一行是该终态，未确认内容仍留在 outbox 供消费 |
-| A9 | 抽查 NDJSON 线格式 | 用 §9 校验：公共字段闭集、UTF-8 无 BOM、LF 结尾无 CR、`schema_version=1.0`、`event_id` 唯一、seq 按 run+通道连续（策略切换窗口除外）、`source=jetbrains-plugin`、`device_id` 全程一致 |
+| A9 | 抽查 NDJSON 线格式 | 用 §10 校验：公共字段闭集、UTF-8 无 BOM、LF 结尾无 CR、`schema_version=1.0`、`event_id` 唯一、seq 按 run+通道连续（策略切换窗口除外）、`source=jetbrains-plugin`、`device_id` 全程一致 |
 
 判定：A1~A9 全部符合 → 场景 A 通过。
 
@@ -169,21 +173,22 @@ $(( $(date +%s%3N) + 7200000 ))
 | 登录/凭据探测 | `credentials.ready`（`stage=probe/wait`） | 等待凭据不伪造认证失败 |
 | 缺失或撤销凭据后打开工具窗 | `availability` 的当前区间为 `blocked`，操作可为 `blocked/credentials_missing` | 不得把 `READY` 或空 profile 误记为可用 |
 | 连接 cs-cloud 后开始一次会话，再切换/重启连接后继续 run | 所有新事实 `connection_provider=cs-cloud`（或 `kilo-cli`） | 不得出现 `connection_provider=unknown`；预热阶段和后续 run hint 均应归因到实际 provider |
-| 真实 MCP 绑定返回 HTTP 502 | `ide.operation`（`operation=mcp_register`）有 `start` + `end(result=failure)` | 绑定请求有界结束，不挂起会话；若能力不可用则终态为 `blocked` |
+| 真实 MCP 绑定返回 HTTP 502 | `ide.operation`（`operation=mcp_register`）有 `start` + `end(result=failure)` | 绑定请求有界结束，不挂起会话；若能力不可用则终态为 `blocked`，会话关闭等在途取消为 `cancelled` |
 | 同一事实同时允许 metrics 与 logs | outbox 仅落盘一条 `event_id` 相同的输入事实 | 消费端按 `purposes=["metrics","logs"]` 分流，插件不重复采集/落盘 |
 | 点插件的重装/重启入口（如可用） | `csc.install`、`csc.start` | `stage`、`package_manager`、`error_code` 字段合规 |
 | 长时间空闲但保持面板可见、IDE 前台 | `edt.delay` 持续产出 | `validity=valid`；IDE 最小化/面板隐藏后停止产出 |
+| 系统休眠/挂起后唤醒 IDE，保持面板可见 | `edt.delay`：被打断的未完成样本以非 `valid` 的 `validity`（如 `unknown`/`scheduler_gap`）各落一条事实，不计卡顿；唤醒后换新 `observation_id`，不跨观测区间拼接出 `edt.stall` | 唤醒后采集照常追加（休眠不做死亡推断，§14.1）；无 `plugin.unclean`（进程未重启） |
 
 专项语义核对（任抽一条 operation end）：
 
 - `result` ∈ {success, failure, timeout, blocked, cancelled, unknown}；
 - 超时判定：`result=timeout` 的记录同时有 `cause`（如 `unknown`）与 `error_code`（如 `deadline_exceeded`），不依赖原日志即可解释；
-- `data` 内**没有**路径、Token、原始异常 message（§9 安全抽查）；
+- `data` 内**没有**路径、Token、原始异常 message（§10 安全抽查）；
 - 高频事实（`rpc`/`edt.delay`/`render.apply`/`resource.snapshot`/`availability`）的 `purposes` 恒为 `["metrics"]`。
-- `session.status` 和 file-search 坏响应各自产生一条 `protocol.error`，跨层重复解码不重复计数；包装型 file search 正常响应不产生协议错误。
-- `connection_provider` 在实际连接建立后不得为 `unknown`；预热和后续 run 均保留同一实际 provider hint。
+- `session.status`、SSE 信封字段形状与 file-search 解码错误各自产生一条 `protocol.error`，跨层重复解析不重复计数；包装型 file search 正常响应不产生协议错误。
+- `connection_provider` 在实际连接建立后不得为 `unknown`；provider 提示在 recorder 创建时冻结本次 run——之前到达的提示用于本次，writer 启动等待期间及之后到达的提示只用于下一次 run，且均归因到实际 provider。
 - 凭据缺失期间 `availability=blocked`，不得以 `READY` 或 `profile=null` 继续宣称可用。
-- MCP 绑定 HTTP 502 必须观察到 `mcp_register` 的 start 与 failure；绑定本身在边界内结束。
+- MCP 绑定 HTTP 502 必须观察到 `mcp_register` 的 start 与 failure；能力不可用为 `blocked`，会话关闭等在途取消为 `cancelled`；绑定本身在边界内结束。
 - 双用途事实仅有一个输入 `event_id` 和一条落盘记录；用途分流属于消费端，不能用两条插件记录替代。
 
 RPC 终态复测：测试 RPC 时须保持 metrics 许可至少超过其 deadline；同一 `operation_id` 应有且仅有一条 `start` 与一条 `end(result=timeout)`。若仅撤销一个用途且另一用途仍获准、run 未被整体停用，缺少终态可由最近一条 `telemetry.health` 的 `disabled_policy` 增量表达；公共关闭、双用途到期等全停采会结束 run 并清理文件，不要求随后仍有该 health 增量，不能仅凭缺少 `end` 判定 RPC 生命周期故障。
@@ -203,6 +208,9 @@ RPC 终态复测：测试 RPC 时须保持 metrics 许可至少超过其 deadlin
 | C7 | 把三个 `expires_at` 改为过去时间 | ≤ 45 秒内停采（到期判定不依赖轮询，实际更快）；表现同 C3。继续 C8 前，先重新发布一份三个期限均在未来的有效 §3.1 控制文件 |
 | C8 | 恢复未来有效期限后换 `account_epoch=acct-manual-02`（revision+1） | 同一 run 存续，之后新事实 `account_epoch` 变为新值；换出后旧 epoch 事实不再增加。再把 `account_epoch` 改回已退役的 `acct-manual-01`：策略被拒绝，后续按无有效策略使用 `account_epoch=unbound`、`policy_revision=0` 默认采集；旧 epoch 不复活 |
 | C9 | 依次写入：`schema_major=2` / 加一个多余键 `"foo":1` / 写成 `{坏json` | 每种都回到无有效策略：`unbound` 占位并默认采集；恢复合法文件后按新 revision 执行显式策略 |
+| C10 | `account_state` 改为 `pending`（revision+1）；观察后改回 `ready`（再 +1） | 显式账户未就绪：两种用途同时停止（表现同 C3，但属显式限制而非 fail-open，§3.3）；改回 `ready` 后恢复采集。`disabled` 同理 |
+| C11 | 仅把 `logs_expires_at` 改为过去（`metrics_expires_at`/`expires_at` 保持未来，revision+1）；观察后恢复，再对称地仅过期 `metrics_expires_at` | 用途独立判期（§13 用途隔离）：日志停、指标继续（metrics-only 照常、dual 投影 `purposes=["metrics"]`）；对称方向亦然。每项用途的有效截止取自身截止与公共 `expires_at` 的较早值（§8） |
+| C12 | 先经场景 E 或真实异常触发过 error 详情，再把 `per_fingerprint_max_per_minute` 改为 `0`（revision+1） | 窗口内收紧立即生效（§11.1）：0 后不再新增 error 详情与限频摘要；critical 通道的 error 计数事实不受影响 |
 
 ## 7. 场景 D：崩溃、追加文件与残留
 
@@ -212,6 +220,7 @@ RPC 终态复测：测试 RPC 时须保持 metrics 许可至少超过其 deadlin
 | D2 | 重新启动 IDE | 新 `producer_id` 和新追加文件；旧文件不由新 writer 接管，`device_id` 保持安装身份；插件启动时 `UncleanDetector` 扫描同 scope 的旧文件，若前任 run 有 `plugin.started` 但无同 run `plugin.shutdown`，新文件应追加一条 `plugin.unclean`，核对 `previous_run_id` 和受控 `evidence=no_shutdown_after_started`；读取端仍应跳过残缺尾行并计入 health |
 | D3 | （可选）把旧 `.jsonl` 修改时间回拨到 25 小时前，保持 IDE 运行或重启 IDE | 同 scope 后续实例按保留期清理陈旧文件；不误删活跃 producer 文件 |
 | D4 | 容量（一般跳过） | 每 producer 事实文件上限 10MiB；超限淘汰计入 `health.drop`，不阻塞 IDE 操作 |
+| D5 | （可选）IDE 运行中删除当前 producer 的 `.jsonl` 文件 | 下次追加时按原名重建，不视为错误；采集继续、IDE 不受影响（§7.4 容忍清理方删除） |
 
 ## 8. 场景 E：全字典覆盖（所有类型的指标与日志）
 
@@ -245,16 +254,16 @@ RPC 终态复测：测试 RPC 时须保持 metrics 许可至少超过其 deadlin
 
 多数自检操作和直接构造的事实带 `context.workspace_id="ws-selftest"`。例外：error 族不带 workspace，以显式 `fault_id`（`fault-selftest-reported`/`fault-selftest-uncaught`）辨识；`resource.snapshot` 是进程级资源计数，不带 workspace，按触发时间及 `resource` 对照；真实 `StallMerger` 生成的 `edt.stall` 也不带 workspace，以 `data.observation_id="obs-selftest"` 和 `duration_ms=2500` 辨识。不要只筛选 workspace，否则会漏掉这些自检事实。
 
-1. 触发后等 ≤ 40 秒（入队 + flush），按 §9 汇总 name 分布；
+1. 触发后等 ≤ 40 秒（入队 + flush），按 §10 汇总 name 分布；
 2. 对照 §8.4 清单：28 个自检名字全部出现；`plugin.started`/`plugin.shutdown`/`telemetry.health` 由服务和后台自然产出——合计 31/31；
 3. 明确核对 `edt.stall`：由真实 `StallMerger` 合并首尾相接样本产出，`duration_ms` 达到至少 2 秒，不能用手写 Draft 代替；
 4. 7 种 kind 齐备；critical/diagnostic 两通道事实都出现在同一追加文件中；
 5. 三类用途投影齐备：metrics-only（如 `rpc`）、logs-only（error 详情形态）、dual（如 `connection`）；
 6. error 族两形态分道：`error.reported`/`error.uncaught` 的**计数形态**在 critical 通道、`purposes=["metrics"]`；**详情形态**（`message`/`frames`/`count`）在 diagnostic 通道、`purposes=["logs"]`；两者经同一 `fault_id` 关联；
 7. 正常关闭后：追加文件最后有 1 条 `plugin.shutdown(app_close)`；
-8. 全量跑一遍 §9 线格式校验。
+8. 全量跑一遍 §10 线格式校验。
 
-说明：`plugin.unclean` 由插件下一实例启动时的 `UncleanDetector` 扫描前任文件生成；自检另外落盘一条**登记形状验证事实**（`previous_run_id=run-prev-selftest`），不是崩溃结论。真实启动检测须核对 `previous_run_id` 与固定 evidence token；`ide.operation` 的 `apply_edit` 当前无业务入口，自检用 `vfs_refresh` 代表。
+说明：`plugin.unclean` 由插件下一实例启动时的 `UncleanDetector` 扫描前任文件生成；自检另外落盘一条**`plugin.unclean` 形状验证事实**（`previous_run_id=run-prev-selftest`），不是崩溃结论。真实启动检测须核对 `previous_run_id` 与固定 evidence token；`ide.operation` 的 `apply_edit` 当前无业务入口，自检用 `vfs_refresh` 代表。
 
 ### 8.4 覆盖核对表（31 name × 形态 × 来源）
 
@@ -292,7 +301,17 @@ RPC 终态复测：测试 RPC 时须保持 metrics 许可至少超过其 deadlin
 | ide.operation | operation | critical | dual | 自然（diff 等）+自检 |
 | resource.snapshot | sample | critical | **metrics** | 自然+自检 |
 
-## 9. 落盘校验工具箱
+## 9. 场景 F：多实例与覆盖边界
+
+设计文档第 13/14 章把实例隔离与覆盖声明列为交接验收事项。F1 常做；F2/F3 视环境可选，未执行时在记录中标注“未验证”，不得默认宣称对应覆盖。
+
+| # | 操作 | 预期 |
+|---|---|---|
+| F1 | 同时运行两个 IDE 实例（同一安装开两个项目窗口，或两个不同产品），均等待采集激活 | 每个实例各自一个 `<scope-id>-<producer-id>.jsonl` 文件，producer 段互不相同（一 JVM 一 producer）；同一安装的两实例共享 scope-id 前缀，不同产品 scope-id 互不相同；两文件各自独立追加、互不接管，关闭其一不影响另一个；后续 D3 保留期清理只清自己 scope 前缀的文件（§14.1、§7.4） |
+| F2 | （可选，需 Split Mode 远程开发环境）前端机器不部署 cs-cloud，仅 backend 机器部署 | backend 机器 outbox 正常落盘；前端机器无本机控制文件，按无有效策略默认采集（`account_epoch=unbound`、`policy_revision=0`）落盘**本机** outbox；两侧事实的 `mode`/`side` 如实标注；覆盖状态明确“前端未接入”，不得把缺失当无故障、不得宣称完整链路（§5.1） |
+| F3 | （可选）cs-cloud 配置非默认 `data-dir`/`auth-path` 后重启 daemon，默认控制文件仍保留且有效 | 插件不回退使用默认控制文件、不读取另一 profile 凭据（§5.2）：表现为默认控制文件缺失，按无有效策略处理（`unbound`、`policy_revision=0`、默认不限制采集），新事实不携带默认 profile 的 `policy_revision`/`account_epoch` |
+
+## 10. 落盘校验工具箱
 
 以下 PowerShell 片段在 telemetry outbox（`%USERPROFILE%\.costrict\telemetry\outbox\`）执行；`$facts` 为入口，先定义一次。
 
@@ -338,6 +357,9 @@ $allowed = 'schema_version','event_id','timestamp','producer_id','run_id','chann
 @($facts | Where-Object { ($_.PSObject.Properties | ForEach-Object { $_.Value } | ConvertTo-Json -Compress -Depth 5).Length -gt 32KB }).Count
 @($facts | Where-Object { $_.data.PSObject.Properties.Value -match '[/\\]' }).Count
 
+# 6b) diagnostic 详情 message 安全摘要 ≤512 字节（期望 0）
+@($facts | Where-Object { $_.data.message -and [Text.Encoding]::UTF8.GetByteCount($_.data.message) -gt 512 }).Count
+
 # 7) BOM / CR / LF 结尾逐文件检查（期望全 False/False/True）
 Get-ChildItem -File -Filter *.jsonl | ForEach-Object {
   $b = [IO.File]::ReadAllBytes($_.FullName)
@@ -365,23 +387,24 @@ head -c 3 *.jsonl | xxd                                          # 无 ef bb bf
 {"schema_version":"1.0","event_id":"524904a3-...","timestamp":1789986389197,"producer_id":"pr-315ff953b957","run_id":"run-0535bec98321","channel":"critical","seq":40,"account_epoch":"acct-manual-01","policy_revision":1,"purposes":["metrics","logs"],"source":"jetbrains-plugin","device_id":"device-395b141f586b","plugin_version":"1.0.0-rc.1","ide_product":"IU","ide_build":"IU-261.22158.277","ide_build_major":"2026.1","os_family":"windows","arch":"x64","env":"prod","mode":"monolith","side":"monolith","connection_provider":"cs-cloud","kind":"operation","name":"plugin.readiness","context":{"operation_id":"0533fe56-..."},"data":{"phase":"end","result":"blocked","duration_ms":2387,"stage":"readiness","cause":"environment","error_code":"none","reason":"credentials_missing"}}
 ```
 
-## 10. 判定标准与记录
+## 11. 判定标准与记录
 
-### 10.1 通过标准汇总
+### 11.1 通过标准汇总
 
 | 场景 | PASS 条件 |
 |---|---|
 | A 冷启动 | A1~A9 全部符合；追加文件和身份字段正确 |
 | B 业务事实 | 每行操作的预期事实落盘且专项字段合规；无路径/凭据泄露 |
-| C 策略 | C1~C9 全部符合；各阶段事实 `policy_revision` 与当时控制文件一致 |
-| D 崩溃残留 | D1/D2 符合（D3 可选、D4 跳过） |
+| C 策略 | C1~C12 全部符合；各阶段事实 `policy_revision` 与当时控制文件一致 |
+| D 崩溃残留 | D1/D2 符合（D3/D5 可选、D4 跳过） |
 | E 全字典 | 31/31 name、28 个自检名字、7 kind、两通道、三投影齐备；包含 `edt.stall`，error 双形态同 fault_id；线格式校验全绿 |
+| F 多实例/覆盖 | F1 符合；F2/F3 可选，未执行时记录“未验证” |
 
-### 10.2 记录模板
+### 11.2 记录模板
 
 每个场景一行：`场景 | 插件版本/IDE 构建 | 关键操作时间点 | 盘上证据路径 | 结论（PASS/FAIL+现象）`。建议把 outbox 文件和当时的控制文件复制留档。
 
-### 10.3 已知边界（判定时不要误报缺陷）
+### 11.3 已知边界（判定时不要误报缺陷）
 
 - 强杀 IDE 不承诺零丢失；无 LF 的尾行由消费端跳过并计入 health（§7.1、§7.3）。
 - 没有 `plugin.shutdown` ≠ 一定是插件崩溃；下一插件实例的 `UncleanDetector` 负责生成 `plugin.unclean`，其 `evidence` 仅说明缺少受控 shutdown 证据（§7.3）。
@@ -389,8 +412,11 @@ head -c 3 *.jsonl | xxd                                          # 无 ef bb bf
 - 策略切换窗口内 seq 允许缺口；稳态丢号才是问题。
 - diagnostic 事实与 critical 事实写入同一追加文件，按 writer flush 节奏可见。
 - 无有效策略期间默认不限制采集，但凭据缺失仍须以 `availability=blocked` 表达（§3.3）。
+- 显式 `pending`/`disabled` 与策略过期同属显式限制，与“无有效策略默认不限制”的 fail-open 相区别（§3.3、§8）。
+- 系统休眠/暂停不做死亡推断；探针中断样本以非 `valid` validity 收尾并轮换 `observation_id`，不跨区间拼接卡顿（§10.3）。
+- 24 小时是可交接保留期，不是无人运行时的物理删除保证：插件与 daemon 均停用期间无法清理，恢复运行后的首轮清理删除过期残留（§7.4）。
 
-## 11. 测试后清理
+## 12. 测试后清理
 
 1. 删除 `%USERPROFILE%\.costrict\telemetry\control\jetbrains.json`（避免残留许可）；
 2. 删除测试产生的 `outbox\*.jsonl`（或等 24 小时保留期后由后台清理）；

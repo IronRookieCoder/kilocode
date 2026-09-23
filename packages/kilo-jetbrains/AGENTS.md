@@ -225,14 +225,34 @@ For the full release process (resolve version, pin verification, prepare, change
 
 ## Build and Verification
 
-- **Marketplace version build**: Use `script/build-version.sh <version>` from `packages/kilo-jetbrains/` to clean, build, sign, and verify the JetBrains Marketplace plugin ZIP. Pass `--skip-verification` only when explicitly needed.
-- **Test version build**: If the user asks for a JetBrains test build, still require a version and use `script/build-version.sh <version> --skip-signing --skip-verification` from `packages/kilo-jetbrains/` so no signing secrets are needed. Add `--skip-clean` only when the user wants a faster incremental test build.
+### 打包与版本号（buildPlugin）
+
+**插件版本号来源**（优先级从高到低，见根 `build.gradle.kts`）：
+
+1. `-Pkilo.version=<x.y.z>`：命令行覆盖，`script/build-version.sh` 即用此注入。
+2. `kilo.jetbrains.version`：`gradle.properties` 中的默认值。
+3. HEAD 上的 `jetbrains/v<version>` git 标签：`-Pproduction=true`（如 `bun run build:production`）时必须存在，否则构建失败；非生产回退 `0.0.0-dev`。
+
+格式限 `x.y.z` / `x.y.z-rc.n`（脚本可带前导 `v`）。注意 `package.json` 的 `version` 是 CLI pin，与插件版本无关。
+
+**打包命令**（从 `packages/kilo-jetbrains/` 执行）：
+
+| 场景 | 命令 |
+|---|---|
+| Marketplace 打包（clean + 签名 + 验证） | `script/build-version.sh <version>` |
+| 测试打包（免签名密钥） | 同上，加 `--skip-signing --skip-verification`；可再追加 `--skip-clean` 做增量构建 |
+| Gradle 直接指定版本 | `./gradlew buildPlugin -Pkilo.version=<x.y.z>` |
+| 本地开发打包 | `./gradlew buildPlugin` / `bun run build`；仓库根可用 `bun turbo build --filter=@kilocode/kilo-jetbrains` |
+
+- 产物在 `build/distributions/`：`costrict-<version>.zip`（签名后 `*-signed.zip`）。签名密钥在 `~/.secrets/jetbrains/`，缺失时须 `--skip-signing`。
+- 前置条件：`kilo.cli.pinned=true`，否则脚本与生产构建直接失败。
+- 打包只产出 ZIP；正式发布（`jetbrains/v*` 标签、changelog、上传）走 `release-jetbrains` skill，恢复规则见 `RELEASING.md`。
+
+### 验证与开发运行
+
 - **Typecheck**: `bun run typecheck` or `./gradlew typecheck` from `packages/kilo-jetbrains/` — compiles all Kotlin sources including the generated API client. A cold pinned build downloads the pinned CLI release via `generateOpenApiSpec` and needs network access; Gradle-cached incremental runs skip the download. Repo CLI mode (`-Pkilo.cli.pinned=false`) generates the spec from local source and bundles the staged local CLI binary.
 - **Build local repo CLI for JetBrains dev**: `./gradlew :backend:buildRepoCli` from `packages/kilo-jetbrains/` builds `packages/opencode/dist/@kilocode/cli-<os>-<arch>/bin/`. `stageRepoCli` intentionally does not depend on this task; missing binaries fail with instructions instead of silently starting a slow CLI build.
-- **Full build**: `bun run build` from `packages/kilo-jetbrains/` (runs Gradle `buildPlugin`).
-- **Gradle only**: `./gradlew buildPlugin` from `packages/kilo-jetbrains/`.
 - **Java checks**: Do not run `java -version` as a routine preflight. Gradle commands already fail clearly when Java is missing or incompatible; check Java only when diagnosing that failure mode.
-- **Via Turbo**: `bun turbo build --filter=@kilocode/kilo-jetbrains` from repo root.
 - **Run split mode**: `./gradlew --no-configuration-cache runIdeSplitMode` or the checked-in `Run IDE (Split Mode)` configuration — launches backend and frontend locally. Emulate latency via the Split Mode widget (requires internal mode: `-Didea.is.internal=true`).
 - **Run split backend**: `./gradlew --no-configuration-cache runIdeBackend` — if it exits shortly after startup, check for an orphaned Java process from a previous backend run and kill it before restarting.
 - **Run in monolithic sandbox**: `./gradlew runIde` — launches sandboxed IntelliJ with the plugin. Does not build or bundle CLI binaries; the backend downloads the pinned release at connect time.
