@@ -303,7 +303,7 @@ class StabilityService private constructor(
         else -> REASON_UNBOUNDED
     }
 
-    /** 新采集run：新run_id→新recorder/operations→writer打开单追加文件→unclean判定→plugin.started一次。
+    /** 新采集run：新run_id→新recorder/operations→安全预检与unclean判定→writer打开单追加文件→plugin.started一次。
      * 启动失败（存储不可验证）时关闭准入并保持禁采，下一个watch周期自动重试。
      * stop竞态：入口与等待返回后都复查stoppedOnce，提交序列之后F5再复查一次——stop裁决后
      * 绝不留活跃run，未提交的writer/recorder就地关闭（writer.close有界），status交由stop协程发布。 */
@@ -325,8 +325,21 @@ class StabilityService private constructor(
         // 引用即直投本run（启动窗口内的事实随writer ACTIVE后排空落盘），绝不滞留在无人
         // 排空的standby队列；启动失败路径随即断开，落回standby自身的unbound占位准入。
         standby?.first?.forwardTo = recorder
+        val storage = Storage(outboxDir())
+        if (runCatching { storage.verifyLayout() }.isFailure) {
+            standby?.first?.forwardTo = null
+            recorder.close()
+            runFailure = REASON_WRITER_DISABLED
+            setStatus(REASON_WRITER_DISABLED)
+            return
+        }
+        clearLegacy()
+        // §7.3/M22：必须在writer打开文件前判定，避免writer为追加补LF后将崩溃尾页误作
+        // 前任shutdown；检测IO失败仍fail open，不阻塞采集启动（R15）。
+        val drafts = runCatching { UncleanDetector(outboxDir().resolve(fileName())).detect() }
+            .getOrDefault(emptyList())
         // 追加协议布局（§5.2）：outbox下平铺单文件`<scope-id>.jsonl`，跨run与JVM稳定。
-        val writer = Writer(outboxDir(), fileName(), identity, recorder, store, clock)
+        val writer = Writer(outboxDir(), fileName(), identity, recorder, store, clock, storage = storage)
         writer.onDisabled = { setStatus(REASON_WRITER_DISABLED) }
         writer.start()
         // 等待轮询不可经取消打断（Thread.sleep），stop可能恰好落在此窗口内。
@@ -348,12 +361,7 @@ class StabilityService private constructor(
         runFailure = null
         activeWriter = writer
         runActive = true
-        clearLegacy()
-        // §7.3/M22：unclean判定先于plugin.started消费（每实例启动一次）；检测的IO失败
-        // fail open——无检出即无unclean事实，绝不阻塞采集启动（R15）。
-        runCatching { UncleanDetector(outboxDir().resolve(fileName())).detect() }
-            .getOrDefault(emptyList())
-            .forEach(recorder::record)
+        drafts.forEach(recorder::record)
         recorder.record(startedDraft())
         // F5：stop落在最后预检与提交序列之间的微窗口——提交后复查裁决，命中即就地收尾
         // （recorder/writer的close幂等，与stop协程双路重入安全），绝不留下裁决后仍活跃的

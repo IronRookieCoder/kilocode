@@ -182,7 +182,56 @@ private fun startedDraft(): Draft =
 
 private fun JsonObject.field(key: String): String = this[key]?.jsonPrimitive?.contentOrNull ?: error("missing $key")
 
+private fun factLine(name: String, runId: String, seq: Long): String =
+    factJson.encodeToString(
+        Fact.serializer(),
+        Fact(
+            event_id = "ev-$seq",
+            timestamp = 1_790_000_000_000L + seq,
+            producer_id = "pr-old",
+            run_id = runId,
+            channel = "critical",
+            seq = seq,
+            account_epoch = "acct-a",
+            policy_revision = 12L,
+            purposes = setOf("metrics", "logs"),
+            device_id = "device-fixed",
+            plugin_version = "1.0.0",
+            ide_product = "IU",
+            ide_build = "build-a4",
+            ide_build_major = "2026.1",
+            os_family = "windows",
+            arch = "x64",
+            env = "test",
+            mode = "monolith",
+            side = "monolith",
+            connection_provider = "unknown",
+            kind = "lifecycle",
+            name = name,
+            data = JsonObject(emptyMap()),
+        ),
+    ) + "\n"
+
 class ProducerTest {
+
+    @Test
+    fun `unclean detects complete shutdown tail before writer terminates it`() {
+        Harness().use { harness ->
+            val file = harness.outbox.resolve("sc-fixed.jsonl")
+            Files.createDirectories(file.parent)
+            Files.writeString(
+                file,
+                factLine("plugin.started", "run-old", 1L) +
+                    factLine("plugin.shutdown", "run-old", 2L).removeSuffix("\n"),
+            )
+            harness.writeControl(validControl())
+            harness.service.start("monolith")
+            harness.awaitReason("ok")
+            harness.awaitFacts(15_000) { facts ->
+                facts.any { it.name == "plugin.unclean" && it.data.field("previous_run_id") == "run-old" }
+            }
+        }
+    }
 
     @Test
     fun `active consumer survives revoke and reopen without rebinding old operations`() {
@@ -272,6 +321,7 @@ class ProducerTest {
 
             service.start("frontend") // 无控制文件：fail-open应建立run
             awaitUntil(10_000) { Files.exists(outbox.resolve("sc-fixed.jsonl")) }
+            awaitUntil(10_000) { service.status.value.reason == "ok" }
             assertFalse(Files.exists(legacy))
             assertTrue(Files.exists(other))
             assertTrue(Files.exists(junk))
