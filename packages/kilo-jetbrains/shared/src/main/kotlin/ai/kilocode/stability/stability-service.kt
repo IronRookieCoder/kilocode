@@ -84,7 +84,7 @@ data class Coverage(
  * 平台运行模式→控制文件读取（PolicyStore，禁采也持续轮询）→恢复持久device_id与scope_id→
  * 固定环境快照→有效许可时建立run：writer在`~/.costrict/telemetry/outbox/`打开IDE范围的
  * 单追加文件`<scope-id>.jsonl`（无登记目录、无producer.json、无锁文件、
- * 无.open/.ready状态机，§5.2/§3.1）→按scope-id前缀判定前任run是否unclean（§7.3，
+ * 无.open/.ready状态机，§5.2/§3.1）→从scope文件判定前任run是否unclean（§7.3，
  * 在plugin.started之前消费，检测IO失败fail open不阻塞启动）→记一次plugin.started。
  * 无有效许可只保留控制读取与状态，不建立采集run；首次获许可建立新run并记一次
  * plugin.started；公共授权撤销即结束run并删除本IDE范围待交接文件（§8，不伪造plugin.shutdown
@@ -351,7 +351,7 @@ class StabilityService private constructor(
         clearLegacy()
         // §7.3/M22：unclean判定先于plugin.started消费（每实例启动一次）；检测的IO失败
         // fail open——无检出即无unclean事实，绝不阻塞采集启动（R15）。
-        runCatching { UncleanDetector(outboxDir(), scopeId, identity.producerId).detect() }
+        runCatching { UncleanDetector(outboxDir().resolve(fileName())).detect() }
             .getOrDefault(emptyList())
             .forEach(recorder::record)
         recorder.record(startedDraft())

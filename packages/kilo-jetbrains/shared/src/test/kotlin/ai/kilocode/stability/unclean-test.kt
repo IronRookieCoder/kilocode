@@ -11,53 +11,102 @@ import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 
 /**
- * plugin.unclean前任文件判定（任务7，设计7.3）：插件下一实例按scope-id前缀找前任文件，
- * 最后一条plugin.started之后没有plugin.shutdown即产出恰好一条unclean草稿。
- * 残缺尾行按§7.2跳过；本实例自己的文件与他scope的文件不参与。
+ * plugin.unclean判定（设计7.3/M22）：同一scope文件保存多个run；只检查最后一个有效
+ * plugin.started，且仅同一run的后续plugin.shutdown可以将其判为clean。残缺尾行和坏行跳过。
  */
 class UncleanTest {
 
     @Test
-    fun `previous file ending after started without shutdown yields one unclean draft`() {
+    fun `latest started after a clean run yields one unclean draft`() {
         val dir = Files.createTempDirectory("unclean")
         try {
-            val previous = dir.resolve("sc-live-pr-old1.jsonl")
-            previous.writeText(
+            val file = dir.resolve("sc-live.jsonl")
+            file.writeText(
                 factLine(name = "plugin.started", runId = "run-a") +
-                    factLine(name = "rpc", runId = "run-a") +
-                    "{\"schema_version\":\"1.0\",\"event_id\":", // 残缺尾行，必须跳过（§7.2/7.3）
+                    factLine(name = "plugin.shutdown", runId = "run-a") +
+                    factLine(name = "plugin.started", runId = "run-b"),
             )
-            val drafts = UncleanDetector(dir, scopeId = "sc-live", producerId = "pr-new1").detect()
+
+            val drafts = UncleanDetector(file).detect()
+
             assertEquals(1, drafts.size)
-            assertEquals("plugin.unclean", drafts[0].name)
-            assertEquals("run-a", drafts[0].data["previous_run_id"]?.jsonPrimitive?.content)
-            assertEquals("no_shutdown_after_started", drafts[0].data["evidence"]?.jsonPrimitive?.content)
+            assertEquals("plugin.unclean", drafts.single().name)
+            assertEquals("run-b", drafts.single().data["previous_run_id"]?.jsonPrimitive?.content)
+            assertEquals("no_shutdown_after_started", drafts.single().data["evidence"]?.jsonPrimitive?.content)
         } finally {
             dir.toFile().deleteRecursively()
         }
     }
 
     @Test
-    fun `clean previous file yields nothing`() {
-        val dir = Files.createTempDirectory("unclean2")
+    fun `latest run with matching shutdown yields nothing`() {
+        val dir = Files.createTempDirectory("unclean-clean")
         try {
-            dir.resolve("sc-live-pr-old2.jsonl").writeText(
-                factLine(name = "plugin.started", runId = "run-b") +
+            val file = dir.resolve("sc-live.jsonl")
+            file.writeText(
+                factLine(name = "plugin.started", runId = "run-a") +
+                    factLine(name = "plugin.started", runId = "run-b") +
                     factLine(name = "plugin.shutdown", runId = "run-b"),
             )
-            assertTrue(UncleanDetector(dir, "sc-live", "pr-new2").detect().isEmpty())
+
+            assertTrue(UncleanDetector(file).detect().isEmpty())
         } finally {
             dir.toFile().deleteRecursively()
         }
     }
 
     @Test
-    fun `other scopes and self file are ignored`() {
-        val dir = Files.createTempDirectory("unclean3")
+    fun `missing scope file yields nothing`() {
+        val dir = Files.createTempDirectory("unclean-missing")
         try {
-            dir.resolve("sc-other-pr-x.jsonl").writeText(factLine(name = "plugin.started", runId = "run-c"))
-            dir.resolve("sc-live-pr-self.jsonl").writeText(factLine(name = "plugin.started", runId = "run-d"))
-            assertTrue(UncleanDetector(dir, "sc-live", "pr-self").detect().isEmpty())
+            assertTrue(UncleanDetector(dir.resolve("sc-live.jsonl")).detect().isEmpty())
+        } finally {
+            dir.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `nonregular scope path yields nothing`() {
+        val dir = Files.createTempDirectory("unclean-nonregular")
+        try {
+            assertTrue(UncleanDetector(dir).detect().isEmpty())
+        } finally {
+            dir.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `malformed complete rows are skipped when locating the latest started`() {
+        val dir = Files.createTempDirectory("unclean-malformed")
+        try {
+            val file = dir.resolve("sc-live.jsonl")
+            file.writeText(
+                factLine(name = "plugin.started", runId = "run-a") +
+                    "{\"name\":\"plugin.started\"}\n" +
+                    factLine(name = "plugin.started", runId = "run-b"),
+            )
+
+            val drafts = UncleanDetector(file).detect()
+
+            assertEquals("run-b", drafts.single().data["previous_run_id"]?.jsonPrimitive?.content)
+        } finally {
+            dir.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `unterminated tail is skipped`() {
+        val dir = Files.createTempDirectory("unclean-tail")
+        try {
+            val file = dir.resolve("sc-live.jsonl")
+            file.writeText(
+                factLine(name = "plugin.started", runId = "run-a") +
+                    factLine(name = "plugin.shutdown", runId = "run-a").removeSuffix("\n"),
+            )
+
+            val drafts = UncleanDetector(file).detect()
+
+            assertEquals("run-a", drafts.single().data["previous_run_id"]?.jsonPrimitive?.content)
         } finally {
             dir.toFile().deleteRecursively()
         }
