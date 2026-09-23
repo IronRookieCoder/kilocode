@@ -13,7 +13,7 @@
 2. 启动 IDE、打开项目、打开 Costrict 工具窗（§4 场景 A 步骤 3~7）；
 3. 发送一条消息给智能体（§5 场景 B 第 1 行）；
 4. 正常关闭 IDE；
-5. 用 §10 命令核对：outbox 中有且仅有本次 producer 的 `.jsonl` 文件、恰 1 条 `plugin.started` + 1 条 `plugin.shutdown`、seq 连续、`action`/`rpc`/`render.apply` 均落盘。
+5. 用 §10 命令核对：outbox 中有且仅有本 IDE scope 的 `<scope-id>.jsonl` 文件、恰 1 条 `plugin.started` + 1 条 `plugin.shutdown`、seq 连续、`action`/`rpc`/`render.apply` 均落盘。
 
 全绿即通过最小链路；完整口径继续 §4~§8。
 
@@ -25,8 +25,8 @@
 手工发布控制文件（扮演 cs-cloud）
         │
 IDE 启动 → StabilityService 后台初始化 → 读控制文件（30 秒轮询）
-        │  建立本次 run（无有效策略时使用 unbound 占位）
-        ├─ 打开 outbox/<scope-id>-<producer-id>.jsonl（唯一写者）
+        │  建立本次 producer/run（无有效策略时使用 unbound 占位）
+        ├─ 打开或复用 outbox/<scope-id>.jsonl（当前 JVM 为唯一写者）
         ├─ 记 plugin.started（每 run 恰 1 条）
         │
 业务操作 → Recorder 非阻塞入队 → writer 单线程追加 NDJSON（每行一次 write）
@@ -40,9 +40,9 @@ IDE 启动 → StabilityService 后台初始化 → 读控制文件（30 秒轮�
 | 术语 | 含义 |
 |---|---|
 | 控制文件 | `~/.costrict/telemetry/control/jetbrains.json`，cs-cloud 发布的采集策略；人工测试手工编写 |
-| producer 文件 | `~/.costrict/telemetry/outbox/<scope-id>-<producer-id>.jsonl`，目录即发现入口 |
-| producer / run | producer=每 JVM 采集实例（`pr-` 前缀）；run=每次采集生命周期（`run-` 前缀），撤销许可重开会换新 run |
-| scope-id | 每个 IDE 安装范围持久的随机标识（存于 IDE 持久设置），同一 IDE 多次启动共享、不同 IDE 互不相同；追加文件名的 scope 段，用于识别前任文件（`plugin.unclean` 判定，§7.3）与同源清理归属（§7.4） |
+| scope 文件 | `~/.costrict/telemetry/outbox/<scope-id>.jsonl`，目录即发现入口；每个 IDE 安装范围一个文件，跨重启和插件升级复用 |
+| producer / run | producer=每 JVM 采集实例（`pr-` 前缀）；run=每次采集生命周期（`run-` 前缀），均作为行内字段。撤销许可重开会换新 run；重启 IDE 会在复用的 scope 文件中写入新的 producer/run |
+| scope-id | 每个 IDE 安装范围持久的随机标识（存于 IDE 持久设置），同一 IDE 多次启动及插件升级共享、不同 IDE 互不相同；它是追加文件名，用于在同一文件中识别前任 run（`plugin.unclean` 判定，§7.3）与同源清理归属（§7.4） |
 | 通道 channel | critical=计数/结果/生命周期事实；diagnostic=限频诊断详情 |
 | 用途 purposes | metrics（指标链）/ logs（日志链），一条事实可兼有 |
 | 追加文件 | 单写者追加式 NDJSON；无 `.open`/`.ready`/`.claimed`/`.done` 状态机，消费端按字节位移读取 |
@@ -67,7 +67,7 @@ IDE 中 `Settings → Plugins → ⚙ → Install Plugin from Disk...` 选择该
 |---|---|---|
 | telemetry home | `%USERPROFILE%\.costrict\telemetry\` | 直接创建；含 `control\`、`outbox\` |
 | IDE 日志目录 | 常规安装为 `%LOCALAPPDATA%\JetBrains\<产品><版本>\log` | IDE 菜单 `Help → Show Log in Explorer`，打开的资源管理器所在目录即日志目录 |
-| outbox 根 | `%USERPROFILE%\.costrict\telemetry\outbox\` | 采集启动后自动出现；每个 producer 是一个 `<scope-id>-<producer-id>.jsonl` 文件 |
+| outbox 根 | `%USERPROFILE%\.costrict\telemetry\outbox\` | 采集启动后自动出现；每个 IDE 安装范围有一个 `<scope-id>.jsonl` 文件 |
 
 注意：IDE 日志目录随安装方式（Toolbox/独立安装/便携模式）不同，**不要猜路径**，一律以 Show Log in Explorer 的结果为准。
 
@@ -143,7 +143,7 @@ $(( $(date +%s%3N) + 7200000 ))
 | # | 操作 | 预期（核对点） |
 |---|---|---|
 | A1 | 启动 IDE，打开任意项目 | `outbox` 尚未出现也正常（控制策略轮询中）；IDE 功能不受影响 |
-| A2 | 等待 ≤ 45 秒（轮询周期 30 秒 + 余量） | `outbox\<scope-id>-<producer-id>.jsonl` 出现；无登记目录或额外状态文件 |
+| A2 | 等待 ≤ 45 秒（轮询周期 30 秒 + 余量） | `outbox\<scope-id>.jsonl` 出现；无登记目录或额外状态文件 |
 | A3 | 读取追加文件 | 每行一个 JSON 对象、UTF-8 无 BOM、LF 结尾；首个 run 恰 1 条 `plugin.started`（`data` 为空对象） |
 | A4 | 抽查事实公共字段 | `producer_id`、`device_id`、`plugin_version`、IDE/平台字段、`mode`、`side`、`env`、`connection_provider` 均存在且值受控；连接建立后 `connection_provider` 不得为 `unknown` |
 | A5 | 观察追加文件 | `plugin.readiness`、`connection`/`connection.attempt`、`availability`、`telemetry.health` 等事实追加到同一 `.jsonl`，没有 `.open`/`.ready` 文件 |
@@ -216,11 +216,11 @@ RPC 终态复测：测试 RPC 时须保持 metrics 许可至少超过其 deadlin
 
 | # | 操作 | 预期 |
 |---|---|---|
-| D1 | IDE 运行中强杀：从任务管理器取得 PID 后 `taskkill /PID <pid> /F` | 可能留下无 LF 的残缺尾行；无 `plugin.shutdown`，不把强杀误记为插件主动退出 |
-| D2 | 重新启动 IDE | 新 `producer_id` 和新追加文件；旧文件不由新 writer 接管，`device_id` 保持安装身份；插件启动时 `UncleanDetector` 扫描同 scope 的旧文件，若前任 run 有 `plugin.started` 但无同 run `plugin.shutdown`，新文件应追加一条 `plugin.unclean`，核对 `previous_run_id` 和受控 `evidence=no_shutdown_after_started`；读取端仍应跳过残缺尾行并计入 health |
-| D3 | （可选）把旧 `.jsonl` 修改时间回拨到 25 小时前，保持 IDE 运行或重启 IDE | 同 scope 后续实例按保留期清理陈旧文件；不误删活跃 producer 文件 |
-| D4 | 容量（一般跳过） | 每 producer 事实文件上限 10MiB；超限淘汰计入 `health.drop`，不阻塞 IDE 操作 |
-| D5 | （可选）IDE 运行中删除当前 producer 的 `.jsonl` 文件 | 下次追加时按原名重建，不视为错误；采集继续、IDE 不受影响（§7.4 容忍清理方删除） |
+| D1 | IDE 运行中强杀：从任务管理器取得 PID 后 `taskkill /PID <pid> /F` | 当前 `<scope-id>.jsonl` 可能留下无 LF 的残缺尾行；无 `plugin.shutdown`，不把强杀误记为插件主动退出 |
+| D2 | 重新启动同一 IDE | 复用同一个 `<scope-id>.jsonl`，行内写入新的 `producer_id` 和 `run_id`，`device_id` 保持安装身份；插件启动时 `UncleanDetector` 扫描该 scope 文件，若前任 run 有 `plugin.started` 但无同 run `plugin.shutdown`，同一文件应追加一条 `plugin.unclean`，核对 `previous_run_id` 和受控 `evidence=no_shutdown_after_started`；读取端仍应跳过残缺尾行并计入 health |
+| D3 | （可选）在 outbox 放入同 scope 的旧布局 `<scope-id>-<producer-id>.jsonl`，另放入不同 scope 的同类文件后启动 IDE | 启动即删除同 scope 的旧 producer 文件，不迁移其中事实；不同 scope 的旧文件不得删除。当前 `<scope-id>.jsonl` 继续按正常语义追加 |
+| D4 | 容量（一般跳过） | 每 IDE 的 `<scope-id>.jsonl` 事实文件上限 10MiB；超限淘汰计入 `health.drop`，不阻塞 IDE 操作 |
+| D5 | （可选）IDE 运行中删除当前 `<scope-id>.jsonl` 文件 | 下次追加时按同一 scope 文件名重建，不视为错误；采集继续、IDE 不受影响（§7.4 容忍清理方删除） |
 
 ## 8. 场景 E：全字典覆盖（所有类型的指标与日志）
 
@@ -307,7 +307,7 @@ RPC 终态复测：测试 RPC 时须保持 metrics 许可至少超过其 deadlin
 
 | # | 操作 | 预期 |
 |---|---|---|
-| F1 | 同时运行两个 IDE 实例（同一安装开两个项目窗口，或两个不同产品），均等待采集激活 | 每个实例各自一个 `<scope-id>-<producer-id>.jsonl` 文件，producer 段互不相同（一 JVM 一 producer）；同一安装的两实例共享 scope-id 前缀，不同产品 scope-id 互不相同；两文件各自独立追加、互不接管，关闭其一不影响另一个；后续 D3 保留期清理只清自己 scope 前缀的文件（§14.1、§7.4） |
+| F1 | 同时运行两个不同 IDE 安装范围（如两个不同产品），均等待采集激活 | 每个 IDE 各有一个 `<scope-id>.jsonl` 文件，scope-id 互不相同；文件各自独立追加、互不接管，关闭其一不影响另一个。每个文件内以行内 `producer_id`/`run_id` 区分生命周期；旧布局清理只会删除自身 scope 的 producer 后缀文件。共享同一配置目录的多 JVM 运行依赖 IDE 单实例约束，不在 v1 支持范围，不能作为本场景的并发验收 |
 | F2 | （可选，需 Split Mode 远程开发环境）前端机器不部署 cs-cloud，仅 backend 机器部署 | backend 机器 outbox 正常落盘；前端机器无本机控制文件，按无有效策略默认采集（`account_epoch=unbound`、`policy_revision=0`）落盘**本机** outbox；两侧事实的 `mode`/`side` 如实标注；覆盖状态明确“前端未接入”，不得把缺失当无故障、不得宣称完整链路（§5.1） |
 | F3 | （可选）cs-cloud 配置非默认 `data-dir`/`auth-path` 后重启 daemon，默认控制文件仍保留且有效 | 插件不回退使用默认控制文件、不读取另一 profile 凭据（§5.2）：表现为默认控制文件缺失，按无有效策略处理（`unbound`、`policy_revision=0`、默认不限制采集），新事实不携带默认 profile 的 `policy_revision`/`account_epoch` |
 
