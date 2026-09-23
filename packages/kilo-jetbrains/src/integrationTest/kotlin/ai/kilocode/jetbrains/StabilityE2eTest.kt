@@ -417,7 +417,7 @@ class StabilityE2eTest : IntegrationTestBase() {
         val launchAMs = System.currentTimeMillis()
 
         // —— launch A: collect, then die by process destroy (no graceful close, no shutdown) ——
-        runPluginIde("stabilityE2eResidue", hardKill = true, reuseConfig = true) {
+        runPluginIde("stabilityE2eResidue", hardKill = true, reuseScope = true) {
             awaitColdStartReady()
             val observed = awaitSingleOutboxFile(timeoutMs = 75_000)
             fileA = observed
@@ -448,7 +448,7 @@ class StabilityE2eTest : IntegrationTestBase() {
         // —— launch B: valid permit → same scope file + unclean detection ——
         var runB: String? = null
         var producerBId: String? = null
-        runPluginIde("stabilityE2eResidue", reuseConfig = true) {
+        runPluginIde("stabilityE2eResidue", reuseScope = true) {
             awaitColdStartReady()
             // unclean detection runs at service init; wait for B's started row in A's file
             val startedB = awaitTolerantFact(

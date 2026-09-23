@@ -67,6 +67,8 @@ abstract class IntegrationTestBase {
 
     private lateinit var home: Path
 
+    private val scopes = mutableMapOf<String, ByteArray>()
+
     init {
         // Same DI overrides as PluginTest: use the locally cached IDE and turn IDE-process
         // exceptions (collected via MessageBus) into test failures through CIServer.
@@ -164,22 +166,26 @@ abstract class IntegrationTestBase {
         testName: String,
         extraSystemProperties: Map<String, String> = emptyMap(),
         hardKill: Boolean = false,
-        reuseConfig: Boolean = false,
+        reuseScope: Boolean = false,
         driverAssertions: Driver.() -> Unit,
     ): IDEStartResult {
         val zipPath = requireNotNull(System.getProperty("path.to.build.plugin")) {
             "path.to.build.plugin is not set; run integration tests via the Gradle integrationTest task"
         }
+        val saved = if (reuseScope) scopes[testName] else null
         // No withVersion()/useRelease(): they bypass the DI installer binding (see PluginTest).
         val context = Starter.newContext(
             testName = testName,
             TestCase(IdeProductProvider.IU, LocalProjectInfo(fixtureProjectDir)),
         )
         PluginConfigurator(context).installPluginFromPath(Path.of(zipPath))
-        if (reuseConfig) {
-            // Starter writes migrate.config during context setup; remove it for restart scenarios
-            // so ConfigImportHelper does not replace the persisted IDE settings directory.
+        if (reuseScope) {
+            // Starter recreates the config directory for every context. Restore the one file whose
+            // persistence the restart scenario exercises, then suppress first-run config import.
             context.removeMigrateConfigAndCreateStubFile()
+            saved?.let {
+                Files.write(context.paths.configDir.resolve("kilo-stability-scope-id"), it)
+            }
         }
         // The sandbox IDE inherits the machine's zh locale (imported config / system language),
         // which translates the platform UI and breaks every English-text driver lookup (Settings
@@ -202,7 +208,7 @@ abstract class IntegrationTestBase {
             expectedKill = hardKill,
             expectedExitCode = if (hardKill) 1 else 0,
         )
-        return if (hardKill) {
+        val result = if (hardKill) {
             try {
                 run.driver.withContext { driverAssertions() }
             } finally {
@@ -212,6 +218,11 @@ abstract class IntegrationTestBase {
         } else {
             run.useDriverAndCloseIde { driverAssertions() }
         }
+        if (reuseScope) {
+            val file = context.paths.configDir.resolve("kilo-stability-scope-id")
+            if (Files.isRegularFile(file)) scopes[testName] = Files.readAllBytes(file)
+        }
+        return result
     }
 
     /**
