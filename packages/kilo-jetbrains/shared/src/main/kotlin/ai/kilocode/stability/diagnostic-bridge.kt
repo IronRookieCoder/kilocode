@@ -28,10 +28,12 @@ class DiagnosticInput(
     attributes: Map<String, String> = emptyMap(),
     payloads: Map<String, () -> String> = emptyMap(),
     val handled: Boolean = true,
+    secrets: Set<String> = emptySet(),
 ) {
     val context = DiagnosticContextElement.value()?.context.orEmpty() + context
     val attributes = DiagnosticContextElement.value()?.attributes.orEmpty() + attributes
     val payloads = DiagnosticContextElement.value()?.payloads.orEmpty() + payloads
+    val secrets = secrets.filter(String::isNotEmpty).sortedByDescending(String::length)
     val thread = Thread.currentThread().name
     val threadId = Thread.currentThread().threadId()
 
@@ -44,6 +46,7 @@ class DiagnosticInput(
             context: Map<String, String> = emptyMap(),
             attributes: Map<String, String> = emptyMap(),
             payloads: Map<String, () -> String> = emptyMap(),
+            secrets: Set<String> = emptySet(),
         ): DiagnosticInput = DiagnosticInput(
             severity = DiagnosticSeverity.ERROR,
             component = component,
@@ -52,6 +55,7 @@ class DiagnosticInput(
             context = context,
             attributes = code?.let { attributes + ("code" to it) } ?: attributes,
             payloads = payloads,
+            secrets = secrets,
         )
     }
 }

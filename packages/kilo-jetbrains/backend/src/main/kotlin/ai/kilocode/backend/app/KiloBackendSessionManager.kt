@@ -32,6 +32,7 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.SerializationException
+import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.json.JsonPrimitive
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.MediaType.Companion.toMediaType
@@ -147,7 +148,7 @@ class KiloBackendSessionManager(
     }
 
     @Suppress("TooGenericExceptionCaught") // Capture adapter/transport/serializer failures and rethrow unchanged.
-    fun recent(dir: String, limit: Int): SessionListDto {
+    fun recent(dir: String, limit: Int, operation: String? = null): SessionListDto {
         seed(dir)
         requireClient()
         val capture = HttpCapture()
@@ -163,7 +164,10 @@ class KiloBackendSessionManager(
         } catch (error: CancellationException) {
             throw error
         } catch (error: Exception) {
-            operations?.report(capture.input("session.recent", error))
+            operations?.report(capture.input("session.recent", error,
+                context = operation?.let { mapOf("operation_id" to it) }.orEmpty(),
+                descriptor = ListSerializer(GlobalSession.serializer()).descriptor,
+            ))
             throw error
         }
         val mapped = raw.map(::dto)

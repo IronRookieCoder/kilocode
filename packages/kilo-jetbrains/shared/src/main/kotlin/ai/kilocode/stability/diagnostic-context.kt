@@ -31,6 +31,9 @@ class DiagnosticContextElement(
     companion object Key : CoroutineContext.Key<DiagnosticContextElement> {
         private val current = ThreadLocal<DiagnosticContextElement?>()
 
+        /** Explicit RPC arguments carry this value across process boundaries; ThreadLocal itself does not. */
+        fun operation(): String? = current.get()?.context?.get("operation_id")
+
         internal fun value(): DiagnosticContextElement? = current.get()
     }
 }

@@ -60,6 +60,7 @@ class FakeSessionRpcApi : KiloSessionRpcApi {
     /** Recent sessions returned by [recent]. */
     val recent = mutableListOf<SessionDto>()
     var recentFailures = 0
+    val correlations = mutableListOf<String?>()
     var recentGate: CompletableDeferred<Unit>? = null
 
     /** Local sessions returned by [list]. Accessed from concurrent coroutines in delete tests. */
@@ -153,8 +154,9 @@ class FakeSessionRpcApi : KiloSessionRpcApi {
         return SessionListDto(listed.toList(), emptyMap())
     }
 
-    override suspend fun recent(directory: String, limit: Int): SessionListDto {
+    override suspend fun recent(directory: String, limit: Int, operation: String?): SessionListDto {
         assertNotEdt("recent")
+        correlations.add(operation)
         recentCalls.add(directory to limit)
         recentGate?.await()
         if (recentFailures > 0) {

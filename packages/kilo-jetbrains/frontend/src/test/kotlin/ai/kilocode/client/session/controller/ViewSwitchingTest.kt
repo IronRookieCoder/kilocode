@@ -104,6 +104,7 @@ class ViewSwitchingTest : SessionControllerTestBase() {
         val incident = fixture.facts().single { it.name == "diagnostic.reported" }
         val end = fixture.facts().single { it.name == "rpc" && it.data["phase"].toString() == "\"end\"" }
         assertEquals(end.context["operation_id"], incident.context["operation_id"])
+        assertEquals(end.context["operation_id"], rpc.correlations.single())
     }
 
     fun `test empty explicit session history shows empty view`() {

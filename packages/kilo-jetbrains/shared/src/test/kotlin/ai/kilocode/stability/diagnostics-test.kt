@@ -29,6 +29,28 @@ import kotlinx.serialization.json.longOrNull
 
 class DiagnosticsTest {
     @Test
+    fun `explicit secrets are removed from every incident surface including throwable chains`() {
+        Fixture().use { fixture ->
+            enable(fixture)
+            val secret = "opaque-dynamic-credential"
+            val error = IllegalStateException("echo $secret", IllegalArgumentException("cause $secret"))
+            error.addSuppressed(IllegalStateException("suppressed $secret"))
+            fixture.operations.report(DiagnosticInput.error("component-$secret", error = error,
+                message = "message $secret",
+                context = mapOf("operation_id" to secret),
+                attributes = mapOf("debug-$secret" to secret),
+                payloads = mapOf("headers" to { "X-Debug: $secret" }, "response" to { "echo $secret" }),
+                secrets = setOf(secret),
+            ))
+            fixture.flush()
+            val facts = fixture.facts()
+            assertTrue(facts.any { it.name == "diagnostic.reported" })
+            assertFalse(facts.joinToString().contains(secret))
+            assertTrue(fixture.payload("stack").contains("redacted:known-secret"))
+        }
+    }
+
+    @Test
     fun `sensitive attribute boundaries include spaces semicolons and multiple cookies`() {
         Fixture().use { fixture ->
             enable(fixture)

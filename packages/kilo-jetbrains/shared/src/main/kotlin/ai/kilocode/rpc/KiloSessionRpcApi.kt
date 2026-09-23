@@ -45,7 +45,7 @@ interface KiloSessionRpcApi : RemoteApi<Unit> {
     suspend fun list(directory: String): SessionListDto
 
     /** List recent root sessions for the current worktree family. */
-    suspend fun recent(directory: String, limit: Int): SessionListDto
+    suspend fun recent(directory: String, limit: Int, operation: String? = null): SessionListDto
 
     /** Create a new session in the given directory. */
     suspend fun create(directory: String): SessionDto

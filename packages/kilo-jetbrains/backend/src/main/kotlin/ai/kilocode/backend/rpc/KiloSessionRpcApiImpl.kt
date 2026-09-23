@@ -122,8 +122,8 @@ class KiloSessionRpcApiImpl internal constructor(
     override suspend fun list(directory: String): SessionListDto =
         ready { workspaces.get(directory).sessions() }
 
-    override suspend fun recent(directory: String, limit: Int): SessionListDto =
-        ready { sessions.recent(directory, limit) }
+    override suspend fun recent(directory: String, limit: Int, operation: String?): SessionListDto =
+        ready { sessions.recent(directory, limit, operation) }
 
     override suspend fun create(directory: String): SessionDto {
         app.requireReady()

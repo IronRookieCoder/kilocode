@@ -6,6 +6,7 @@ import java.net.SocketTimeoutException
 import java.util.concurrent.TimeoutException
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertNull
 import kotlinx.coroutines.CancellationException
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.SerializationException
@@ -65,15 +66,36 @@ class ErrorClassifierTest {
     }
 
     @Test
-    fun `real serializer failure retains project ID JSON path and token types`() {
+    fun `generic classification does not derive metadata even from a real serializer message`() {
         val error = kotlin.test.assertFailsWith<SerializationException> {
             Json.decodeFromString<Session>("""{"projectID":"prj_string"}""")
         }
         val info = ErrorClassifier.classify(error)
         assertEquals("plugin", info.cause)
         assertEquals("decode_failed", info.code)
-        assertEquals("$.projectID", info.path)
+        assertNull(info.path)
+        assertNull(info.expected)
+        assertNull(info.actual)
+    }
+
+    @Test
+    fun `untrusted exception messages cannot assert decoder metadata`() {
+        val info = ErrorClassifier.classify(SerializationException("Expected object '{', had '\"' at path: $.not a real path"))
+        assertNull(info.path)
+        assertNull(info.expected)
+        assertNull(info.actual)
+    }
+
+    @Serializable private data class Spaced(@kotlinx.serialization.SerialName("project ID") val project: Project)
+
+    @Test
+    fun `decoder boundary derives a complete spaced property path from payload and descriptor`() {
+        val payload = """{"project ID":"wrong"}"""
+        val error = kotlin.test.assertFailsWith<SerializationException> { Json.decodeFromString<Spaced>(payload) }
+        val info = ErrorClassifier.decode(error, payload, Spaced.serializer().descriptor)
+        assertEquals("$[\"project ID\"]", info.path)
         assertEquals("object", info.expected)
         assertEquals("string", info.actual)
+        assertNull(ErrorClassifier.decode(error, """{"project ID":""", Spaced.serializer().descriptor).path)
     }
 }

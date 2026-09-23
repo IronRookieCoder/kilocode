@@ -78,6 +78,8 @@ class KiloBackendTelemetry(
                     try {
                         client.newCall(req).execute().use { res ->
                             if (!res.isSuccessful) {
+                                // Failure evidence is bounded; successful calls never wait for a body.
+                                res.body?.source()?.request(HttpCapture.LIMIT.toLong())
                                 throw HttpFailure(res.code, "telemetry $path failed: HTTP ${res.code}")
                             }
                         }

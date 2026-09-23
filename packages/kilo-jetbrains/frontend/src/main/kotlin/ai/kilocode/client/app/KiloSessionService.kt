@@ -153,7 +153,7 @@ class KiloSessionService internal constructor(
 
     /** Load recent sessions for the current worktree family. */
     suspend fun recent(dir: String, limit: Int): List<SessionDto> =
-        call(GROUP_SESSION) { recent(dir, limit) }.sessions
+        call(GROUP_SESSION) { recent(dir, limit, ai.kilocode.stability.DiagnosticContextElement.operation()) }.sessions
 
     /** Get a single session. */
     suspend fun get(id: String, dir: String): SessionDto =

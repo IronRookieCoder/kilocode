@@ -10,6 +10,15 @@ import java.util.concurrent.CancellationException
 import java.util.concurrent.TimeoutException
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.serialization.SerializationException
+import kotlinx.serialization.ExperimentalSerializationApi
+import kotlinx.serialization.descriptors.SerialDescriptor
+import kotlinx.serialization.descriptors.StructureKind
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 
 private const val MAX_ERRORS = 1024
 private const val RATE_LIMITED = 429
@@ -56,6 +65,7 @@ internal fun causes(error: Throwable?): List<Throwable> {
 }
 
 /** Status comes from the HTTP response, never a guessed number in a human message. */
+@OptIn(ExperimentalSerializationApi::class)
 object ErrorClassifier {
     private val statuses = LinkedHashMap<ErrorKey, Int>()
 
@@ -80,7 +90,7 @@ object ErrorClassifier {
             is CancellationException -> ErrorInfo("user", "cancelled", type)
             is ConnectException -> ErrorInfo("network", "connect_failed", type)
             is SocketException -> ErrorInfo("network", "socket_failed", type)
-            is SerializationException -> json(error)
+            is SerializationException -> ErrorInfo("plugin", "decode_failed", type)
             is LinkageError -> ErrorInfo("plugin", "linkage_error", type)
             is IOException -> ErrorInfo("network", "io_error", type)
             else -> ErrorInfo("unknown", "other", type)
@@ -100,13 +110,59 @@ object ErrorClassifier {
         }, type, status,
     )
 
-    private fun json(error: SerializationException): ErrorInfo {
-        val message = error.message.orEmpty()
-        return ErrorInfo(
-            "plugin", "decode_failed", error.javaClass.name,
-            path = Regex("at path: (\\$[^\\s]*)").find(message)?.groupValues?.get(1),
-            expected = if (message.contains("object '{'")) "object" else null,
-            actual = if (message.contains("had '\"'")) "string" else null,
-        )
+    /** Only a boundary owning the exact payload and decoder descriptor may add structural metadata. */
+    fun decode(error: Throwable, payload: String, descriptor: SerialDescriptor): ErrorInfo {
+        val info = classify(error)
+        if (error !is SerializationException) return info
+        val shape = parse(payload)?.let { shape(it, descriptor, "$", 0) }
+        return shape?.let { info.copy(path = it.path, expected = it.expected, actual = it.actual) } ?: info
     }
+
+    private data class Shape(val path: String, val expected: String, val actual: String)
+
+    private fun parse(payload: String): JsonElement? = try {
+        Json.parseToJsonElement(payload)
+    } catch (_: SerializationException) {
+        null // A truncated or malformed capture cannot establish a structural path.
+    }
+
+    private fun expected(descriptor: SerialDescriptor): String? = when (descriptor.kind) {
+        StructureKind.CLASS, StructureKind.OBJECT, StructureKind.MAP -> "object"
+        StructureKind.LIST -> "array"
+        else -> null
+    }
+
+    private fun actual(value: JsonElement): String = when (value) {
+        is JsonObject -> "object"
+        is JsonArray -> "array"
+        JsonNull -> "null"
+        is JsonPrimitive -> if (value.isString) "string" else "primitive"
+    }
+
+    private fun shape(value: JsonElement, descriptor: SerialDescriptor, path: String, depth: Int): Shape? {
+        val expected = expected(descriptor) ?: return null
+        val actual = actual(value)
+        return when {
+            depth >= MAX_DEPTH || value == JsonNull && descriptor.isNullable -> null
+            expected != actual -> Shape(path, expected, actual)
+            else -> children(value, descriptor, path, depth)
+        }
+    }
+
+    private fun children(value: JsonElement, descriptor: SerialDescriptor, path: String, depth: Int): Shape? =
+        when (value) {
+            is JsonArray -> value.indices.firstNotNullOfOrNull { index ->
+                shape(value[index], descriptor.getElementDescriptor(0), "$path[$index]", depth + 1)
+            }
+            is JsonObject -> value.entries.firstNotNullOfOrNull { (key, item) ->
+                val index = if (descriptor.kind == StructureKind.MAP) 1 else descriptor.getElementIndex(key)
+                if (index < 0) return@firstNotNullOfOrNull null
+                val next = if (PROPERTY.matches(key)) "$path.$key" else "$path[${JsonPrimitive(key)}]"
+                shape(item, descriptor.getElementDescriptor(index), next, depth + 1)
+            }
+            else -> null
+        }
+
+    private const val MAX_DEPTH = 64
+    private val PROPERTY = Regex("[A-Za-z_][A-Za-z0-9_]*")
 }

@@ -148,14 +148,21 @@ class Diagnostics(
     @Suppress("TooGenericExceptionCaught", "InstanceOfCheckForException")
     private fun drafts(input: DiagnosticInput, slot: Slot, rate: Rate, legacy: Boolean): Batch =
         try {
-            val fields = fields(input, slot.id, redactor)
+            val clean: (String) -> Redacted = { text ->
+                val masked = input.secrets.fold(text) { value, secret ->
+                    value.replace(secret, "<redacted:known-secret>")
+                }
+                val result = redactor(masked)
+                Redacted(result.text, result.changed || masked != text)
+            }
+            val fields = fields(input, slot.id, clean)
             val count = input.error?.let {
                 count(rate.name, rate.fingerprint, rate.category, fields.component, fields.context)
             }
             val logs = when {
                 !slot.detail -> emptyList()
                 legacy -> listOf(detail(rate, 1, fields.context, fields.frames))
-                else -> incident(input, slot.id, fields)
+                else -> incident(input, slot.id, fields, clean)
             }
             Batch(count, logs)
         } catch (failure: Throwable) {
@@ -178,7 +185,12 @@ class Diagnostics(
             Batch(null, logs)
         }
 
-    private fun incident(input: DiagnosticInput, id: String, fields: Fields): List<Draft> {
+    private fun incident(
+        input: DiagnosticInput,
+        id: String,
+        fields: Fields,
+        redactor: (String) -> Redacted,
+    ): List<Draft> {
         fun clean(text: String) = redactor(text).text
         val attributes = input.attributes.entries.associate { (key, value) ->
             clean(key) to clean(DiagnosticRedactor.field(key, value).text)
@@ -287,10 +299,11 @@ private fun fields(input: DiagnosticInput, id: String, redactor: (String) -> Red
     fun clean(text: String) = redactor(text).text
     val fault = input.context["fault_id"]?.let(redactor)
         ?.takeIf { !it.changed && IDENTIFIER.matches(it.text) }?.text ?: id
-    val context = input.context.filterKeys { it != "incident_id" && it != "fault_id" }.mapValues {
-        val text = clean(it.value)
-        if (IDENTIFIER.matches(text)) text else hash(text)
-    } + mapOf("incident_id" to id, "fault_id" to fault)
+    val context = input.context.filterKeys { it != "incident_id" && it != "fault_id" }
+        .entries.associate { (key, value) ->
+            val text = clean(value)
+            clean(key) to if (IDENTIFIER.matches(text)) text else hash(text)
+        } + mapOf("incident_id" to id, "fault_id" to fault)
     return Fields(
         scalar(clean(input.component)), context,
         frames(input.error).map(::clean).filter { SCALAR.matches(it) },

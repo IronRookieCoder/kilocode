@@ -277,7 +277,8 @@ class CsCloudMcpBridgeTest {
     @Test
     fun `502 bind records a failed registration`() {
         failedBind(
-            MockResponse().setResponseCode(502).setBody("""{"error":{"code":"capability_bind_failed","message":"csc IDE capability request failed: HTTP 502"}}"""),
+            MockResponse().setResponseCode(502).setHeader("X-Debug", "test-token")
+                .setBody("""{"error":{"code":"capability_bind_failed","message":"csc IDE capability request failed: HTTP 502, echoed test-token"}}"""),
             OkHttpClient.Builder().addInterceptor(CsCloudRoute.responseInterceptor()).build(),
             "failure",
             "cs_cloud",

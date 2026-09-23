@@ -199,7 +199,7 @@ class KiloBackendAppService private constructor(
     val base: String? get() = connection.target?.base
     val sessionCapabilities: KiloSessionCapabilities? get() = connection.capabilities // kilocode_change
 
-    val sessions = KiloBackendSessionManager(cs, log)
+    val sessions = KiloBackendSessionManager(cs, log, operations)
     val chat = KiloBackendChatManager(cs, log)
     val activity = KiloBackendActivityManager(cs, log)
     val models = KiloBackendModelStateManager(log)
@@ -1363,11 +1363,64 @@ internal fun loadFailureReason(errors: List<LoadError>): String = when (errors.f
     else -> LOAD_REASON_OTHER
 }
 
-/** Captures the actual wire exchange before adapters transform or consume its response. */
+/** Captures bounded wire evidence and the actual decoder input without pre-reading either body. */
 class HttpCapture(request: Request? = null, private val secrets: Set<String> = emptySet()) {
+    companion object {
+        const val LIMIT = 64 * 1024
+    }
+
+    private class Snapshot {
+        val bytes = okio.Buffer()
+        var count = 0L
+
+        fun append(source: okio.Buffer, offset: Long, size: Long) {
+            source.copyTo(bytes, offset, minOf(size, LIMIT - bytes.size))
+            count += size
+        }
+
+        fun clear() {
+            bytes.clear()
+            count = 0L
+        }
+
+        fun wrap(body: okhttp3.RequestBody) = object : okhttp3.RequestBody() {
+            override fun contentType() = body.contentType()
+            override fun contentLength() = body.contentLength()
+            override fun isDuplex() = body.isDuplex()
+            override fun isOneShot() = body.isOneShot()
+            override fun writeTo(sink: okio.BufferedSink) {
+                val tee = object : okio.ForwardingSink(sink) {
+                    override fun write(source: okio.Buffer, byteCount: Long) {
+                        append(source, 0, byteCount)
+                        super.write(source, byteCount)
+                    }
+                }.buffer()
+                body.writeTo(tee)
+                tee.emit()
+            }
+        }
+
+        fun wrap(body: okhttp3.ResponseBody): okhttp3.ResponseBody {
+            val source = object : okio.ForwardingSource(body.source()) {
+                override fun read(sink: okio.Buffer, byteCount: Long): Long {
+                    val offset = sink.size
+                    val size = super.read(sink, byteCount)
+                    if (size > 0) append(sink, offset, size)
+                    return size
+                }
+            }.buffer()
+            return object : okhttp3.ResponseBody() {
+                override fun contentType() = body.contentType()
+                override fun contentLength() = body.contentLength()
+                override fun source() = source
+            }
+        }
+    }
+
     private var request: Request? = null
-    private var sent = byteArrayOf()
-    private var received = byteArrayOf()
+    private val sent = Snapshot()
+    private val received = Snapshot()
+    private val decoded = Snapshot()
     private var status: Int? = null
     private var type: String? = null
     private var encoding: String? = null
@@ -1376,24 +1429,36 @@ class HttpCapture(request: Request? = null, private val secrets: Set<String> = e
     init { request?.let(::capture) }
 
     fun client(http: okhttp3.OkHttpClient): okhttp3.OkHttpClient = http.newBuilder()
-        .addInterceptor { chain ->
-            capture(chain.request())
-            chain.proceed(chain.request())
+        .apply {
+            // The outermost interceptor observes the body after existing response adapters.
+            interceptors().add(0, okhttp3.Interceptor { chain ->
+                capture(chain.request())
+                val response = chain.proceed(chain.request())
+                val body = response.body ?: return@Interceptor response
+                response.newBuilder().body(decoded.wrap(body)).build()
+            })
         }
         .addNetworkInterceptor { chain ->
             capture(chain.request())
-            chain.proceed(chain.request()).also { response ->
-                status = response.code
-                type = response.body?.contentType()?.toString()
-                encoding = response.header("Content-Encoding")
-                headers += filtered(response.headers)
-                received = response.peekBody(Long.MAX_VALUE).bytes()
-            }
+            val original = chain.request()
+            val body = original.body
+            val outbound = body?.let {
+                original.newBuilder().method(original.method, sent.wrap(it)).build()
+            } ?: original
+            val response = chain.proceed(outbound)
+            status = response.code
+            type = response.body?.contentType()?.toString()
+            encoding = response.header("Content-Encoding")
+            headers += filtered(response.headers)
+            val incoming = response.body ?: return@addNetworkInterceptor response
+            response.newBuilder().body(received.wrap(incoming)).build()
         }.build()
 
     private fun capture(value: Request) {
         request = value
-        sent = value.body?.let { body -> okio.Buffer().also(body::writeTo).readByteArray() } ?: byteArrayOf()
+        sent.clear()
+        received.clear()
+        decoded.clear()
         headers = filtered(value.headers)
     }
 
@@ -1401,17 +1466,29 @@ class HttpCapture(request: Request? = null, private val secrets: Set<String> = e
         "${it.first}: ${DiagnosticRedactor.field(it.first, it.second).text}"
     }
 
-    private fun text(bytes: ByteArray, compressed: Boolean = false): String {
-        val body = if (compressed) {
-            okio.GzipSource(okio.Buffer().write(bytes)).buffer().use { it.readByteArray() }
-        } else bytes
-        return secrets.filter(String::isNotEmpty)
-            .fold(body.decodeToString()) { text, secret -> text.replace(secret, "<redacted:api-token>") }
+    private fun text(snapshot: Snapshot, compressed: Boolean = false): String {
+        val bytes = snapshot.bytes.clone()
+        if (!compressed || bytes.size == 0L) return bytes.readUtf8()
+        val decoded = okio.Buffer()
+        okio.GzipSource(bytes).use { source ->
+            while (decoded.size < LIMIT) {
+                if (source.read(decoded, LIMIT - decoded.size) < 0) break
+            }
+        }
+        return decoded.readUtf8()
     }
 
-    fun input(component: String, error: Throwable, context: Map<String, String> = emptyMap()): DiagnosticInput {
+    fun input(
+        component: String,
+        error: Throwable,
+        context: Map<String, String> = emptyMap(),
+        descriptor: kotlinx.serialization.descriptors.SerialDescriptor? = null,
+    ): DiagnosticInput {
         val info = status?.takeIf { it >= java.net.HttpURLConnection.HTTP_BAD_REQUEST }
-            ?.let { ErrorClassifier.observe(error, it) } ?: ErrorClassifier.classify(error)
+            ?.let { ErrorClassifier.observe(error, it) }
+            ?: descriptor?.takeIf { error is kotlinx.serialization.SerializationException }
+                ?.let { ErrorClassifier.decode(error, text(decoded), it) }
+            ?: ErrorClassifier.classify(error)
         return DiagnosticInput.error(component, info.code, error, context = context, attributes = buildMap {
             putAll(info.attributes())
             request?.let {
@@ -1422,12 +1499,15 @@ class HttpCapture(request: Request? = null, private val secrets: Set<String> = e
             status?.let { put("http_status", it.toString()) }
             (type ?: request?.body?.contentType()?.toString())?.let { put("content_type", it) }
             encoding?.let { put("content_encoding", it) }
-            put("request_bytes", sent.size.toString())
-            put("response_bytes", received.size.toString())
+            put("request_bytes", sent.count.toString())
+            put("response_bytes", received.count.toString())
+            put("capture_limit", LIMIT.toString())
+            put("request_captured_bytes", sent.bytes.size.toString())
+            put("response_captured_bytes", received.bytes.size.toString())
         }, payloads = mapOf(
             "request" to { text(sent) },
             "response" to { text(received, encoding.equals("gzip", ignoreCase = true)) },
             "headers" to { headers },
-        ))
+        ), secrets = secrets)
     }
 }
