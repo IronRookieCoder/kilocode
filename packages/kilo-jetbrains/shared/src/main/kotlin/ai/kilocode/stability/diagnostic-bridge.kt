@@ -59,6 +59,8 @@ object DiagnosticBridge {
         private val pending = AtomicInteger()
         private val running = AtomicInteger()
         private val scheduled = AtomicBoolean()
+        private val deactivated = AtomicBoolean()
+        private val worker = AtomicReference<Thread?>()
         @Suppress("PLATFORM_CLASS_MAPPED_TO_KOTLIN")
         private val monitor = java.lang.Object()
 
@@ -74,9 +76,22 @@ object DiagnosticBridge {
         }
 
         fun await() {
+            if (worker.get() === Thread.currentThread()) return
             synchronized(monitor) {
                 while (pending.get() > 0 || running.get() > 0) monitor.wait()
             }
+        }
+
+        fun awaitClosed() {
+            if (worker.get() === Thread.currentThread()) return
+            synchronized(monitor) {
+                while (!deactivated.get() || pending.get() > 0 || running.get() > 0) monitor.wait()
+            }
+        }
+
+        fun deactivate() {
+            deactivated.set(true)
+            signal()
         }
 
         private fun reserve(): Boolean {
@@ -101,16 +116,22 @@ object DiagnosticBridge {
         }
 
         private fun drain() {
-            while (true) {
-                val input = queue.poll() ?: return
-                begin()
-                try {
-                    deliver(input)
-                } catch (error: Exception) {
-                    log.warn("Diagnostic bridge sink failed", error)
-                } finally {
-                    finish()
+            worker.set(Thread.currentThread())
+            try {
+                while (true) {
+                    val input = queue.poll() ?: return
+                    begin()
+                    try {
+                        deliver(input)
+                    } catch (error: Exception) {
+                        log.warn("Diagnostic bridge sink failed", error)
+                    } finally {
+                        finish()
+                    }
                 }
+            } finally {
+                worker.set(null)
+                signal()
             }
         }
 
@@ -129,9 +150,8 @@ object DiagnosticBridge {
 
     private class Installation(val entry: Entry) : AutoCloseable {
         override fun close() {
-            if (!entry.active.compareAndSet(true, false)) return
-            deactivate(entry)
-            entry.await()
+            if (entry.active.compareAndSet(true, false)) deactivate(entry)
+            entry.awaitClosed()
         }
     }
 
@@ -177,6 +197,7 @@ object DiagnosticBridge {
             entries.remove(entry)
             if (current.get() === entry) current.set(entries.lastOrNull { it.active.get() })
         }
+        entry.deactivate()
     }
 
     private fun Entry.deliver(input: DiagnosticInput) {

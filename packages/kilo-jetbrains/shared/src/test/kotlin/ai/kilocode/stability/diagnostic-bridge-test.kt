@@ -91,7 +91,8 @@ class DiagnosticBridgeTest {
         val release = CountDownLatch(1)
         val returned = CountDownLatch(1)
         val queued = CountDownLatch(1)
-        val closed = CountDownLatch(1)
+        val firstClosed = CountDownLatch(1)
+        val secondClosed = CountDownLatch(1)
         val seen = mutableListOf<String>()
         val bridge = DiagnosticBridge.install {
             entered.countDown()
@@ -111,14 +112,21 @@ class DiagnosticBridgeTest {
                 queued.countDown()
             }
             assertTrue(queued.await(1, TimeUnit.SECONDS), "contended publish must not wait for the sink")
-            val closing = CompletableFuture.runAsync {
+            val first = CompletableFuture.runAsync {
                 bridge.close()
-                closed.countDown()
+                firstClosed.countDown()
             }
-            assertFalse(closed.await(100, TimeUnit.MILLISECONDS), "close must retain ownership while the sink runs")
+            assertFalse(firstClosed.await(100, TimeUnit.MILLISECONDS), "first close must retain ownership while the sink runs")
+            val second = CompletableFuture.runAsync {
+                bridge.close()
+                secondClosed.countDown()
+            }
+            assertFalse(secondClosed.await(100, TimeUnit.MILLISECONDS), "second close must retain ownership while the sink runs")
             release.countDown()
-            assertTrue(closed.await(5, TimeUnit.SECONDS), "close did not wait for the sink")
-            closing.get(5, TimeUnit.SECONDS)
+            assertTrue(firstClosed.await(5, TimeUnit.SECONDS), "first close did not wait for the sink")
+            assertTrue(secondClosed.await(5, TimeUnit.SECONDS), "second close did not wait for the sink")
+            first.get(5, TimeUnit.SECONDS)
+            second.get(5, TimeUnit.SECONDS)
             DiagnosticBridge.publish(DiagnosticInput(DiagnosticSeverity.WARN, "test", "second"))
             DiagnosticBridge.await(bridge)
             task.get(5, TimeUnit.SECONDS)
@@ -153,6 +161,29 @@ class DiagnosticBridgeTest {
             task.get(5, TimeUnit.SECONDS)
         } finally {
             release.countDown()
+            bridge.close()
+            DiagnosticBridge.await(bridge)
+        }
+    }
+
+    @Test
+    fun `close from a sink does not await itself`() {
+        val closed = CountDownLatch(1)
+        val seen = mutableListOf<String>()
+        lateinit var bridge: AutoCloseable
+        bridge = DiagnosticBridge.install {
+            seen += it.message
+            bridge.close()
+            closed.countDown()
+        }
+
+        try {
+            DiagnosticBridge.publish(DiagnosticInput(DiagnosticSeverity.WARN, "test", "first"))
+            assertTrue(closed.await(5, TimeUnit.SECONDS), "sink close deadlocked")
+            DiagnosticBridge.await(bridge)
+            DiagnosticBridge.publish(DiagnosticInput(DiagnosticSeverity.WARN, "test", "second"))
+            assertEquals(listOf("first"), seen)
+        } finally {
             bridge.close()
             DiagnosticBridge.await(bridge)
         }
