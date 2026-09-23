@@ -23,7 +23,7 @@ import java.util.concurrent.TimeUnit
  * `Kilo.StabilitySelfTest`（经 `-Dcostrict.stability.selftest=true` 开关）对除
  * plugin.started/plugin.shutdown/telemetry.health（服务级单发与真实快照）外的全部登记
  * name各产出至少一条字典合法事实，走真实准入→队列→writer→单文件追加→outbox管线；
- * 优雅关闭排空后从唯一的 `<scope-id>-<producer-id>.jsonl` 还原并断言：
+ * 优雅关闭排空后从唯一的 `<scope-id>.jsonl` 还原并断言：
  *
  *  - **31个登记name全部落盘**（28个经自检 + started/shutdown/health由服务自然产出）；
  *  - 每个name的kind/channel/purposes与事件字典投影一致（含error族计数critical/metrics与
@@ -45,8 +45,8 @@ class StabilityDictionaryE2eTest : IntegrationTestBase() {
 
     private val uuidRegex = Regex("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 
-    /** 平铺追加文件名（§5.2）：`<scope-id>-<producer-id>.jsonl`，两段id各12个十六进制字符。 */
-    private val outboxFileRegex = Regex("^sc-[0-9a-f]{12}-pr-[0-9a-f]{12}\\.jsonl$")
+    /** 平铺追加文件名（§5.2）：`<scope-id>.jsonl`，scope-id为12个十六进制字符。 */
+    private val outboxFileRegex = Regex("^sc-[0-9a-f]{12}\\.jsonl$")
 
     private val factFieldNames = setOf(
         "schema_version", "event_id", "timestamp", "producer_id", "run_id", "channel", "seq",
@@ -142,7 +142,7 @@ class StabilityDictionaryE2eTest : IntegrationTestBase() {
 
         // —— 追加协议布局：优雅关闭后唯一平铺jsonl，critical/diagnostic两通道行同文件 ——
         val jsonlFiles = outboxJsonlFiles()
-        assertEquals(1, jsonlFiles.size, "exactly one producer fact file must remain after a graceful close")
+        assertEquals(1, jsonlFiles.size, "exactly one IDE scope fact file must remain after a graceful close")
         assertEquals(jsonl.fileName.toString(), jsonlFiles.single().fileName.toString(), "the file name must be stable")
         assertNoForeignEntries()
 
@@ -288,7 +288,7 @@ class StabilityDictionaryE2eTest : IntegrationTestBase() {
             outboxJsonlFiles().firstOrNull()?.let { return it }
             Thread.sleep(1_000)
         }
-        throw AssertionError("no producer jsonl appeared within ${timeoutMs}ms")
+        throw AssertionError("no IDE scope jsonl appeared within ${timeoutMs}ms")
     }
 
     private data class FactLine(

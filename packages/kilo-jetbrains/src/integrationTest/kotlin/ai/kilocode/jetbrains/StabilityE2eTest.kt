@@ -22,7 +22,7 @@ import java.util.concurrent.TimeUnit
  *
  *  - fail-open unbound placeholder policy without a control file (epoch=unbound, revision=0,
  *    both purposes open) and activation on the first valid permit,
- *  - the flat outbox layout: exactly one append-only `<scope-id>-<producer-id>.jsonl` per JVM,
+ *  - the flat outbox layout: exactly one append-only `<scope-id>.jsonl` per IDE scope,
  *    no registrations, no producer.json, no lock files and no .open/.ready/.claimed state machine,
  *  - NDJSON wire format with the frozen 25-required-field closed set, per-channel seq continuity,
  *    LF-terminated UTF-8 without BOM/CR and the 32KiB record budget,
@@ -50,8 +50,8 @@ class StabilityE2eTest : IntegrationTestBase() {
 
     private val uuidRegex = Regex("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 
-    /** 平铺追加文件名（§5.2）：`<scope-id>-<producer-id>.jsonl`，两段id各12个十六进制字符。 */
-    private val outboxFileRegex = Regex("^sc-[0-9a-f]{12}-pr-[0-9a-f]{12}\\.jsonl$")
+    /** 平铺追加文件名（§5.2）：`<scope-id>.jsonl`，scope-id为12个十六进制字符。 */
+    private val outboxFileRegex = Regex("^sc-[0-9a-f]{12}\\.jsonl$")
 
     private val factFieldNames = setOf(
         "schema_version", "event_id", "timestamp", "producer_id", "run_id", "channel", "seq",
@@ -199,7 +199,7 @@ class StabilityE2eTest : IntegrationTestBase() {
             assertEquals(
                 runAFileName,
                 jsonl.fileName.toString(),
-                "the rebuilt file must reuse the SAME scope-producer name (run identity changes, file identity must not)",
+                "the rebuilt file must reuse the SAME IDE scope file name (run identity changes, file identity must not)",
             )
             awaitTolerantFact(timeoutMs = 65_000) { it.revision == 3L }
                 ?: throw AssertionError("run B did not record rev3 facts after re-permit")
@@ -605,10 +605,10 @@ class StabilityE2eTest : IntegrationTestBase() {
         val jsonl = names.filter { outboxFileRegex.matches(it) }
         assertTrue(
             names.all { outboxFileRegex.matches(it) },
-            "the outbox must hold only flat scope-producer jsonl files, got $names",
+            "the outbox must hold only flat IDE scope jsonl files, got $names",
         )
         if (uniqueJsonl) {
-            assertEquals(1, jsonl.size, "exactly one producer fact file must exist, got $jsonl")
+            assertEquals(1, jsonl.size, "exactly one IDE scope fact file must exist, got $jsonl")
         }
         assertFalse(Files.exists(home.resolve("registrations")), "the append protocol keeps no registrations directory")
         val forbiddenSuffixes = listOf(".open", ".ready", ".claimed", ".lock", ".tmp", ".json")
@@ -619,7 +619,7 @@ class StabilityE2eTest : IntegrationTestBase() {
         }
     }
 
-    /** Polls until the outbox holds exactly one producer jsonl (optionally excluding [exclude] names). */
+    /** Polls until the outbox holds exactly one IDE scope jsonl (optionally excluding [exclude] names). */
     private fun awaitSingleOutboxFile(timeoutMs: Long, exclude: Set<String> = emptySet()): Path {
         val deadline = System.currentTimeMillis() + timeoutMs
         while (System.currentTimeMillis() < deadline) {
@@ -628,7 +628,7 @@ class StabilityE2eTest : IntegrationTestBase() {
             Thread.sleep(1_000)
         }
         throw AssertionError(
-            "no single producer jsonl appeared within ${timeoutMs}ms; outbox: ${outboxEntries().map { it.fileName }}",
+            "no single IDE scope jsonl appeared within ${timeoutMs}ms; outbox: ${outboxEntries().map { it.fileName }}",
         )
     }
 
