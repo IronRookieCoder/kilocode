@@ -63,4 +63,65 @@ class DiagnosticRedactorTest {
         assertTrue(out.text == input)
         assertFalse(out.changed)
     }
+
+    @Test
+    fun `redacts complete authorization values for every scheme`() {
+        val input = """
+            Authorization: Basic basic-secret
+            Authorization: Digest username="alice", response="digest-secret", realm="example"
+            Proxy-Authorization: Negotiate proxy-secret
+            context Authorization: Basic inline-basic-secret password=still-secret
+        """.trimIndent()
+
+        val out = DiagnosticRedactor.clean(input)
+
+        listOf("basic-secret", "digest-secret", "proxy-secret", "inline-basic-secret", "still-secret").forEach { secret ->
+            assertFalse(secret in out.text, secret)
+        }
+        assertTrue("<redacted:password>" in out.text)
+    }
+
+    @Test
+    fun `redacts escaped JSON values and cloud credentials anywhere in text`() {
+        val input = """
+            {"password":"prefix\"SENSITIVE-SUFFIX","AWS_SECRET_ACCESS_KEY":"aws-json-secret"}
+            diagnostic OPENAI_API_KEY="env secret with spaces"
+            trace AWS_ACCESS_KEY_ID=access-id-secret
+        """.trimIndent()
+
+        val out = DiagnosticRedactor.clean(input)
+
+        listOf("prefix", "SENSITIVE-SUFFIX", "aws-json-secret", "env secret with spaces", "access-id-secret").forEach { secret ->
+            assertFalse(secret in out.text, secret)
+        }
+        assertTrue(out.changed)
+    }
+
+    @Test
+    fun `redacts real JWTs without changing ordinary dotted identifiers`() {
+        val jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signature"
+        val input = "class=ai.kilocode.backend.app.Service host=example.test/path jwt=$jwt"
+
+        val out = DiagnosticRedactor.clean(input)
+
+        assertFalse(jwt in out.text)
+        assertTrue("ai.kilocode.backend.app.Service" in out.text)
+        assertTrue("example.test/path" in out.text)
+    }
+
+    @Test
+    fun `redacts URL userinfo and unterminated PEM blocks`() {
+        val input = """
+            https://user:url-password@example.test/fail
+            -----BEGIN PRIVATE KEY-----
+            unterminated-private-material
+        """.trimIndent()
+
+        val out = DiagnosticRedactor.clean(input)
+
+        assertFalse("url-password" in out.text)
+        assertFalse("unterminated-private-material" in out.text)
+        assertTrue("example.test/fail" in out.text)
+        assertTrue("<redacted:private-key>" in out.text)
+    }
 }
