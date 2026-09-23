@@ -31,9 +31,9 @@ import java.util.concurrent.TimeUnit
  *  - epoch rotation on the single append file: old-epoch facts are never rebound, seq gaps sit
  *    only at policy boundaries, a retired epoch written back never revives (falls back to the
  *    unbound placeholder),
- *  - scope-prefix residue cleanup: same-scope files stale beyond 24h are deleted, other-scope
- *    files and fresh files stay (§7.4), and a hard-killed predecessor run is reported by the
- *    next launch as plugin.unclean with its previous_run_id (§7.3).
+ *  - legacy residue cleanup: same-scope producer-suffixed files are deleted, other-scope files
+ *    stay, and a hard-killed predecessor run is reported by the next launch as plugin.unclean
+ *    with its previous_run_id (§7.3).
  *
  * The wire-contract sets below are a deliberate independent copy of the design doc — this
  * source set does not compile against plugin modules, and a contract test must not import
@@ -387,7 +387,7 @@ class StabilityE2eTest : IntegrationTestBase() {
     }
 
     // ------------------------------------------------------------------
-    // Scenario 4: scope-prefix residue cleanup + hard-kill unclean handover (§7.3/§7.4)
+    // Scenario 4: stable scope file + legacy cleanup + hard-kill unclean handover (§7.3)
     // ------------------------------------------------------------------
 
     /**
@@ -395,27 +395,18 @@ class StabilityE2eTest : IntegrationTestBase() {
      *
      *  - launch A collects under a valid permit and is then HARD-KILLED (no plugin.stop): its
      *    append file keeps a started-without-shutdown trail — the unclean predecessor;
-     *  - before launch B the test plants residue in the flat outbox: an EMPTY same-scope file
-     *    backdated 25h beyond the 24h retention (must be swept by B) and an other-scope file
-     *    equally stale (must be kept — cross-scope residue is the consumer's job, §7.4);
-     *  - launch B (valid permit) must keep A's fresh file, report its own run cleanly, and —
-     *    when B shares A's scope id — sweep only the stale same-scope file and report A's death
-     *    as its FIRST business fact: plugin.unclean with previous_run_id = A's run_id (§7.3).
+     *  - before launch B the test plants a same-scope legacy producer file and an other-scope
+     *    legacy producer file; B must delete only the same-scope legacy file at startup;
+     *  - launch B (valid permit) must reuse A's `<scope-id>.jsonl`, append a new producer/run,
+     *    and report A's death as its FIRST business fact: plugin.unclean with
+     *    previous_run_id = A's run_id (§7.3).
      *
-     * R14 ruling (see task-13 report §1): the sandbox IDE's PropertiesComponent state does NOT
-     * survive between two launches — every launch after the first runs ConfigImportHelper
-     * (migrate.config marker is re-created by the IDE itself each startup), which resets the
-     * config dir and drops the persisted scope id (probe evidence: scopeA=sc-17c323cb3d3e →
-     * scopeB=sc-eecdebd904e9; seeded other.xml wiped by the import). The plugin-side scope load
-     * happens at app-service construction, before any driver hook can re-seed, so the fallback
-     * mandated by the ruling applies: the same-scope file is seeded from A's file-name prefix
-     * and the unclean + same-scope-sweep assertions run ONLY when B's own file shares that
-     * prefix. When the environment breaks scope persistence (current behavior), the test records
-     * that loudly and keeps the other assertions; the unclean detection logic itself is covered
-     * by the T7 unit suite (unclean-test.kt).
+     * The two launches share the same isolated user.home, so scope persistence and append reuse
+     * are part of this end-to-end contract. A second scope is represented only by the planted
+     * legacy file and must remain untouched by plugin-side cleanup.
      */
     @Test
-    fun `dead predecessor file is kept unclean-reported while stale same scope residue is swept`() {
+    fun `restarted IDE reuses scope file and reports unclean predecessor`() {
         val evidenceRoot = Path.of("out", "stability-evidence", "residue").toAbsolutePath()
         evidenceRoot.toFile().deleteRecursively()
 
@@ -436,51 +427,51 @@ class StabilityE2eTest : IntegrationTestBase() {
         }
         val outbox = outboxDir()
         val fileAAfter = outbox.resolve(requireNotNull(fileA) { "run A's outbox file was never observed" }.fileName)
-        val scopeA = fileAAfter.fileName.toString().substringBefore("-pr-")
+        val scopeA = fileAAfter.fileName.toString().removeSuffix(".jsonl")
+        assertTrue(outboxFileRegex.matches(fileAAfter.fileName.toString()), "run A must use one IDE scope fact file")
+        val factsA = readFacts(listOf(fileAAfter))
+        val producerA = factsA.map { it.obj["producer_id"]!!.jsonPrimitive.content }.toSet().single()
+        val runAId = requireNotNull(runA) { "run A's id was never observed" }
         assertTrue(Files.exists(fileAAfter), "a hard-killed run leaves its pending file in place")
         assertFalse(
-            tolerantFacts(outbox).any { it.runId == runA && it.name == "plugin.shutdown" },
+            tolerantFacts(outbox).any { it.runId == runAId && it.name == "plugin.shutdown" },
             "a hard kill must not fabricate a plugin.shutdown for run A",
         )
 
-        // —— plant residue: same-scope expired (swept when scopes match) + other-scope expired ——
+        // —— plant legacy files: same-scope is removed at startup, other-scope is retained ——
         val staleSameScope = outbox.resolve("${scopeA}-pr-00000000000a.jsonl")
         Files.writeString(staleSameScope, "")
-        backdate(staleSameScope, hoursAgo = 25)
         val staleOtherScope = outbox.resolve("sc-0fffffffffff-pr-00000000000b.jsonl")
         Files.writeString(staleOtherScope, "")
-        backdate(staleOtherScope, hoursAgo = 25)
-        println("[e2e] planted residue: $staleSameScope (25h, same scope), $staleOtherScope (25h, other scope)")
+        println("[e2e] planted legacy residue: $staleSameScope (same scope), $staleOtherScope (other scope)")
 
-        // —— launch B: valid permit → unclean detection + startup retention sweep (§7.4) ——
-        lateinit var fileB: Path
+        // —— launch B: valid permit → same scope file + unclean detection ——
         var runB: String? = null
         runPluginIde("stabilityE2eResidue") {
             awaitColdStartReady()
-            val known = setOf(fileAAfter.fileName.toString(), staleOtherScope.fileName.toString(), staleSameScope.fileName.toString())
-            fileB = awaitSingleOutboxFile(timeoutMs = 75_000, exclude = known)
-            // the sweep and the unclean detection run at service init — settle, then verify
-            awaitTolerantFact(timeoutMs = 60_000) { it.runId != runA && it.name == "plugin.started" }
+            assertFalse(Files.exists(staleSameScope), "same-scope legacy file must be deleted at startup")
+            assertTrue(Files.exists(staleOtherScope), "other-scope legacy file must remain untouched")
+            // unclean detection runs at service init; wait for B's started row in A's file
+            awaitTolerantFact(timeoutMs = 60_000) { it.runId != runAId && it.name == "plugin.started" }
                 ?: throw AssertionError("run B never recorded plugin.started")
-            runB = awaitAnyRunId(fileB, timeoutMs = 30_000)
+            runB = awaitAnyRunId(fileAAfter, timeoutMs = 30_000)
             Thread.sleep(20_000)
         }
 
-        val scopeB = fileB.fileName.toString().substringBefore("-pr-")
-        val sameScopeAcrossLaunches = scopeB == scopeA
-        println(
-            "[e2e] scope persistence across launches: scopeA=$scopeA scopeB=$scopeB same=$sameScopeAcrossLaunches " +
-                "(sandbox ConfigImportHelper resets PropertiesComponent between launches — see task-13 report)",
-        )
+        val runBId = requireNotNull(runB) { "run B's id was never observed" }
+        assertTrue(runBId != runAId, "restart must use a new run_id in the same file")
+        assertTrue(Files.exists(staleOtherScope), "other-scope legacy file must remain outside cleanup scope")
+        assertFalse(Files.exists(staleSameScope), "same-scope legacy file must not survive restart")
 
-        // —— residue assertions that hold regardless of scope persistence ——
-        assertTrue(Files.exists(staleOtherScope), "other-scope residue is outside the plugin's cleanup scope")
-        assertTrue(Files.exists(fileAAfter), "A's file is within the 24h retention and must be kept")
-        assertTrue(runB != runA, "launch B must run under a fresh run_id")
-
-        // —— run B recorded a clean, wire-valid run ——
-        val factsB = readFacts(listOf(fileB))
+        // —— run B appended a new producer/run to the same file and recorded unclean ——
+        val allFacts = readFacts(listOf(fileAAfter))
+        val factsB = allFacts.filter { it.runId == runBId }
         assertTrue(factsB.isNotEmpty(), "run B must have recorded facts")
+        assertTrue(factsB.all { it.lineNo > factsA.size }, "run B facts must append after run A in the same file")
+        val producerB = factsB.map { it.obj["producer_id"]!!.jsonPrimitive.content }.toSet()
+        assertEquals(1, producerB.size, "run B must use one producer_id")
+        assertTrue(producerB.single() != producerA, "restart must create a new producer_id in the same file")
+        assertTrue(factsB.any { it.name == "plugin.unclean" }, "run B must report plugin.unclean in the same file")
         val failures = validateFacts(
             facts = factsB,
             windowStartMs = launchAMs - 10_000,
@@ -491,40 +482,19 @@ class StabilityE2eTest : IntegrationTestBase() {
         assertTrue(failures.isEmpty(), "run B wire violations:\n${failures.joinToString("\n")}")
         assertEquals(1, factsB.count { it.name == "plugin.started" }, "one plugin.started for run B")
 
-        if (sameScopeAcrossLaunches) {
-            // R14 (a) full branch: B shares A's scope → sweep + unclean handover must happen.
-            assertFalse(Files.exists(staleSameScope), "stale same-scope residue must be swept by the next launch (§7.4)")
-            assertEquals(1, factsB.count { it.name == "plugin.unclean" }, "exactly one unclean predecessor report")
-            val first = factsB.minBy { it.lineNo }
-            assertEquals("plugin.unclean", first.name, "run B's first business fact must report the unclean predecessor")
-            val uncleanData = first.obj["data"]!!.jsonObject
-            assertEquals(runA, uncleanData["previous_run_id"]!!.jsonPrimitive.content, "previous_run_id must be run A's id")
-            assertEquals(
-                "no_shutdown_after_started",
-                uncleanData["evidence"]!!.jsonPrimitive.content,
-                "the unclean evidence token must be the fixed constant",
-            )
-        } else {
-            // R14 (a) recorded skip: the sandbox resets IDE settings between launches, so B's
-            // scope differs and the cross-launch same-scope duties cannot be exercised here.
-            assertTrue(
-                Files.exists(staleSameScope),
-                "with a different scope B must treat the planted file as other-scope residue and keep it",
-            )
-            assertEquals(
-                0,
-                factsB.count { it.name == "plugin.unclean" },
-                "without a same-scope predecessor B must not report plugin.unclean",
-            )
-            println(
-                "[e2e] RECORDED (R14 fallback a): cross-launch plugin.unclean + same-scope sweep NOT exercisable in this " +
-                    "sandbox (scopeA=$scopeA != scopeB=$scopeB; ConfigImportHelper resets IDE settings every launch). " +
-                    "Detection logic is covered by the T7 unit suite (shared unclean-test.kt).",
-            )
-        }
+        assertEquals(1, factsB.count { it.name == "plugin.unclean" }, "exactly one unclean predecessor report")
+        val first = factsB.minBy { it.lineNo }
+        assertEquals("plugin.unclean", first.name, "run B's first business fact must report the unclean predecessor")
+        val uncleanData = first.obj["data"]!!.jsonObject
+        assertEquals(runAId, uncleanData["previous_run_id"]!!.jsonPrimitive.content, "previous_run_id must be run A's id")
+        assertEquals(
+            "no_shutdown_after_started",
+            uncleanData["evidence"]!!.jsonPrimitive.content,
+            "the unclean evidence token must be the fixed constant",
+        )
 
-        // —— append layout survived the whole exercise ——
-        assertAppendLayoutClean(uniqueJsonl = false)
+        // —— one active scope file plus an untouched other-scope legacy file ——
+        assertEquals(listOf(fileAAfter), outboxJsonlFiles(), "restart must reuse the same IDE scope fact file")
 
         // —— keep the final tree for manual inspection ——
         Files.createDirectories(evidenceRoot.resolve("outbox"))
@@ -942,18 +912,8 @@ class StabilityE2eTest : IntegrationTestBase() {
     }
 
     // ------------------------------------------------------------------
-    // Residue planting helpers & evidence retention (§7.3/§7.4)
+    // Evidence retention
     // ------------------------------------------------------------------
-
-    /** Backdates a file's mtime past the 24h retention boundary (25h by default). */
-    private fun backdate(path: Path, hoursAgo: Long = 25) {
-        Files.setLastModifiedTime(
-            path,
-            java.nio.file.attribute.FileTime.fromMillis(
-                System.currentTimeMillis() - TimeUnit.HOURS.toMillis(hoursAgo),
-            ),
-        )
-    }
 
     /** Recursive tree copy (evidence retention); overwrites nothing, creates parents as needed. */
     private fun copyTree(source: Path, dest: Path) {
