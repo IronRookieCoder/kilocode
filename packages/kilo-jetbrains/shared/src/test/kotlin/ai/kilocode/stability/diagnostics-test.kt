@@ -8,6 +8,7 @@ import java.util.concurrent.CompletableFuture
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.io.path.writeText
 import kotlin.test.Test
@@ -321,6 +322,65 @@ class DiagnosticsTest {
             assertEquals(100, fixture.facts().count { it.channel == "critical" })
             assertEquals(3, fixture.facts().count { it.name == "diagnostic.reported" })
             assertEquals(1, fixture.facts().count { it.data["count"]?.jsonPrimitive?.longOrNull == 97L })
+        }
+    }
+
+    @Test
+    fun `stale sampled windows cannot replenish the current detail quota`() {
+        listOf(true, false).forEach { v2 ->
+            Fixture().use { fixture ->
+                if (v2) enable(fixture)
+                val entered = CountDownLatch(1)
+                val release = CountDownLatch(1)
+                val pending = AtomicBoolean(true)
+                val clock = object : Clock by fixture.clock {
+                    override fun wall(): Long {
+                        val time = fixture.clock.wall()
+                        if (pending.compareAndSet(true, false)) {
+                            entered.countDown()
+                            release.await()
+                        }
+                        return time
+                    }
+                }
+                val diagnostics = Diagnostics(fixture.recorder, clock)
+                val error = IllegalStateException("same")
+                val executor = Executors.newSingleThreadExecutor()
+                val first = CompletableFuture.runAsync({
+                    diagnostics.report(DiagnosticInput.error("shared", error = error))
+                }, executor)
+                try {
+                    assertTrue(entered.await(TIMEOUT, TimeUnit.SECONDS), "old window was not sampled")
+                    fixture.advanceClock(61_000)
+                    repeat(3) { index ->
+                        diagnostics.report(DiagnosticInput.error("shared", error = error, context = mapOf("fault_id" to "fault-$index")))
+                    }
+                    release.countDown()
+                    first.get(TIMEOUT, TimeUnit.SECONDS)
+                    repeat(3) { diagnostics.report(DiagnosticInput.error("shared", error = error)) }
+                    fixture.advanceClock(61_000)
+                    // 重复调用只触发汇总，不预留下一窗口的详情。
+                    diagnostics.report(DiagnosticInput.error("shared", context = mapOf("fault_id" to "fault-0")))
+                    fixture.flush()
+                    val facts = fixture.facts()
+                    val details = facts.count {
+                        it.name == "diagnostic.reported" ||
+                            it.channel == "diagnostic" && it.data["count"]?.jsonPrimitive?.longOrNull == 1L
+                    }
+                    assertEquals(7, facts.count { it.channel == "critical" }, "all distinct reports stay counted, v2=$v2")
+                    assertEquals(3, details, "only one new-window detail quota is available, v2=$v2")
+                    val summaries = facts.filter { it.data["message"]?.jsonPrimitive?.content?.startsWith("fault summary:") == true }
+                    assertEquals(1, summaries.size, "stale reports join the current window, v2=$v2")
+                    assertEquals(4L, summaries.single().data["count"]?.jsonPrimitive?.long)
+                } finally {
+                    release.countDown()
+                    try {
+                        first.get(TIMEOUT, TimeUnit.SECONDS)
+                    } finally {
+                        executor.shutdownNow()
+                    }
+                }
+            }
         }
     }
 

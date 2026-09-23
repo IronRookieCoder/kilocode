@@ -113,7 +113,8 @@ class Diagnostics(
             Rate(rate.fingerprint, rate.category, rate.name).also { windows[rate.fingerprint] = it }
         } else overflow
         state.name = rate.name
-        if (state.window != time) {
+        // 锁外采样可能乱序到达；旧调用沿用当前窗口，不能回退并重新发放配额。
+        if (state.window < time) {
             state.window = time
             state.details = 0
         }
