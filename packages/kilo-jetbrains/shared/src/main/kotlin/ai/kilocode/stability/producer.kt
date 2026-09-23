@@ -96,7 +96,16 @@ fun platformScopeIdStore(): ScopeIdStore {
     return ScopeIdStore {
         runCatching {
             PropertiesComponent.getInstance().getValue(SCOPE_SETTING_KEY)
-                ?: (SCOPE_PREFIX + randomId()).also { PropertiesComponent.getInstance().setValue(SCOPE_SETTING_KEY, it) }
+                ?: (SCOPE_PREFIX + randomId()).also {
+                    PropertiesComponent.getInstance().setValue(SCOPE_SETTING_KEY, it)
+                    // setValue only dirties the in-memory component. Flush the application
+                    // settings before returning so a hard JVM kill cannot lose the scope.
+                    runCatching {
+                        val app = ApplicationManager.getApplication() ?: return@runCatching
+                        if (app.isDispatchThread) app.saveSettings()
+                        else app.invokeAndWait { app.saveSettings() }
+                    }
+                }
         }.getOrElse { cached ?: (SCOPE_PREFIX + randomId()).also { cached = it } }
     }
 }

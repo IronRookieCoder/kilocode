@@ -434,7 +434,7 @@ class StabilityE2eTest : IntegrationTestBase() {
         val runAId = requireNotNull(runA) { "run A's id was never observed" }
         assertTrue(Files.exists(fileAAfter), "a hard-killed run leaves its pending file in place")
         assertFalse(
-            tolerantFacts(outbox).any { it.runId == runAId && it.name == "plugin.shutdown" },
+            tolerantFacts(listOf(fileAAfter)).any { it.runId == runAId && it.name == "plugin.shutdown" },
             "a hard kill must not fabricate a plugin.shutdown for run A",
         )
 
@@ -451,7 +451,10 @@ class StabilityE2eTest : IntegrationTestBase() {
         runPluginIde("stabilityE2eResidue", reuseConfig = true) {
             awaitColdStartReady()
             // unclean detection runs at service init; wait for B's started row in A's file
-            val startedB = awaitTolerantFact(timeoutMs = 60_000) { it.runId != runAId && it.name == "plugin.started" }
+            val startedB = awaitTolerantFact(
+                timeoutMs = 60_000,
+                files = listOf(fileAAfter),
+            ) { it.runId != runAId && it.name == "plugin.started" }
                 ?: throw AssertionError("run B never recorded plugin.started")
             runB = startedB.runId
             producerBId = startedB.producerId
@@ -819,8 +822,8 @@ class StabilityE2eTest : IntegrationTestBase() {
      * partial line is skipped and unparseable lines are ignored. Used for in-run quiet /
      * adoption probes; final validation stays strict.
      */
-    private fun tolerantFacts(outbox: Path = outboxDir()): List<TolerantFact> =
-        outboxJsonlFiles().flatMap { file ->
+    private fun tolerantFacts(files: List<Path> = outboxJsonlFiles()): List<TolerantFact> =
+        files.flatMap { file ->
             val bytes = Files.readAllBytes(file)
             if (bytes.isEmpty()) return@flatMap emptyList()
             val text = bytes.toString(Charsets.UTF_8)
@@ -844,10 +847,14 @@ class StabilityE2eTest : IntegrationTestBase() {
         }
 
     /** Polls until any fact matches [predicate]; null on timeout. */
-    private fun awaitTolerantFact(timeoutMs: Long, predicate: (TolerantFact) -> Boolean): TolerantFact? {
+    private fun awaitTolerantFact(
+        timeoutMs: Long,
+        files: List<Path> = outboxJsonlFiles(),
+        predicate: (TolerantFact) -> Boolean,
+    ): TolerantFact? {
         val deadline = System.currentTimeMillis() + timeoutMs
         while (System.currentTimeMillis() < deadline) {
-            tolerantFacts().firstOrNull(predicate)?.let { return it }
+            tolerantFacts(files).firstOrNull(predicate)?.let { return it }
             Thread.sleep(1_000)
         }
         return null
