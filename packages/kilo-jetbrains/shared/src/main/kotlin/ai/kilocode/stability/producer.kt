@@ -4,6 +4,7 @@ import ai.kilocode.KiloPlugin
 import com.intellij.ide.util.PropertiesComponent
 import com.intellij.openapi.application.ApplicationInfo
 import com.intellij.openapi.application.ApplicationManager
+import com.intellij.openapi.application.PathManager
 import com.intellij.platform.ide.productMode.IdeProductMode
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
@@ -24,10 +25,8 @@ private const val PRODUCER_PREFIX = "pr-"
 private const val RUN_PREFIX = "run-"
 private const val DEVICE_PREFIX = "device-"
 private const val WORKSPACE_PREFIX = "ws-"
-private const val SCOPE_PREFIX = "sc-"
 private const val RANDOM_ID_CHARS = 12
 private const val DEVICE_SETTING_KEY = "ai.kilocode.stability.device.id"
-private const val SCOPE_SETTING_KEY = "ai.kilocode.stability.scope.id"
 
 /** 内部随机短ID：UUID去连字符取前12个十六进制字符。 */
 internal fun randomId(): String = UUID.randomUUID().toString().replace("-", "").take(RANDOM_ID_CHARS)
@@ -79,35 +78,20 @@ fun platformDeviceIdStore(): DeviceIdStore = DeviceIdStore {
 
 /**
  * IDE安装范围持久随机标识（设计5.2）：同一IDE多次启动共享，用于识别前任文件
- * （plugin.unclean判定）与同源清理归属；不同IDE安装互不相同。存IDE持久设置，
- * 与device_id分开存储；实现不得抛出。
+ * （plugin.unclean判定）与同源清理归属；不同IDE安装互不相同。独立存于IDE配置目录，
+ * 与device_id分开存储；无法持久化时抛出，由服务边界关闭采集，绝不生成临时scope。
  */
 fun interface ScopeIdStore {
     fun loadOrCreate(): String
 }
 
 /**
- * 生产实现：与[platformDeviceIdStore]同型的PropertiesComponent持久化。平台应用不可得时
- * 退化为本轮进程内固定的随机值（缓存而非每次重抽）：scope-id在同一实例内必须稳定，
- * 否则同一安装的outbox文件名会漂移、前任文件无法识别。
+ * 公开PathManager API定位IDE配置目录；首次scope在返回前同步落盘，不依赖设置保存或EDT。
+ * 路径只用于本地存储，绝不进入telemetry。文件实现通过ScopeIdStore保持可注入。
  */
 fun platformScopeIdStore(): ScopeIdStore {
-    var cached: String? = null
-    return ScopeIdStore {
-        runCatching {
-            PropertiesComponent.getInstance().getValue(SCOPE_SETTING_KEY)
-                ?: (SCOPE_PREFIX + randomId()).also {
-                    PropertiesComponent.getInstance().setValue(SCOPE_SETTING_KEY, it)
-                    // setValue only dirties the in-memory component. Flush the application
-                    // settings before returning so a hard JVM kill cannot lose the scope.
-                    runCatching {
-                        val app = ApplicationManager.getApplication() ?: return@runCatching
-                        if (app.isDispatchThread) app.saveSettings()
-                        else app.invokeAndWait { app.saveSettings() }
-                    }
-                }
-        }.getOrElse { cached ?: (SCOPE_PREFIX + randomId()).also { cached = it } }
-    }
+    val store by lazy { FileScopeIdStore(PathManager.getConfigDir()) }
+    return ScopeIdStore { store.loadOrCreate() }
 }
 
 /**

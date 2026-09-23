@@ -132,7 +132,9 @@ cs-cloud的消费组件随daemon启动，在agent初始化之前完成组装，�
   outbox/<scope-id>.jsonl                   # 每个IDE安装范围一个，跨启动和插件版本追加
 ```
 
-producer_id为每JVM采集实例的随机标识，run_id为每次采集生命周期的随机标识，同进程多项目用随机workspace_id区分；scope-id是每个IDE安装范围持久的随机标识（存于IDE持久设置），同一IDE多次启动及插件升级共享，不同IDE互不相同。文件名只使用scope-id，因此同一IDE的新JVM继续追加同一文件，历史行仍以producer_id和run_id区分来源。正常产品运行依赖IntelliJ对同一配置目录的单应用实例约束，文件由当前JVM单写者追加；人为绕过单实例限制或并行启动共享同一配置目录的开发IDE不在v1支持范围，不为此引入跨进程锁。每行（含行尾LF）由一次write调用写入，行内字段自包含全部来源信息；不再有registrations发现目录、producer.json、锁文件及.open/.ready/.claimed/.done状态机——目录即发现，文件名即IDE身份，位移即确认。
+producer_id为每JVM采集实例的随机标识，run_id为每次采集生命周期的随机标识，同进程多项目用随机workspace_id区分；scope-id是每个IDE安装范围持久的随机标识（存于IDE配置目录的`kilo-stability-scope-id`文件），同一IDE多次启动及插件升级共享，不同IDE互不相同。文件名只使用scope-id，因此同一IDE的新JVM继续追加同一文件，历史行仍以producer_id和run_id区分来源。正常产品运行依赖IntelliJ对同一配置目录的单应用实例约束，文件由当前JVM单写者追加；人为绕过单实例限制或并行启动共享同一配置目录的开发IDE不在v1支持范围，不为此引入跨进程锁。每行（含行尾LF）由一次write调用写入，行内字段自包含全部来源信息；不再有registrations发现目录、producer.json、锁文件及.open/.ready/.claimed/.done状态机——目录即发现，文件名即IDE身份，位移即确认。
+
+scope文件通过公开`PathManager.getConfigDir()`定位，仅保存15字节随机ID，不保存或上报配置路径。首次创建或损坏重建时先写同目录临时文件，以`FileChannel.force(true)`同步后原子移动，再允许采集启动；不依赖IDE设置保存节流或EDT。合法文件直接复用，JVM内并发创建串行化。读取、同步或原子移动失败时，本次服务生命周期进入`init_failed`并关闭两用途，不生成临时scope或outbox；调用方仍取得关闭的采集入口，错误不传播到IDE业务。修复存储后重启IDE可重新初始化；此顺序保障进程强杀后的复用，不承诺操作系统断电后的目录项持久性。
 
 当前功能处于调试阶段，不兼容旧的`<scope-id>-<producer-id>.jsonl`布局。启用单文件布局时，插件删除本scope下的旧布局文件而不迁移其中事实；不同scope属于不同IDE安装范围，不得由插件删除。
 

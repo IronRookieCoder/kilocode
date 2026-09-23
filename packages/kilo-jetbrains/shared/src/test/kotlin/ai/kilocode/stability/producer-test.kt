@@ -86,6 +86,7 @@ private class Harness(
     mode: RunMode = RunMode("monolith", "monolith"),
     deviceStore: DeviceIdStore = MemoryDeviceStore("device-fixed"),
     awaitActiveHook: (Writer) -> Boolean = ::defaultAwaitActive,
+    store: ScopeIdStore = ScopeIdStore { "sc-fixed" },
 ) : AutoCloseable {
 
     val telemetryHome = base.resolve("home").resolve(".costrict").resolve("telemetry")
@@ -96,7 +97,7 @@ private class Harness(
     val service = StabilityService.create(
         scope = scope,
         modeSource = { mode },
-        scopeStore = ScopeIdStore { "sc-fixed" },
+        scopeStore = store,
         telemetryHome = telemetryHome,
         deviceStore = deviceStore,
         clock = clock,
@@ -696,11 +697,48 @@ class ProducerTest {
 
     @Test
     fun `scope id persists across store instances and matches the file name pattern`() {
-        val store = platformScopeIdStore() // 纯JVM环境：PropertiesComponent不可得时退化随机值
-        val scopeId = store.loadOrCreate()
-        assertTrue(scopeId.startsWith("sc-"), scopeId)
-        assertTrue(Regex("^[a-z0-9][a-z0-9-]*$").matches(scopeId), scopeId)
-        assertEquals(scopeId, store.loadOrCreate())
+        val dir = Files.createTempDirectory("stability-scope-reuse")
+        try {
+            val store = FileScopeIdStore(dir)
+            val id = store.loadOrCreate()
+            assertTrue(Regex("^sc-[0-9a-f]{12}$").matches(id), id)
+            assertEquals(id, store.loadOrCreate())
+            assertEquals(id, FileScopeIdStore(dir).loadOrCreate())
+        } finally {
+            Files.deleteIfExists(dir.resolve("kilo-stability-scope-id"))
+            Files.delete(dir)
+        }
+    }
+
+    @Test
+    fun `scope storage failure disables getters and never creates an outbox`() {
+        val dir = Files.createTempDirectory("stability-scope-failure")
+        val config = Files.createDirectory(dir.resolve("config"))
+        Files.createDirectory(config.resolve("kilo-stability-scope-id"))
+        Harness(base = dir, store = FileScopeIdStore(config)).use { harness ->
+            harness.service.start("monolith")
+            harness.awaitReason("init_failed")
+
+            javax.swing.SwingUtilities.invokeAndWait {
+                val recorder = harness.service.recorder
+                harness.service.operations
+                harness.service.faults
+                assertEquals(
+                    Admission.DISABLED,
+                    recorder.record(Draft("plugin.started", "lifecycle", "critical", JsonObject(emptyMap()))),
+                )
+            }
+            assertFalse(harness.service.status.value.metrics)
+            assertFalse(harness.service.status.value.logs)
+            assertFalse(Files.exists(harness.outbox))
+
+            harness.service.stop("unload")
+            harness.awaitReason("stopped_unload")
+            harness.service.recorder
+            assertEquals("stopped_unload", harness.service.status.value.reason)
+            assertFalse(harness.service.status.value.metrics)
+            assertFalse(harness.service.status.value.logs)
+        }
     }
 
     @Test

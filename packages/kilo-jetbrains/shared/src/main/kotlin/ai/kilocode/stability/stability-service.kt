@@ -157,6 +157,10 @@ class StabilityService private constructor(
     private var healthJob: Job? = null
     private var resourceGaugeJob: Job? = null
 
+    private val statusFlow = MutableStateFlow(
+        Coverage("unknown", "unknown", PROFILE_DEFAULT, metrics = false, logs = false, reason = REASON_STARTING),
+    )
+
     init {
         // F2（终审）：核心预热随服务构造在IO协程先行——控制文件读取与策略轮询线程不落在
         // 首次触达的EDT调用上（工具窗装配、diff内容创建等）；竞态先行到达时getter仍可
@@ -170,10 +174,6 @@ class StabilityService private constructor(
             }
         }
     }
-
-    private val statusFlow = MutableStateFlow(
-        Coverage("unknown", "unknown", PROFILE_DEFAULT, metrics = false, logs = false, reason = REASON_STARTING),
-    )
 
     /** 安全公开状态流。 */
     val status: StateFlow<Coverage> = statusFlow.asStateFlow()
@@ -264,7 +264,7 @@ class StabilityService private constructor(
         if (stoppedOnce.get()) return
         runMode = modeSource()
         ensureCore()
-        if (stoppedOnce.get()) {
+        if (stoppedOnce.get() || runFailure == REASON_INIT_FAILED) {
             runCatching { policies?.close() }
             return
         }
@@ -412,7 +412,7 @@ class StabilityService private constructor(
     private fun currentRunReason(): String = REASON_OK
 
     private fun setStatus(reason: String) {
-        val purposes = purposes()
+        val purposes = if (runFailure == REASON_INIT_FAILED || reason == REASON_INIT_FAILED) emptySet() else purposes()
         statusFlow.value = Coverage(
             mode = runMode.mode,
             side = runMode.side,
@@ -453,7 +453,7 @@ class StabilityService private constructor(
     private fun ensureCore(): ProducerIdentity = synchronized(stateLock) {
         val store = policies
             ?: PolicyStore(controlPath(), { clock.wall() }, pollIntervalMs).also { policies = it }
-        if (scopeId.isEmpty()) scopeId = scopeStore.loadOrCreate()
+        if (scopeId.isEmpty()) scopeId = restore()
         val identity = baseIdentity
             ?: ProducerEnvironment.snapshot(runMode, deviceStore.loadOrCreate(), connectionProviderHint)
                 .also { baseIdentity = it }
@@ -466,7 +466,21 @@ class StabilityService private constructor(
                 }
                 .also { standby = it }
         standbyFaults ?: Faults(standbyPair.first, clock).also { standbyFaults = it }
+        // scope不可持久化时保留关闭的入口供EDT安全调用；本次服务生命周期内不重试、不建writer。
+        if (runFailure == REASON_INIT_FAILED) {
+            standbyPair.first.close()
+            store.close()
+            if (!stoppedOnce.get()) setStatus(REASON_INIT_FAILED)
+        }
         identity
+    }
+
+    private fun restore(): String {
+        if (runFailure == REASON_INIT_FAILED) return ""
+        return runCatching { scopeStore.loadOrCreate() }.getOrElse {
+            runFailure = REASON_INIT_FAILED
+            ""
+        }
     }
 
     private fun lazyStandby(): Pair<Recorder, Operations> {
