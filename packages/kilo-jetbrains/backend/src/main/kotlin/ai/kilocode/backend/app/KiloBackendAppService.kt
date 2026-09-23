@@ -1466,16 +1466,39 @@ class HttpCapture(request: Request? = null, private val secrets: Set<String> = e
         "${it.first}: ${DiagnosticRedactor.field(it.first, it.second).text}"
     }
 
-    private fun text(snapshot: Snapshot, compressed: Boolean = false): String {
-        val bytes = snapshot.bytes.clone()
-        if (!compressed || bytes.size == 0L) return bytes.readUtf8()
-        val decoded = okio.Buffer()
+    private fun text(snapshot: Snapshot): String = snapshot.bytes.clone().readUtf8()
+
+    private data class Body(val text: String, val bytes: Long, val state: String)
+
+    private fun inflate(bytes: okio.Buffer, decoded: okio.Buffer) {
         okio.GzipSource(bytes).use { source ->
             while (decoded.size < LIMIT) {
                 if (source.read(decoded, LIMIT - decoded.size) < 0) break
             }
         }
-        return decoded.readUtf8()
+    }
+
+    private fun response(): Body {
+        val bytes = received.bytes.clone()
+        val truncated = received.count > bytes.size
+        if (!encoding.equals("gzip", ignoreCase = true)) {
+            return Body(bytes.readUtf8(), received.bytes.size, if (truncated) "truncated" else "complete")
+        }
+        val decoded = okio.Buffer()
+        val state = try {
+            inflate(bytes, decoded)
+            if (truncated || decoded.size == LIMIT.toLong()) "truncated" else "complete"
+        } catch (_: java.io.EOFException) {
+            // A bounded compressed snapshot can end before the gzip stream or trailer does.
+            if (truncated) "truncated" else "invalid_gzip"
+        } catch (_: java.io.IOException) {
+            "invalid_gzip" // Keep any decoded prefix; damage must not discard the other incident evidence.
+        }
+        val size = decoded.size
+        val content = decoded.readUtf8().ifEmpty {
+            if (state == "complete") "" else "[gzip response unavailable]"
+        }
+        return Body(content, size, state)
     }
 
     fun input(
@@ -1484,6 +1507,7 @@ class HttpCapture(request: Request? = null, private val secrets: Set<String> = e
         context: Map<String, String> = emptyMap(),
         descriptor: kotlinx.serialization.descriptors.SerialDescriptor? = null,
     ): DiagnosticInput {
+        val response = response()
         val info = status?.takeIf { it >= java.net.HttpURLConnection.HTTP_BAD_REQUEST }
             ?.let { ErrorClassifier.observe(error, it) }
             ?: descriptor?.takeIf { error is kotlinx.serialization.SerializationException }
@@ -1504,9 +1528,12 @@ class HttpCapture(request: Request? = null, private val secrets: Set<String> = e
             put("capture_limit", LIMIT.toString())
             put("request_captured_bytes", sent.bytes.size.toString())
             put("response_captured_bytes", received.bytes.size.toString())
+            put("response_decoded_bytes", response.bytes.toString())
+            put("response_capture", response.state)
+            put("response_capture_truncated", (response.state != "complete").toString())
         }, payloads = mapOf(
             "request" to { text(sent) },
-            "response" to { text(received, encoding.equals("gzip", ignoreCase = true)) },
+            "response" to { response.text },
             "headers" to { headers },
         ), secrets = secrets)
     }

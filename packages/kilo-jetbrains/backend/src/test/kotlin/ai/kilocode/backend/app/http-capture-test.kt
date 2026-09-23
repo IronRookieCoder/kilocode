@@ -2,17 +2,28 @@ package ai.kilocode.backend.app
 
 import ai.kilocode.stability.Fixture
 import ai.kilocode.stability.HttpFailure
+import java.io.ByteArrayOutputStream
+import java.io.IOException
 import java.net.InetAddress
 import java.net.ServerSocket
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.zip.Deflater
+import java.util.zip.GZIPOutputStream
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
+import kotlin.test.assertTrue
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody
+import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import okio.Buffer
@@ -117,6 +128,87 @@ class HttpCaptureTest {
                     http.dispatcher.executorService.shutdownNow()
                     http.connectionPool.evictAll()
                 }
+            }
+        }
+    }
+
+    @Test
+    fun `stored gzip capture keeps its decoded prefix and the rest of the incident`() {
+        val body = "stored response ".repeat(LIMIT)
+        val output = ByteArrayOutputStream()
+        object : GZIPOutputStream(output) {
+            init { def.setLevel(Deflater.NO_COMPRESSION) }
+        }.use { it.write(body.toByteArray()) }
+        val bytes = output.toByteArray()
+        assertTrue(bytes.size > LIMIT)
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setResponseCode(502).setHeader("Content-Encoding", "gzip")
+                .setBody(Buffer().write(bytes)))
+            val http = OkHttpClient()
+            try {
+                val request = Request.Builder().url(server.url("/stored")).post("request evidence".toRequestBody()).build()
+                val capture = HttpCapture(request)
+                capture.client(http).newCall(request).execute().use { assertEquals(body, it.body!!.string()) }
+                Fixture().use { fixture ->
+                    fixture.enableDiagnostics()
+                    fixture.operations.report(capture.input("http.gzip", HttpFailure(502, "failure evidence")))
+                    fixture.flush()
+                    val facts = fixture.facts()
+                    assertFalse(facts.any { it.name == "diagnostic.redaction_failed" })
+                    val incident = facts.single { it.name == "diagnostic.reported" }
+                    assertEquals("502", incident.data.getValue("http_status").jsonPrimitive.content)
+                    assertEquals("failure evidence", fixture.payload("message"))
+                    assertEquals("request evidence", fixture.payload("request"))
+                    assertTrue(fixture.payload("stack").contains("HttpFailure"))
+                    val prefix = fixture.payload("response")
+                    assertTrue(prefix.isNotEmpty() && prefix.length <= LIMIT)
+                    assertTrue(body.startsWith(prefix))
+                    val attributes = Json.parseToJsonElement(fixture.payload("attributes")).jsonObject
+                    assertEquals("truncated", attributes.getValue("response_capture").jsonPrimitive.content)
+                    assertEquals("true", attributes.getValue("response_capture_truncated").jsonPrimitive.content)
+                    assertEquals(LIMIT.toString(), attributes.getValue("response_captured_bytes").jsonPrimitive.content)
+                    assertTrue(attributes.getValue("response_decoded_bytes").jsonPrimitive.content.toInt() in 1..LIMIT)
+                }
+            } finally {
+                http.dispatcher.executorService.shutdownNow()
+                http.connectionPool.evictAll()
+            }
+        }
+    }
+
+    @Test
+    fun `corrupt gzip uses a safe fallback without losing the HTTP incident`() {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setResponseCode(502).setHeader("Content-Encoding", "gzip")
+                .setBody("not a gzip header with opaque-secret"))
+            val http = OkHttpClient()
+            try {
+                val request = Request.Builder().url(server.url("/corrupt")).post("request evidence".toRequestBody()).build()
+                val capture = HttpCapture(request, setOf("opaque-secret"))
+                val error = assertFailsWith<IOException> {
+                    capture.client(http).newCall(request).execute().use { it.body!!.string() }
+                }
+                Fixture().use { fixture ->
+                    fixture.enableDiagnostics()
+                    fixture.operations.report(capture.input("http.gzip", error))
+                    fixture.flush()
+                    val facts = fixture.facts()
+                    assertFalse(facts.any { it.name == "diagnostic.redaction_failed" })
+                    assertFalse(facts.joinToString().contains("opaque-secret"))
+                    val incident = facts.single { it.name == "diagnostic.reported" }
+                    assertEquals("502", incident.data.getValue("http_status").jsonPrimitive.content)
+                    assertEquals(error.message, fixture.payload("message"))
+                    assertEquals("request evidence", fixture.payload("request"))
+                    assertTrue(fixture.payload("stack").contains("IOException"))
+                    assertEquals("[gzip response unavailable]", fixture.payload("response"))
+                    val attributes = Json.parseToJsonElement(fixture.payload("attributes")).jsonObject
+                    assertEquals("invalid_gzip", attributes.getValue("response_capture").jsonPrimitive.content)
+                    assertEquals("true", attributes.getValue("response_capture_truncated").jsonPrimitive.content)
+                    assertEquals("0", attributes.getValue("response_decoded_bytes").jsonPrimitive.content)
+                }
+            } finally {
+                http.dispatcher.executorService.shutdownNow()
+                http.connectionPool.evictAll()
             }
         }
     }
