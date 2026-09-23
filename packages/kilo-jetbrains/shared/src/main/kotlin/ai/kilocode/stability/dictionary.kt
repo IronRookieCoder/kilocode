@@ -11,7 +11,7 @@ import kotlinx.serialization.json.doubleOrNull
 import kotlinx.serialization.json.longOrNull
 
 /** data字段允许的取值形态。 */
-private enum class FieldType { STRING, INTEGER, POSITIVE_INTEGER, BOOLEAN, STRING_LIST, RATE }
+private enum class FieldType { STRING, TEXT, INTEGER, NON_NEGATIVE_INTEGER, POSITIVE_INTEGER, BOOLEAN, STRING_LIST, RATE }
 
 /** 单个data键的白名单规则：类型、可选受控词表、UTF-8字节上限。 */
 private class KeyRule(
@@ -28,6 +28,7 @@ private class EventSpec(
     val keys: Map<String, KeyRule>,
     val required: Set<String>,
     val branches: List<Set<String>>,
+    val version: String = "1.0",
 ) {
     /** 专属键与必填键皆空、无分支要求的事件（如plugin.started）允许空data；operation必须携带phase。 */
     val allowsEmptyData: Boolean = required.isEmpty() && branches.isEmpty() && kind != KIND_OPERATION
@@ -38,7 +39,7 @@ private class PhaseRule(val required: Set<String>, val keys: Map<String, KeyRule
 
 private val CHANNELS = setOf("critical", "diagnostic")
 private val PURPOSES = setOf("metrics", "logs")
-private val CONTEXT_KEYS = setOf("operation_id", "attempt_id", "fault_id", "trace_id", "workspace_id")
+private val CONTEXT_KEYS = setOf("operation_id", "attempt_id", "fault_id", "trace_id", "workspace_id", "incident_id")
 
 /** 拒绝消息的内部键（recorder需区分“请求用途为空”与结构性违规：前者走禁采而非丢弃）。 */
 internal const val PURPOSES_EMPTY = "purposes must not be empty"
@@ -62,6 +63,7 @@ private val DUAL_PURPOSE_NAMES = setOf(
     "action", "ide.operation", "telemetry.health", "protocol.error", "edt.violation",
 )
 private val ERROR_NAMES = setOf("error.uncaught", "error.reported")
+private val DIAGNOSTIC_NAMES = setOf("diagnostic.reported", "diagnostic.payload", "diagnostic.redaction_failed")
 private val PURPOSES_METRICS_ONLY = setOf("metrics")
 private val PURPOSES_LOGS_ONLY = setOf("logs")
 private val PURPOSES_DUAL = setOf("metrics", "logs")
@@ -112,13 +114,14 @@ private val MIGRATION_KINDS = setOf("legacy_v5")
 
 /** 长度上限按UTF-8字节数执行（设计6.1）；writer落盘前以真实编码再核对32KiB。 */
 private const val MAX_RECORD_BYTES = 32 * 1024
-private const val MAX_CONTEXT_KEYS = 5
+private const val MAX_CONTEXT_KEYS = 6
 private const val ID_BYTES = 128
 private const val CONTEXT_VALUE_BYTES = 128
 private const val EPOCH_BYTES = 64
 private const val STAGE_BYTES = 32
 private const val STRING_BYTES = 64
 private const val MESSAGE_BYTES = 512
+private const val DETAIL_BYTES = 16 * 1024
 private const val FRAME_BYTES = 256
 private const val LIST_ITEMS = 5
 private const val MIN_RATE = 0.0
@@ -127,6 +130,21 @@ private const val CONTROL_LIMIT = 0x20
 private const val DEL_CODE = 0x7f
 
 private const val KIND_OPERATION = "operation"
+private val VERSIONS = Regex("^[0-9]+\\.[0-9]+$")
+private val SEVERITIES = setOf("warn", "error")
+private val ENCODINGS = setOf("utf8", "base64")
+private val PAYLOAD_FIELDS = setOf(
+    "incident_id", "payload_kind", "chunk_index", "chunk_count", "encoding",
+    "content", "original_bytes", "sha256", "truncated",
+)
+private val DIAGNOSTIC_FIELDS = setOf(
+    "severity", "component", "code", "message", "exception_type", "cause_chain", "suppressed_count",
+    "thread_name", "thread_id", "frames", "method", "route", "http_status", "content_type",
+    "payload_bytes", "json_path", "expected_type", "actual_type", "payload_refs", "truncated",
+)
+private val DIAGNOSTIC_REQUIRED = setOf(
+    "severity", "component", "code", "message", "thread_name", "thread_id", "payload_refs", "truncated",
+)
 
 /** operation的phase规则：终态字段只允许出现在end，start只允许deadline_ms。 */
 private val PHASE_RULES: Map<String, PhaseRule> = mapOf(
@@ -184,6 +202,7 @@ object Dictionary {
      * 禁用一种用途后不得经默认Draft重新加回。
      */
     fun purposes(name: String, data: JsonObject): Set<String> = when {
+        name in DIAGNOSTIC_NAMES -> PURPOSES_LOGS_ONLY
         name in ERROR_NAMES -> when (data.keys) {
             ERROR_COUNT_KEYS -> PURPOSES_METRICS_ONLY
             ERROR_DETAIL_KEYS -> PURPOSES_LOGS_ONLY
@@ -197,10 +216,16 @@ object Dictionary {
     /** 白名单校验：合法返回true；任何拒绝都不抛异常，由recorder计数。 */
     fun validate(draft: Draft): Boolean = violations(draft).isEmpty()
 
+    /** 分片组的校验补足单条记录无法判断的重复索引约束。 */
+    fun validate(drafts: List<Draft>): Boolean = violations(drafts).isEmpty()
+
     /** 返回全部拒绝原因，供recorder计数与本地限频日志使用；合法输入返回空列表。 */
     fun violations(draft: Draft): List<String> = buildList {
         val spec = SPEC_TABLE[draft.name] ?: return listOf("unregistered event name '${draft.name}'")
         if (draft.kind != spec.kind) add("kind '${draft.kind}' does not match registered kind '${spec.kind}'")
+        if (!VERSIONS.matches(draft.schemaVersion) || draft.schemaVersion != spec.version) {
+            add("schema version '${draft.schemaVersion}' does not match '${spec.version}'")
+        }
         if (draft.channel !in CHANNELS) add("channel '${draft.channel}' is outside $CHANNELS")
         if (draft.purposes.isEmpty()) add(PURPOSES_EMPTY)
         draft.purposes.filterNot { it in PURPOSES }.forEach { add("purpose '$it' is outside $PURPOSES") }
@@ -214,8 +239,26 @@ object Dictionary {
             if (key !in CONTEXT_KEYS) add("context key '$key' is outside the closed set")
             else if (!boundedText(value, CONTEXT_VALUE_BYTES)) add("context value for '$key' violates the id bounds")
         }
+        if (spec.version == "2.0" && "incident_id" !in draft.context) add("v2 diagnostic requires incident_id context")
+        if (spec.version == "2.0" && draft.purposes != PURPOSES_LOGS_ONLY) add("v2 diagnostics require logs-only purposes")
         addAll(dataViolations(spec, draft.data))
         if (estimateRecord(draft) >= MAX_RECORD_BYTES) add("estimated record size exceeds the 32KiB budget")
+    }
+
+    /** 跨记录校验只约束同一incident、同一种payload内的chunk_index唯一性。 */
+    fun violations(drafts: List<Draft>): List<String> {
+        val problems = drafts.flatMap { draft -> violations(draft) }.toMutableList()
+        if (problems.isNotEmpty()) return problems
+        val chunks = drafts.filter { draft -> draft.name == "diagnostic.payload" }
+        val indexes = chunks.map { draft ->
+            Triple(
+                (draft.data["incident_id"] as JsonPrimitive).content,
+                (draft.data["payload_kind"] as JsonPrimitive).content,
+                (draft.data["chunk_index"] as JsonPrimitive).longOrNull!!,
+            )
+        }
+        if (indexes.size != indexes.toSet().size) problems += "payload chunk indexes must be unique per incident and kind"
+        return problems
     }
 
     private fun dataViolations(spec: EventSpec, data: JsonObject): List<String> {
@@ -248,6 +291,13 @@ object Dictionary {
             else problems += valueViolations(key, rule, value)
         }
         required.filterNot { it in data }.forEach { problems += "data key '$it' is required for '${spec.name}'" }
+        if (spec.name == "diagnostic.payload") {
+            val index = (data["chunk_index"] as? JsonPrimitive)?.longOrNull
+            val count = (data["chunk_count"] as? JsonPrimitive)?.longOrNull
+            if (index != null && count != null && index >= count) problems += "payload chunk_index must be below chunk_count"
+            val incident = data["incident_id"]?.let { value -> (value as? JsonPrimitive)?.contentOrNull }
+            if (incident == null) problems += "payload incident_id must be text"
+        }
         return problems
     }
 
@@ -260,6 +310,11 @@ object Dictionary {
             listOf("data key '$key' must be a string")
         } else {
             stringViolations(key, value.content, rule)
+        }
+        rule.type == FieldType.TEXT -> if (!value.isString) {
+            listOf("data key '$key' must be text")
+        } else {
+            textViolations(key, value.content, rule)
         }
         rule.type == FieldType.BOOLEAN ->
             if (value.booleanOrNull == null) listOf("data key '$key' must be a boolean") else emptyList()
@@ -300,6 +355,13 @@ object Dictionary {
         }
     }
 
+    /** 高保真详情允许换行、路径分隔符等原始文本，只保留UTF-8总量边界。 */
+    private fun textViolations(key: String, value: String, rule: KeyRule): List<String> = when {
+        value.isEmpty() -> listOf("data key '$key' must not be empty")
+        value.encodeToByteArray().size > rule.maxBytes -> listOf("data key '$key' exceeds ${rule.maxBytes} utf-8 bytes")
+        else -> emptyList()
+    }
+
     private fun numberViolations(key: String, rule: KeyRule, value: JsonPrimitive): List<String> {
         if (rule.type == FieldType.RATE) {
             val rate = value.doubleOrNull
@@ -338,8 +400,9 @@ object Dictionary {
             keys: List<Pair<String, KeyRule>> = emptyList(),
             required: Set<String> = emptySet(),
             branches: List<Set<String>> = emptyList(),
+            version: String = "1.0",
         ) {
-            put(name, EventSpec(name, kind, keys.toMap(), required, branches))
+            put(name, EventSpec(name, kind, keys.toMap(), required, branches, version))
         }
 
         fun key(name: String, type: FieldType, allowed: Set<String> = emptySet(), maxBytes: Int = STRING_BYTES) =
@@ -356,6 +419,41 @@ object Dictionary {
             key("count", FieldType.POSITIVE_INTEGER),
         )
         val errorBranches = listOf(ERROR_COUNT_KEYS, ERROR_DETAIL_KEYS)
+        val diagnosticKeys = listOf(
+            key("severity", FieldType.STRING, SEVERITIES),
+            key("component", FieldType.STRING),
+            key("code", FieldType.STRING),
+            key("message", FieldType.TEXT, maxBytes = DETAIL_BYTES),
+            key("exception_type", FieldType.STRING),
+            key("cause_chain", FieldType.TEXT, maxBytes = DETAIL_BYTES),
+            key("suppressed_count", FieldType.NON_NEGATIVE_INTEGER),
+            key("thread_name", FieldType.STRING),
+            key("thread_id", FieldType.NON_NEGATIVE_INTEGER),
+            key("frames", FieldType.TEXT, maxBytes = DETAIL_BYTES),
+            key("method", FieldType.STRING),
+            key("route", FieldType.TEXT),
+            key("http_status", FieldType.NON_NEGATIVE_INTEGER),
+            key("content_type", FieldType.STRING),
+            key("payload_bytes", FieldType.NON_NEGATIVE_INTEGER),
+            key("json_path", FieldType.TEXT),
+            key("expected_type", FieldType.STRING),
+            key("actual_type", FieldType.STRING),
+            key("payload_refs", FieldType.STRING_LIST),
+            key("truncated", FieldType.BOOLEAN),
+        )
+        val payloadKeys = listOf(
+            key("incident_id", FieldType.STRING, maxBytes = ID_BYTES),
+            key("payload_kind", FieldType.STRING),
+            key("chunk_index", FieldType.NON_NEGATIVE_INTEGER),
+            key("chunk_count", FieldType.POSITIVE_INTEGER),
+            key("encoding", FieldType.STRING, ENCODINGS),
+            key("content", FieldType.TEXT, maxBytes = MAX_RECORD_BYTES),
+            key("original_bytes", FieldType.NON_NEGATIVE_INTEGER),
+            key("sha256", FieldType.STRING, maxBytes = 64),
+            key("truncated", FieldType.BOOLEAN),
+        )
+        check(diagnosticKeys.map { pair -> pair.first }.toSet() == DIAGNOSTIC_FIELDS)
+        check(payloadKeys.map { pair -> pair.first }.toSet() == PAYLOAD_FIELDS)
 
         spec("plugin.started", "lifecycle")
         spec(
@@ -469,6 +567,9 @@ object Dictionary {
         )
         spec("error.uncaught", "diagnostic", keys = errorKeys, branches = errorBranches)
         spec("error.reported", "diagnostic", keys = errorKeys, branches = errorBranches)
+        spec("diagnostic.reported", "diagnostic", diagnosticKeys, DIAGNOSTIC_REQUIRED, version = "2.0")
+        spec("diagnostic.redaction_failed", "diagnostic", diagnosticKeys, DIAGNOSTIC_REQUIRED, version = "2.0")
+        spec("diagnostic.payload", "diagnostic", payloadKeys, PAYLOAD_FIELDS, version = "2.0")
         spec(
             "protocol.error", "diagnostic",
             keys = listOf(

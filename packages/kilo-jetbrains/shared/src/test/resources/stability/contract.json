@@ -8,5 +8,6 @@
   "append_rewrite_contention_verified": false,
   "offset_commit_verified": false,
   "logs_contract_verified": false,
-  "default_profile_verified": false
+  "default_profile_verified": false,
+  "fact_schema_v2_verified": false
 }

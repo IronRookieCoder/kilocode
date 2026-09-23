@@ -109,6 +109,7 @@ class ContractTest {
 
         val context = properties.getValue("context").jsonObject
         assertEquals(false, context.getValue("additionalProperties").jsonPrimitive.boolean)
+        assertEquals(6, context.getValue("maxProperties").jsonPrimitive.int)
         assertEquals(CONTEXT_KEYS, context.getValue("properties").jsonObject.keys.toList())
 
         val data = properties.getValue("data").jsonObject
@@ -200,14 +201,17 @@ class ContractTest {
         }
         val rateLimit = properties.getValue("log_detail_rate_limit").jsonObject
         assertEquals(false, rateLimit.getValue("additionalProperties").jsonPrimitive.boolean)
+        val accepted = properties.getValue("accepted_fact_schema_majors").jsonObject
+        assertEquals(true, accepted.getValue("uniqueItems").jsonPrimitive.boolean)
+        assertEquals(1, accepted.getValue("items").jsonObject.getValue("minimum").jsonPrimitive.int)
     }
 
     @Test
     fun `output vectors declare constraints until output identity is frozen`() {
         val json = loadObject("output-vectors.json")
         assertEquals(SUPPORTED_SCHEMA_MAJOR, json.getValue("schema_major").jsonPrimitive.int)
-        assertEquals("pending_freeze", json.getValue("status").jsonPrimitive.content)
-        assertEquals(emptyList(), json.getValue("vectors").jsonArray.map { it.jsonPrimitive.content })
+        assertEquals("frozen", json.getValue("status").jsonPrimitive.content)
+        assertEquals(4, json.getValue("vectors").jsonArray.size)
 
         // UUIDv5 命名空间冻结已废止：输出ID生成方案归 cs-cloud 内部，本契约只冻结约束声明。
         listOf("namespace", "array_encoding", "pending_vectors").forEach { retired ->
@@ -224,6 +228,54 @@ class ContractTest {
         assertEquals(128, limits.getValue("logs_event_id_max_chars").jsonPrimitive.int)
         listOf("determinism", "distinctness", "generation_owner").forEach { key ->
             assertTrue(constraints.getValue(key).jsonPrimitive.content.isNotBlank(), "$key must state a constraint")
+        }
+    }
+
+    @Test
+    fun `v2 diagnostic drafts require incident context and logs`() {
+        val parent = Draft(
+            name = "diagnostic.reported",
+            kind = "diagnostic",
+            channel = "diagnostic",
+            context = mapOf("incident_id" to "inc-1", "operation_id" to "op-1"),
+            purposes = setOf("logs"),
+            schemaVersion = "2.0",
+            data = buildJsonObject {
+                put("severity", "error")
+                put("component", "backend.rpc")
+                put("code", "json_decode_failed")
+                put("message", "Expected object at $.projectID")
+                put("thread_name", "DefaultDispatcher-worker-1")
+                put("thread_id", 42)
+                putJsonArray("payload_refs") { add("response") }
+                put("truncated", false)
+            },
+        )
+        val first = diagnosticChunk("response", 0)
+        val second = diagnosticChunk("response", 1)
+
+        assertTrue(Dictionary.validate(parent))
+        assertTrue(Dictionary.validate(listOf(first, second)))
+        assertFalse(Dictionary.validate(parent.with(purposes = setOf("metrics"))))
+        assertFalse(Dictionary.validate(parent.with(context = mapOf("operation_id" to "op-1"))))
+        assertFalse(Dictionary.validate(parent.with(data = parent.data.with("severity", "fatal"))))
+        assertFalse(Dictionary.validate(listOf(first, diagnosticChunk("response", 0))))
+        assertFalse(Dictionary.validate(diagnosticChunk("response", 2)))
+        assertFalse(Dictionary.validate(diagnosticChunk("response", 0, encoding = "hex")))
+    }
+
+    @Test
+    fun `output vectors retain mixed v1 and v2 facts`() {
+        val json = loadObject("output-vectors.json")
+        val facts = json.getValue("vectors").jsonArray.map { vector ->
+            Json.decodeFromJsonElement(Fact.serializer(), vector)
+        }
+
+        assertEquals(listOf("1.0", "2.0", "2.0", "2.0"), facts.map { fact -> fact.schema_version })
+        assertEquals(listOf("action", "diagnostic.reported", "diagnostic.payload", "diagnostic.payload"), facts.map { fact -> fact.name })
+        val wire = Json { encodeDefaults = true }
+        facts.forEachIndexed { index, fact ->
+            assertEquals(json.getValue("vectors").jsonArray[index], wire.encodeToJsonElement(Fact.serializer(), fact))
         }
     }
 
@@ -246,6 +298,35 @@ class ContractTest {
         val verified = flags.entries.joinToString(",") { "\"${it.key}\": ${it.value}" }
         return "{\"schema_major\": $schemaMajor, $verified}"
     }
+
+    private fun diagnosticChunk(kind: String, index: Int, encoding: String = "utf8"): Draft = Draft(
+        name = "diagnostic.payload",
+        kind = "diagnostic",
+        channel = "diagnostic",
+        context = mapOf("incident_id" to "inc-1"),
+        purposes = setOf("logs"),
+        schemaVersion = "2.0",
+        data = buildJsonObject {
+            put("incident_id", "inc-1")
+            put("payload_kind", kind)
+            put("chunk_index", index)
+            put("chunk_count", 2)
+            put("encoding", encoding)
+            put("content", "chunk-$index")
+            put("original_bytes", 14)
+            put("sha256", "a".repeat(64))
+            put("truncated", false)
+        },
+    )
+
+    private fun Draft.with(
+        data: JsonObject = this.data,
+        context: Map<String, String> = this.context,
+        purposes: Set<String> = this.purposes,
+    ): Draft = Draft(name, kind, channel, data, context, epoch, purposes, schemaVersion)
+
+    private fun JsonObject.with(key: String, value: String): JsonObject =
+        JsonObject(LinkedHashMap(this).apply { put(key, JsonPrimitive(value)) })
 
     /** 按 fact-schema.json 冻结的 data 外壳约束校验：键 pattern、值为标量或不超过上限的字符串数组。 */
     private fun dataShellViolations(data: JsonObject): List<String> {
@@ -285,6 +366,7 @@ class ContractTest {
             "offset_commit_verified",
             "logs_contract_verified",
             "default_profile_verified",
+            "fact_schema_v2_verified",
         )
 
         /** 设计6.1公共字段：除可选 context 外全部必填。 */
@@ -296,7 +378,7 @@ class ContractTest {
             "connection_provider", "kind", "name", "data",
         )
 
-        val CONTEXT_KEYS = listOf("operation_id", "attempt_id", "fault_id", "trace_id", "workspace_id")
+        val CONTEXT_KEYS = listOf("operation_id", "attempt_id", "fault_id", "trace_id", "workspace_id", "incident_id")
 
         /** 设计第9章事件字典登记的 name。 */
         val EVENT_NAMES = listOf(
@@ -305,6 +387,7 @@ class ContractTest {
             "connection.state_changed", "connection.recovery", "csc.install", "csc.start",
             "credentials.ready", "cli.download", "migration.required", "session.open",
             "session.restore", "action", "availability", "error.uncaught", "error.reported",
+            "diagnostic.reported", "diagnostic.payload", "diagnostic.redaction_failed",
             "protocol.error", "telemetry.health", "session.dispose_risk", "rpc",
             "edt.delay", "edt.violation", "edt.stall", "render.apply", "ide.operation", "resource.snapshot",
         )

@@ -144,7 +144,7 @@ class Recorder private constructor(
             return Admission.DROPPED
         }
         val now = clock.wall()
-        val permitted = policy.permit(now, draft.name, category(draft.channel, draft.data))
+        val permitted = policy.permit(now, draft.name, category(draft.channel, draft.data), draft.schemaVersion.substringBefore('.').toIntOrNull() ?: 0)
         val purposes = buildSet {
             draft.purposes.forEach { purpose ->
                 if (purpose in permitted && purpose in Dictionary.purposes(draft.name, draft.data)) add(purpose)
@@ -239,6 +239,7 @@ class Recorder private constructor(
     ): Fact {
         val identity = requireNotNull(identity)
         return Fact(
+            schema_version = draft.schemaVersion,
             event_id = UUID.randomUUID().toString(),
             timestamp = timestamp,
             producer_id = identity.producerId,

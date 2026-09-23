@@ -78,6 +78,28 @@ class PolicyTest {
     }
 
     @Test
+    fun `v1-only consumer suppresses v2 diagnostics without suppressing v1 metrics`() {
+        val v1 = readyPolicy()
+        assertTrue("metrics" in v1.permit(2_000, "action", schema = 1))
+        assertEquals(emptySet(), v1.permit(2_000, "diagnostic.reported", "diagnostic", schema = 2))
+
+        val v2 = readyPolicy(logs = Permit(true, 3_000, setOf("diagnostic.reported")), accepted = setOf(1, 2))
+        assertEquals(setOf("logs"), v2.permit(2_000, "diagnostic.reported", "diagnostic", schema = 2))
+    }
+
+    @Test
+    fun `control parser defaults missing fact capability to v1 and accepts v2 explicitly`() {
+        val v1 = newStore(writeControl(controlJson())) { 2_000L }
+        assertEquals(setOf(1), v1.current().accepted)
+
+        val v2 = newStore(writeControl(controlJson(accepted = listOf(1, 2)))) { 2_000L }
+        assertEquals(setOf(1, 2), v2.current().accepted)
+
+        val invalid = newStore(writeControl(controlJson(accepted = listOf(2, 2)))) { 2_000L }
+        assertEquals(setOf(1), invalid.current().accepted)
+    }
+
+    @Test
     fun `absent purpose permit closes only that purpose`() {
         assertEquals(setOf("logs"), readyPolicy(metrics = null).permit(2_000, "action"))
         assertEquals(setOf("metrics"), readyPolicy(logs = null).permit(2_000, "action"))
@@ -388,7 +410,8 @@ class PolicyTest {
         logsExpires: Long = 3_000,
         metrics: Permit? = Permit(true, metricsExpires, setOf("action")),
         logs: Permit? = Permit(true, logsExpires, setOf("action")),
-    ): Policy = Policy(major, 12, true, "acct-a", state, commonExpires, metrics, logs)
+        accepted: Set<Int> = setOf(1),
+    ): Policy = Policy(major, 12, true, "acct-a", state, commonExpires, metrics, logs, accepted = accepted)
 
     /** 真实wire形状（G0 control-schema.json字段闭集）；null参数表示该字段整体缺失。 */
     private fun controlJson(
@@ -405,6 +428,7 @@ class PolicyTest {
         state: String = "ready",
         expires: Long = 9_000,
         rateLimit: Int? = 3,
+        accepted: List<Int>? = null,
     ): String = buildJsonObject {
         put("schema_major", major)
         put("revision", revision)
@@ -419,5 +443,6 @@ class PolicyTest {
         put("account_state", state)
         put("expires_at", expires)
         if (rateLimit != null) putJsonObject("log_detail_rate_limit") { put("per_fingerprint_max_per_minute", rateLimit) }
+        if (accepted != null) putJsonArray("accepted_fact_schema_majors") { accepted.forEach { major -> add(major) } }
     }.toString()
 }

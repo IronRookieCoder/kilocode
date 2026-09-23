@@ -1,11 +1,52 @@
 {
   "schema_major": 1,
-  "status": "pending_freeze",
+  "status": "frozen",
   "constraints": {
     "determinism": "同输入重放生成的输出ID及内容不变，重试与崩溃恢复不换ID",
     "distinctness": "同事实不同sink或输出名得到不同ID；累计类输出使用持久化聚合键与输出序号（聚合键含producer/run、account_epoch、用途、指标及登记标签、映射版本）",
     "length_limits": {"metrics_event_id_max_chars": 64, "logs_event_id_max_chars": 128},
     "generation_owner": "cs-cloud内部实现细节，由其仓库自定并测试，不在本契约冻结"
   },
-  "vectors": []
+  "vectors": [
+    {
+      "schema_version": "1.0", "event_id": "00000000-0000-0000-0000-000000000001", "timestamp": 1789862400250,
+      "producer_id": "pr-vectors", "run_id": "run-vectors", "channel": "critical", "seq": 1,
+      "account_epoch": "acct-vectors", "policy_revision": 12, "purposes": ["metrics"], "source": "jetbrains-plugin",
+      "device_id": "device-vectors", "plugin_version": "1.0.0", "ide_product": "IU", "ide_build": "261.1",
+      "ide_build_major": "2026.1", "os_family": "windows", "arch": "x64", "env": "test", "mode": "monolith",
+      "side": "monolith", "connection_provider": "kilo-cli", "kind": "operation", "name": "action",
+      "context": {"operation_id": "op-1"},
+      "data": {"phase": "end", "action": "prompt_submit", "result": "success", "duration_ms": 1, "stage": "unknown", "cause": "unknown", "error_code": "none"}
+    },
+    {
+      "schema_version": "2.0", "event_id": "00000000-0000-0000-0000-000000000002", "timestamp": 1789862400251,
+      "producer_id": "pr-vectors", "run_id": "run-vectors", "channel": "diagnostic", "seq": 1,
+      "account_epoch": "acct-vectors", "policy_revision": 12, "purposes": ["logs"], "source": "jetbrains-plugin",
+      "device_id": "device-vectors", "plugin_version": "1.0.0", "ide_product": "IU", "ide_build": "261.1",
+      "ide_build_major": "2026.1", "os_family": "windows", "arch": "x64", "env": "test", "mode": "monolith",
+      "side": "monolith", "connection_provider": "kilo-cli", "kind": "diagnostic", "name": "diagnostic.reported",
+      "context": {"incident_id": "inc-1", "operation_id": "op-1"},
+      "data": {"severity": "error", "component": "backend.rpc", "code": "json_decode_failed", "message": "Expected object at $.projectID", "thread_name": "DefaultDispatcher-worker-1", "thread_id": 42, "payload_refs": ["response"], "truncated": false}
+    },
+    {
+      "schema_version": "2.0", "event_id": "00000000-0000-0000-0000-000000000003", "timestamp": 1789862400252,
+      "producer_id": "pr-vectors", "run_id": "run-vectors", "channel": "diagnostic", "seq": 2,
+      "account_epoch": "acct-vectors", "policy_revision": 12, "purposes": ["logs"], "source": "jetbrains-plugin",
+      "device_id": "device-vectors", "plugin_version": "1.0.0", "ide_product": "IU", "ide_build": "261.1",
+      "ide_build_major": "2026.1", "os_family": "windows", "arch": "x64", "env": "test", "mode": "monolith",
+      "side": "monolith", "connection_provider": "kilo-cli", "kind": "diagnostic", "name": "diagnostic.payload",
+      "context": {"incident_id": "inc-1"},
+      "data": {"incident_id": "inc-1", "payload_kind": "response", "chunk_index": 0, "chunk_count": 2, "encoding": "utf8", "content": "first", "original_bytes": 11, "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "truncated": false}
+    },
+    {
+      "schema_version": "2.0", "event_id": "00000000-0000-0000-0000-000000000004", "timestamp": 1789862400253,
+      "producer_id": "pr-vectors", "run_id": "run-vectors", "channel": "diagnostic", "seq": 3,
+      "account_epoch": "acct-vectors", "policy_revision": 12, "purposes": ["logs"], "source": "jetbrains-plugin",
+      "device_id": "device-vectors", "plugin_version": "1.0.0", "ide_product": "IU", "ide_build": "261.1",
+      "ide_build_major": "2026.1", "os_family": "windows", "arch": "x64", "env": "test", "mode": "monolith",
+      "side": "monolith", "connection_provider": "kilo-cli", "kind": "diagnostic", "name": "diagnostic.payload",
+      "context": {"incident_id": "inc-1"},
+      "data": {"incident_id": "inc-1", "payload_kind": "response", "chunk_index": 1, "chunk_count": 2, "encoding": "utf8", "content": "second", "original_bytes": 11, "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "truncated": false}
+    }
+  ]
 }

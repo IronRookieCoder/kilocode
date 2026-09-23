@@ -3,11 +3,14 @@ package ai.kilocode.stability
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.add
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
+import kotlinx.serialization.json.putJsonArray
 import kotlin.io.path.writeText
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 /** 与Fixture.defaultControl同形状的wire控制文件，许可位可调（categories随用途开关）。 */
@@ -79,6 +82,24 @@ private fun fields(vararg pairs: Pair<String, String>): JsonObject = buildJsonOb
     pairs.forEach { (k, v) -> put(k, v) }
 }
 
+private fun chunk(index: Int): Draft = Draft(
+    "diagnostic.payload", "diagnostic", "diagnostic",
+    buildJsonObject {
+        put("incident_id", "inc-1")
+        put("payload_kind", "response")
+        put("chunk_index", index)
+        put("chunk_count", 2)
+        put("encoding", "utf8")
+        put("content", "chunk-$index")
+        put("original_bytes", 14)
+        put("sha256", "a".repeat(64))
+        put("truncated", false)
+    },
+    context = mapOf("incident_id" to "inc-1"),
+    purposes = LOGS,
+    schemaVersion = "2.0",
+)
+
 /**
  * 扫描用tick：全量覆盖断言要求突发写入零丢弃，而writer后台tick的tryClaim/release与
  * 生产者tryLock争用会把突发中的记录按CONTENTION计丢（fail-open语义，对逐name闭集断言
@@ -111,14 +132,14 @@ class DictionarySweepTest {
             // （error两形态期望键对应error.reported/error.uncaught两个登记名）；
             // 字典新增name而本扫描未补形态/驱动时，在此先失败 ——
             assertEquals(
-                Dictionary.names.filter { !it.startsWith("error.") }.toSet(),
+                Dictionary.names.filter { !it.startsWith("error.") && !it.startsWith("diagnostic.") }.toSet(),
                 EXPECTED.keys.filter { !it.startsWith("error.") }.toSet(),
                 "EXPECTED must project exactly the registered non-error names",
             )
             assertEquals(setOf("error.reported", "error.uncaught"), Dictionary.names.filter { it.startsWith("error.") }.toSet())
 
             // —— 覆盖：每个登记name至少一条（error族按形态核对）——
-            val names = facts.map { it.name }.filter { !it.startsWith("error.") }.toSet()
+            val names = facts.map { it.name }.filter { !it.startsWith("error.") && !it.startsWith("diagnostic.") }.toSet()
             val expectedNames = EXPECTED.keys
                 .filter { !it.startsWith("error.") } // error两形态单独断言
                 .toSet()
@@ -177,6 +198,39 @@ class DictionarySweepTest {
             assertEquals(
                 setOf("operation", "transition", "lifecycle", "interval", "sample", "diagnostic", "health"),
                 facts.map { it.kind }.toSet(),
+            )
+        }
+    }
+
+    @Test
+    fun `v2 diagnostic dictionary freezes payload fields and chunk uniqueness`() {
+        val parent = Draft(
+            "diagnostic.reported", "diagnostic", "diagnostic",
+            buildJsonObject {
+                put("severity", "error")
+                put("component", "backend.rpc")
+                put("code", "json_decode_failed")
+                put("message", "Expected object at $.projectID")
+                put("thread_name", "DefaultDispatcher-worker-1")
+                put("thread_id", 42)
+                putJsonArray("payload_refs") { add("response") }
+                put("truncated", false)
+            },
+            context = mapOf("incident_id" to "inc-1"),
+            purposes = LOGS,
+            schemaVersion = "2.0",
+        )
+        val first = chunk(0)
+        val second = chunk(1)
+
+        assertTrue(Dictionary.validate(parent))
+        assertTrue(Dictionary.validate(listOf(first, second)))
+        assertFalse(Dictionary.validate(listOf(first, chunk(0))))
+        Fixture(tickMs = SWEEP_QUIET_TICK_MS).use { fixture ->
+            assertEquals(Admission.DISABLED, fixture.recorder.record(parent))
+            assertEquals(
+                Admission.QUEUED,
+                fixture.recorder.record(Draft("plugin.started", "lifecycle", "critical", JsonObject(emptyMap()))),
             )
         }
     }

@@ -32,7 +32,7 @@ private val CONTROL_FIELDS = setOf(
     "logs_enabled", "logs_expires_at",
     "account_epoch", "account_state", "expires_at",
     "metrics_allowed_categories", "logs_allowed_categories",
-    "log_detail_rate_limit",
+    "log_detail_rate_limit", "accepted_fact_schema_majors",
 )
 
 private val ACCOUNT_STATES = setOf("pending", "ready", "disabled")
@@ -72,14 +72,15 @@ data class Policy(
     val metrics: Permit?,
     val logs: Permit?,
     val limit: Int = 3,
+    val accepted: Set<Int> = setOf(1),
 ) {
     /**
      * 即时判期：事件[name]在时刻[now]（UTC毫秒）允许的用途集合。
      * 每次record及writer入盘前都必须以当前时刻重新调用，不得缓存上一次结论等下一次轮询。
      */
-    fun permit(now: Long, name: String, category: String? = null): Set<String> {
+    fun permit(now: Long, name: String, category: String? = null, schema: Int = 1): Set<String> {
         val commonOpen = major == SUPPORTED_MAJOR && enabled && state == STATE_READY && now < expires
-        if (!commonOpen) return emptySet()
+        if (!commonOpen || schema !in accepted) return emptySet()
         return buildSet {
             if (metrics?.let { it.enabled && now < it.expires && name in it.names &&
                     (category == null || category in it.categories) } == true) add(PURPOSE_METRICS)
@@ -113,6 +114,7 @@ private val UNBOUND_POLICY: Policy = Policy(
     expires = Long.MAX_VALUE,
     metrics = Permit(true, Long.MAX_VALUE, REGISTERED_NAMES),
     logs = Permit(true, Long.MAX_VALUE, REGISTERED_NAMES),
+    accepted = setOf(1),
 )
 
 /**
@@ -267,7 +269,7 @@ private fun parsePolicy(text: String): Policy? {
         null
     }
     return root
-        ?.takeIf { json -> json.keys.all { key -> key in CONTROL_FIELDS } && validRateLimit(json) }
+        ?.takeIf { json -> json.keys.all { key -> key in CONTROL_FIELDS } && validRateLimit(json) && accepted(json) != null }
         ?.let { json -> parseCommon(json)?.let { fields -> policyOf(json, fields) } }
 }
 
@@ -282,6 +284,7 @@ private fun policyOf(root: JsonObject, fields: CommonFields): Policy = Policy(
     metrics = permitOf(root, "metrics_enabled", "metrics_expires_at", "metrics_allowed_categories"),
     logs = permitOf(root, "logs_enabled", "logs_expires_at", "logs_allowed_categories"),
     limit = (root.getValue("log_detail_rate_limit") as JsonObject).long("per_fingerprint_max_per_minute")!!.toInt(),
+    accepted = accepted(root) ?: setOf(1),
 )
 
 /** 公共字段逐项严格校验；任何一项不合法整份文件无效。 */
@@ -321,6 +324,15 @@ private fun validRateLimit(root: JsonObject): Boolean {
     val value = ((root["log_detail_rate_limit"] as? JsonObject)
         ?.get("per_fingerprint_max_per_minute") as? JsonPrimitive)?.longOrNull
     return value != null && value >= 0 && value <= RATE_LIMIT_MAX
+}
+
+/** 缺失能力声明按v1消费者处理；存在时必须是唯一的正整数数组。 */
+private fun accepted(root: JsonObject): Set<Int>? {
+    val value = root["accepted_fact_schema_majors"] ?: return setOf(1)
+    val values = (value as? JsonArray)?.map { element -> (element as? JsonPrimitive)?.longOrNull } ?: return null
+    if (values.any { major -> major == null || major <= 0 || major > Int.MAX_VALUE }) return null
+    val majors = values.filterNotNull().map { major -> major.toInt() }.toSet()
+    return majors.takeIf { majors.size == values.size }
 }
 
 private fun JsonObject.long(key: String): Long? = (this[key] as? JsonPrimitive)?.longOrNull

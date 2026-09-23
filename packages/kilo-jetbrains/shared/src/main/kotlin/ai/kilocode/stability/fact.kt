@@ -24,6 +24,7 @@ class Draft private constructor(
     val context: Map<String, String>,
     val epoch: String?,
     val purposes: Set<String>,
+    val schemaVersion: String,
 ) {
     companion object {
         private fun <K, V> immutableMap(source: Map<K, V>): Map<K, V> =
@@ -43,6 +44,7 @@ class Draft private constructor(
             context: Map<String, String> = emptyMap(),
             epoch: String? = null,
             purposes: Set<String> = setOf("metrics", "logs"),
+            schemaVersion: String = "1.0",
         ): Draft = Draft(
             name = name,
             kind = kind,
@@ -51,6 +53,7 @@ class Draft private constructor(
             context = immutableMap(context),
             epoch = epoch,
             purposes = Collections.unmodifiableSet(LinkedHashSet(purposes)),
+            schemaVersion = schemaVersion,
         )
     }
 }

@@ -99,6 +99,15 @@
           "description": "同fingerprint每分钟详情份数上限（设计默认3）；0表示不采诊断详情，额外次数汇入摘要"
         }
       }
+    },
+    "accepted_fact_schema_majors": {
+      "type": "array",
+      "items": {
+        "type": "integer",
+        "minimum": 1
+      },
+      "uniqueItems": true,
+      "description": "consumer可重构的事实schema major；字段缺失等同于[1]，只有包含2时插件才可写入高保真诊断"
     }
   }
 }

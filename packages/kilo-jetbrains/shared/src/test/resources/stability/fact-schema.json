@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:costrict:jetbrains-stability:fact-schema-v1",
-  "title": "JetBrains 插件稳定性事实记录 v1（wire schema）",
-  "description": "本地事实格式v1公共字段（设计6.1）。传输形态：UTF-8无BOM，NDJSON，每行一个JSON对象，以LF结束，内嵌换行JSON转义；普通记录最大32KiB，message安全摘要最大512字节。schema_version major不兼容，minor只能增加可选字段——未知minor只允许协议明确列出的可选字段。长度上限按UTF-8字节数执行。",
+  "$id": "urn:costrict:jetbrains-stability:fact-schema-v2",
+  "title": "JetBrains 插件稳定性事实记录 v2（wire schema）",
+  "description": "本地事实格式v1/v2公共字段。传输形态：UTF-8无BOM，NDJSON，每行一个JSON对象，以LF结束，内嵌换行JSON转义；单条记录最大32KiB。schema_version major不兼容，consumer必须逐行按major解码。长度上限按UTF-8字节数执行。",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -170,6 +170,9 @@
         "availability",
         "error.uncaught",
         "error.reported",
+        "diagnostic.reported",
+        "diagnostic.payload",
+        "diagnostic.redaction_failed",
         "protocol.error",
         "telemetry.health",
         "session.dispose_risk",
@@ -185,10 +188,10 @@
     },
     "context": {
       "type": "object",
-      "description": "可选；仅允许五个闭集键，不存在上下文时整个字段省略，不能编造用户、设备或项目身份",
+      "description": "可选；仅允许六个闭集键，不存在上下文时整个字段省略，不能编造用户、设备或项目身份",
       "additionalProperties": false,
       "minProperties": 1,
-      "maxProperties": 5,
+      "maxProperties": 6,
       "properties": {
         "operation_id": {
           "type": "string",
@@ -215,6 +218,12 @@
           "minLength": 1,
           "maxLength": 128,
           "description": "项目级随机映射或带本机秘密的HMAC，不用可被字典猜测的普通路径hash"
+        },
+        "incident_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "description": "同一高保真诊断主记录和分片组的关联标识"
         }
       }
     },
