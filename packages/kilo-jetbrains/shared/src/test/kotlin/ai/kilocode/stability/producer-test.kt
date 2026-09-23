@@ -385,7 +385,10 @@ class ProducerTest {
             harness.awaitReason("stopped_unload")
             val facts = harness.facts()
             assertTrue(facts.none { it.context["operation_id"] == old.id }, "old handles never enter the new run")
-            assertEquals(listOf("start", "end"), facts.filter { it.context["operation_id"] == fresh.id }.map { it.phase() })
+            assertEquals(
+                listOf("start", "end"),
+                facts.filter { it.context["operation_id"] == fresh.id }.sortedBy { it.seq }.map { it.phase() },
+            )
             assertEquals(1, facts.count { it.name == "protocol.error" })
             assertTrue(facts.all { it.run_id != previous })
             assertTrue(consumer === harness.service.operations, "the entry is stable across runs")
@@ -780,7 +783,7 @@ class ProducerTest {
             }
 
             val facts = harness.facts()
-            val rpc = facts.filter { it.context[CONTEXT_OPERATION_ID] == operation.id }
+            val rpc = facts.filter { it.context[CONTEXT_OPERATION_ID] == operation.id }.sortedBy { it.seq }
             val run = facts.first { it.name == "plugin.started" }.run_id
             assertEquals(listOf("start", "end"), rpc.map { it.phase() })
             assertEquals("timeout", rpc.last().text("result"))
