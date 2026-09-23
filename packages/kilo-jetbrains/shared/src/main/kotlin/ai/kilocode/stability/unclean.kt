@@ -21,7 +21,7 @@ private val factJson = Json { encodeDefaults = true }
 
 /**
  * plugin.unclean判定（设计7.3/M22）：插件下一实例从共享scope文件读取前任run——最后一条
- * plugin.started之后没有plugin.shutdown即产出一条unclean事实（previous_run_id、固定
+ * plugin.started之后没有同producer/run且critical seq更大的plugin.shutdown即产出unclean事实（previous_run_id、固定
  * evidence token）。残缺尾行按§7.2跳过（不算shutdown）；不做writer死亡推断、不救援。
  * 每个scope文件至多一条；他scope不参与。Task 11在plugin.started之前调用，
  * 每实例启动执行一次。
@@ -36,13 +36,13 @@ class UncleanDetector(private val file: Path) {
     internal fun detect(bytes: ByteArray?, details: Boolean = true): List<Draft> =
         bytes?.let { detectUncleanRun(it, details) } ?: emptyList()
 
-    /** 整读解析完整行，取最后一条started的run_id，其后无同run的shutdown即unclean。 */
+    /** 整读解析完整行；failure-first可倒置行序，正常退出只比较同producer/run的critical seq。 */
     private fun detectUncleanRun(bytes: ByteArray, details: Boolean): List<Draft> {
         val facts = parseFacts(bytes)
-        val lastStarted = facts.indexOfLast { it.name == NAME_STARTED }
-        val runId = facts.getOrNull(lastStarted)?.run_id ?: return emptyList()
-        val shutdownAfter = facts.drop(lastStarted + 1).any { it.name == NAME_SHUTDOWN && it.run_id == runId }
-        return if (shutdownAfter) emptyList() else evidence(facts.filter { it.run_id == runId }, details)
+        val start = facts.lastOrNull { it.name == NAME_STARTED && it.channel == "critical" } ?: return emptyList()
+        val run = facts.filter { it.run_id == start.run_id && it.producer_id == start.producer_id }
+        val shutdown = run.any { it.name == NAME_SHUTDOWN && it.channel == "critical" && it.seq > start.seq }
+        return if (shutdown) emptyList() else evidence(run, details)
     }
 
     private fun evidence(run: List<Fact>, details: Boolean): List<Draft> {

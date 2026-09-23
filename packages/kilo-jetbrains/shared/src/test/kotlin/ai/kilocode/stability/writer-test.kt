@@ -137,7 +137,7 @@ class WriterTest {
             }
             assertEquals(Admission.QUEUED, fixture.recorder.recordBatch(listOf(v2Draft()) + chunks))
             fixture.flush()
-            assertEquals(listOf("kept"), fixture.facts().map { it.context["incident_id"] })
+            assertEquals(listOf("kept"), fixture.facts().filterNot { "checkpoint" in it.data }.map { it.context["incident_id"] })
             assertEquals(3, fixture.writer.stats().writeErrors)
             assertEquals(3, fixture.writer.stats().droppedFailure)
             assertEquals(0, fixture.recorder.depth().bytes)
@@ -235,7 +235,7 @@ class WriterTest {
 
     @Test
     fun `facts append to one jsonl file across both channels with per-channel seq`() {
-        Fixture(tickMs = 50L).use { fixture ->
+        Fixture(tickMs = 600_000L).use { fixture ->
             repeat(8) { assertEquals(Admission.QUEUED, fixture.recorder.record(criticalDraft())) }
             repeat(8) { assertEquals(Admission.QUEUED, fixture.recorder.record(diagnosticDraft())) }
             fixture.flush()
@@ -248,9 +248,9 @@ class WriterTest {
                 "UTF-8无BOM（§6.1）",
             )
             val lines = Files.readAllLines(file)
-            assertEquals(16, lines.size)
+            assertEquals(17, lines.size) // 16条数据 + 一个独立force的checkpoint。
             val facts = lines.map { factJson.decodeFromString(Fact.serializer(), it) }
-            assertEquals((1L..8L).toList(), facts.filter { it.channel == "critical" }.map { it.seq })
+            assertEquals((1L..9L).toList(), facts.filter { it.channel == "critical" }.map { it.seq })
             assertEquals((1L..8L).toList(), facts.filter { it.channel == "diagnostic" }.map { it.seq })
         }
     }
@@ -302,7 +302,7 @@ class WriterTest {
             repeat(1) { assertEquals(Admission.QUEUED, fixture.recorder.record(criticalDraft())) } // 第16条
             assertTrue(awaitDrained(fixture), "第16条应完成写入")
             assertFalse(fixture.writer.pendingForTest(), "第16条必须立即触发批flush（pending归零）")
-            assertEquals(16, countLines(fixture.outboxDir.resolve(fixture.fileName)))
+            assertEquals(17, countLines(fixture.outboxDir.resolve(fixture.fileName)))
         }
     }
 
@@ -320,7 +320,7 @@ class WriterTest {
             fixture.advanceClock(2L)
             fixture.writer.wakeForTest()
             assertFalse(fixture.writer.pendingForTest(), "越过30秒deadline必须flush积压批次")
-            assertEquals(1, countLines(fixture.outboxDir.resolve(fixture.fileName)))
+            assertEquals(2, countLines(fixture.outboxDir.resolve(fixture.fileName)))
         }
     }
 
@@ -339,12 +339,13 @@ class WriterTest {
             // 保留行不被改写：末行仍是完整合法事实
             factJson.decodeFromString(Fact.serializer(), lines.last())
             // 重写后继续追加正常：新事实落盘（必要时再次淘汰旧行腾位），文件仍在预算内。
+            val previous = fixture.facts().maxOf { it.seq }
             assertEquals(Admission.QUEUED, fixture.recorder.record(criticalDraft()))
             fixture.flush()
             assertTrue(Files.size(file) <= 2L * 1024, "继续追加后文件仍必须回到预算内")
             val after = Files.readAllLines(file)
             assertTrue(after.size <= lines.size + 1, "追加至多新增一行（淘汰只减不增）")
-            assertEquals(41L, factJson.decodeFromString(Fact.serializer(), after.last()).seq, "重写后新事实照常追加")
+            assertTrue(fixture.facts().last { it.name == "rpc" }.seq > previous, "新数据seq递增；容量淘汰checkpoint允许留空号")
         }
     }
 
@@ -374,7 +375,7 @@ class WriterTest {
             try {
                 assertEquals(Admission.QUEUED, fixture.recorder.record(criticalDraft()))
                 reopened.flush()
-                assertEquals(1, countLines(file), "重建后只应包含新事实")
+                assertEquals(2, countLines(file), "重建后只包含新事实和checkpoint")
             } finally {
                 reopened.close()
             }
@@ -406,10 +407,10 @@ class WriterTest {
                 assertEquals(Admission.QUEUED, fixture.recorder.record(criticalDraft()))
                 resumed.flush()
                 val lines = Files.readAllLines(file)
-                assertEquals(3, lines.size, "残页必须被终止为自己的行，新事实另起一行")
+                assertEquals(5, lines.size, "两条数据与checkpoint各占一行，残页也独立成行")
                 factJson.decodeFromString(Fact.serializer(), lines[0]) // 崩溃前的完整事实
-                assertEquals("{\"partial\"", lines[1], "残页字节终止为独立残行（consumer按§7.2跳过）")
-                factJson.decodeFromString(Fact.serializer(), lines[2]) // 新事实不得与残页拼接成一行
+                assertEquals("{\"partial\"", lines[2], "残页字节终止为独立残行（consumer按§7.2跳过）")
+                factJson.decodeFromString(Fact.serializer(), lines[3]) // 新事实不得与残页拼接成一行
             } finally {
                 resumed.close()
             }
@@ -450,8 +451,8 @@ class WriterTest {
             assertEquals(Admission.QUEUED, fixture.recorder.record(criticalDraft()))
             fixture.flush()
             val facts = fixture.facts()
-            assertEquals(1, facts.size)
-            assertEquals("acct-b", facts[0].account_epoch)
+            assertEquals(2, facts.size)
+            assertTrue(facts.all { it.account_epoch == "acct-b" })
         }
     }
 
@@ -465,7 +466,7 @@ class WriterTest {
 
             assertEquals(0, fixture.recorder.depth().items)
             assertEquals(0, fixture.recorder.depth().bytes)
-            assertEquals(5, fixture.facts().size)
+            assertEquals(5, fixture.facts().count { it.name == "rpc" })
         }
     }
 

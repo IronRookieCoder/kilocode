@@ -26,6 +26,47 @@ class UncleanTest {
     private val timeout = 10L
 
     @Test
+    fun `shutdown requires matching producer run channel and later critical seq`() {
+        Fixture(autoStart = false).use { fixture ->
+            val file = fixture.base.resolve("scope.jsonl")
+            val start = factJson.decodeFromString(Fact.serializer(), factLine("plugin.started", "run-a"))
+            val end = start.copy(name = "plugin.shutdown", seq = start.seq + 1)
+            listOf(end.copy(producer_id = "different"), end.copy(run_id = "different"),
+                end.copy(channel = "diagnostic"), end.copy(seq = start.seq - 1)).forEach { other ->
+                file.writeText(listOf(start, other).joinToString("") { factJson.encodeToString(Fact.serializer(), it) + "\n" })
+                assertEquals(1, UncleanDetector(file).detect().size, "Must ignore mismatched or earlier shutdown: $other")
+            }
+        }
+    }
+
+    @Test
+    fun `large shutdown written before started is still a clean run`() {
+        Fixture(autoStart = false, tickMs = 600_000).use { fixture ->
+            fixture.enableDiagnostics()
+            fixture.operations.record(Draft("plugin.started", "lifecycle", "critical", buildJsonObject {}))
+            repeat(40) { fixture.operations.begin("plugin.readiness", 60_000) }
+            val drafts = operationEvidence("plugin.shutdown", buildJsonObject { put("end_kind", "app_close") },
+                fixture.operations.snapshot().keys, details = true)
+            assertEquals(Admission.QUEUED, fixture.recorder.recordBatch(drafts))
+            fixture.writer.start()
+            fixture.flush()
+            val facts = fixture.facts()
+            assertTrue(facts.indexOfFirst { it.name == "plugin.shutdown" } < facts.indexOfFirst { it.name == "plugin.started" })
+            assertTrue(UncleanDetector(fixture.outboxDir.resolve(fixture.fileName)).detect().isEmpty())
+        }
+    }
+
+    @Test
+    fun `first successful flush is recoverable before any periodic health`() {
+        Fixture(tickMs = 600_000).use { fixture ->
+            fixture.operations.record(Draft("plugin.started", "lifecycle", "critical", buildJsonObject {}))
+            fixture.flush()
+            val data = UncleanDetector(fixture.outboxDir.resolve(fixture.fileName)).detect().single().data
+            assertEquals(fixture.clock.wall(), data.getValue("last_flush_time").jsonPrimitive.long)
+        }
+    }
+
+    @Test
     fun `concurrent handles sharing an id remain open until every terminal`() {
         Fixture().use { fixture ->
             val executor = Executors.newFixedThreadPool(8)
@@ -80,6 +121,7 @@ class UncleanTest {
                 put("last_flush_time", 1_790_000_000_000L)
             }))
             fixture.operations.record(Draft("plugin.started", "lifecycle", "critical", buildJsonObject {}))
+            fixture.failNextForce() // 当前run没有成功force/checkpoint，不能借用unclean引用的旧时间。
             fixture.flush()
             val data = UncleanDetector(fixture.outboxDir.resolve(fixture.fileName)).detect().single().data
             assertTrue("last_flush_time" !in data, "An earlier run flush is not evidence for this run")
@@ -95,7 +137,7 @@ class UncleanTest {
             assertEquals(JsonPrimitive(true), drafts.single().data["truncated"])
             assertEquals(Admission.QUEUED, fixture.recorder.recordBatch(drafts))
             fixture.flush()
-            assertEquals(32, fixture.facts().single().data.getValue("open_operations").jsonArray.size)
+            assertEquals(32, fixture.facts().single { it.name == "plugin.shutdown" }.data.getValue("open_operations").jsonArray.size)
         }
     }
 
@@ -129,7 +171,6 @@ class UncleanTest {
             val completed = fixture.operations.begin("rpc", 60_000, buildJsonObject { put("api_group", "session") })
             completed.end("success")
             fixture.flush()
-            val time = fixture.clock.wall()
             fixture.advanceClock(400)
             Health(fixture.recorder, fixture.writer, fixture.clock, intervalMs = 0).poll()
             fixture.flush()
@@ -140,7 +181,7 @@ class UncleanTest {
             assertEquals(previous.seq, data.getValue("last_seq").jsonPrimitive.long)
             assertEquals(previous.channel, data.getValue("last_channel").jsonPrimitive.content)
             assertEquals(previous.timestamp, data.getValue("last_fact_time").jsonPrimitive.long)
-            assertEquals(time, data.getValue("last_flush_time").jsonPrimitive.long)
+            assertEquals(fixture.writer.flushed, data.getValue("last_flush_time").jsonPrimitive.long)
             assertEquals(listOf(open.id), data.getValue("open_operations").jsonArray.map { it.jsonPrimitive.content })
             fixture.operations.record(drafts.single())
             fixture.flush()

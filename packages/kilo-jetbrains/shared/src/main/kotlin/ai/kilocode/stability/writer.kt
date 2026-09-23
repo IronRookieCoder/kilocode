@@ -14,6 +14,7 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonPrimitive
 
 private const val DEFAULT_TICK_MS = 1_000L
 
@@ -243,8 +244,9 @@ class Writer(
                 loss(writeErrors, group.records.map { it.fact })
                 return@forEach
             }
-            val lines = encode(group) ?: return@forEach
-            if (!write(group, lines)) failed = true
+            val facts = group.records.map { it.fact }
+            val lines = encode(facts) ?: return@forEach
+            if (!write(facts, lines)) failed = true
         }
         return failed
     }
@@ -258,8 +260,7 @@ class Writer(
 
     /** 整组复检当前策略、schema capability、epoch和实际32KiB大小后才允许写第一行。 */
     @Suppress("ReturnCount")
-    private fun encode(group: QueuedGroup): List<ByteArray>? {
-        val facts = group.records.map { it.fact }
+    private fun encode(facts: List<Fact>): List<ByteArray>? {
         val policy = policies.current()
         val now = clock.wall()
         if (facts.any { fact ->
@@ -279,8 +280,7 @@ class Writer(
     }
 
     /** 单组追加；容量重写把新组一并纳入保留排序，避免后来的sample驱逐failure。 */
-    private fun write(group: QueuedGroup, lines: List<ByteArray>): Boolean {
-        val facts = group.records.map { it.fact }
+    private fun write(facts: List<Fact>, lines: List<ByteArray>): Boolean {
         var offset = fileBytes
         return try {
             if (channel == null) reopen()
@@ -393,6 +393,39 @@ class Writer(
             pendingFailures = 0
             runCatching { open.close() }
             channel = null
+            return
+        }
+        checkpoint()
+    }
+
+    /**
+     * data force已成功后追加一条已准入的health checkpoint并单独force，不产生递归checkpoint。
+     * checkpoint写/force失败仅回滚它自己的追加；此前已force的数据与旧checkpoint仍有效。
+     */
+    private fun checkpoint() {
+        val fact = flushed?.let(recorder::checkpoint) ?: return
+        val lines = encode(listOf(fact)) ?: return
+        val bytes = lines.single()
+        val offset = fileBytes
+        val append = offset + bytes.size <= maxFileBytes
+        try {
+            if (!append) rewrite(listOf(fact), lines, checkpoint = true)
+            if (append) {
+                val open = requireNotNull(channel)
+                storage.writeAll(open, ByteBuffer.wrap(bytes))
+                storage.force(open)
+                fileBytes += bytes.size
+            }
+        } catch (unverified: StorageUnverifiedException) {
+            writeErrors.incrementAndGet()
+            disable(unverified.reason)
+        } catch (_: IOException) {
+            writeErrors.incrementAndGet()
+            runCatching { channel?.close() }
+            channel = null
+            if (append) rollback(offset)
+            // 原子重写失败不截断旧文件；下一次reopen会核对实际大小。
+            fileBytes = offset
         }
     }
 
@@ -411,12 +444,21 @@ class Writer(
      * 完整行按producer/run/incident分组。先保留最近failure，再critical、sample；
      * 不完整或孤立分片组整体丢弃。新组也参与排序；原子替换同时提交新组与保留结果。
      */
-    private fun rewrite(facts: List<Fact>, lines: List<ByteArray>) {
+    private fun rewrite(facts: List<Fact>, lines: List<ByteArray>, checkpoint: Boolean = false) {
         val rows = stored()
         facts.forEachIndexed { index, fact -> rows += Stored(fact, lines[index], rows.size) }
-        val groups = rows.groupBy { it.key() }.values.sortedWith(
+        // 合并旧checkpoint；最新一条按internal critical参与排序，绝不占用failure的保留空间。
+        val checkpoints = rows.filter {
+            it.fact?.name == "telemetry.health" && it.fact.data["checkpoint"] == JsonPrimitive(true)
+        }.toSet()
+        val latest = checkpoints.lastOrNull()?.takeIf { it.bytes.size <= maxFileBytes }
+        val groups = (rows.filterNot { it in checkpoints } + listOfNotNull(latest))
+            .groupBy { it.key() }.values.sortedWith(
             compareBy<List<Stored>> { group ->
-                group.minOf { row -> row.fact?.let { priority(it.name, it.channel, it.data) } ?: Priority.SAMPLE }
+                group.minOf { row ->
+                    if (row === latest) Priority.CRITICAL
+                    else row.fact?.let { priority(it.name, it.channel, it.data) } ?: Priority.SAMPLE
+                }
             }.thenByDescending { group -> group.maxOf { it.fact?.timestamp ?: 0 } }
                 .thenByDescending { group -> group.maxOf { it.order } },
         )
@@ -438,7 +480,7 @@ class Writer(
         runCatching { channel?.close() }
         channel = null
         storage.atomicWrite(file, output.toByteArray())
-        flushed = clock.wall()
+        if (!checkpoint) flushed = clock.wall()
         loss(droppedEvicted, dropped.mapNotNull { it.fact })
         // 非法旧行也属于被淘汰行，但不能据此推断failure类别。
         droppedEvicted.addAndGet(dropped.count { it.fact == null }.toLong())
@@ -447,6 +489,7 @@ class Writer(
         pendingSinceMonoMs = -1
         pendingFailures = 0
         reopen()
+        if (!checkpoint) checkpoint()
     }
 
     private fun stored(): ArrayList<Stored> {

@@ -49,19 +49,23 @@ internal const val EVIDENCE_PLATFORM_THREAD_ASSERTION = "platform_thread_asserti
 /** 一条在途探针样本：投递即定格区间ID与调度时刻，完成/作废都按它产出唯一一条事实。 */
 private class PendingSample(val seq: Long, val scheduledMono: Long, val observationId: String) {
     val sampled = AtomicBoolean()
+    val result = AtomicReference<Resolution?>()
+    val emitted = AtomicBoolean()
     @Volatile var stack: EdtStack? = null
 }
+
+private data class Resolution(val time: Long, val validity: String)
 
 /**
  * M20单JVM EDT探针状态机（brief C3/设计10.3）：至多一个在途样本。
  * - [offer]仅在启用且无pending时实际投递；序号只随实际投递递增（被拒offer不占号）。
- * - [complete]是EDT回调入口：只读完成时刻并CAS摘取同序号样本，Draft构造与record经
+ * - [complete]是EDT回调入口：只读完成时刻并CAS发布同序号样本的结果，Draft构造与record经
  *   [finalize]交后台——EDT上不做I/O、不做等待。序号不匹配（已作废区间的迟到回调）
  *   一律忽略，绝不在新观测区间按valid计（brief Step 3）。
  * - [interrupt]/[enabled](false)以给定validity作废当前pending（每条实际投递的样本
  *   恰好产出一条事实）并更换observation_id——每次失效都是连续观测区间的终点。
- * - 可选[stall]（设计10.3）：valid样本经finalize喂给合并器；作废路径先发观测终点标记
- *   再轮换observation_id，由它本机合并出edt.stall事实（仅valid样本参与，作废不喂）。
+ * - 可选[stall]（设计10.3）：后台结算valid样本后喂给合并器；作废路径先结算已完成样本，
+ *   再关闭窗口并轮换observation_id，由它本机合并出edt.stall事实（仅valid样本参与）。
  * 线程纪律：全部状态为短原子切换，无锁、无EDT等待；offer/作废来自后台，complete来自EDT。
  * 时间取[Clock.mono]（本run相对单调毫秒）；purposes仅metrics（字典METRICS_ONLY_NAMES）。
  */
@@ -87,7 +91,7 @@ class Probe(
         val stack = known?.let(::EdtStack) ?: Thread.getAllStackTraces().entries.singleOrNull { entry ->
             entry.value.any { it.className == "java.awt.EventDispatchThread" }
         }?.let { EdtStack(it.key, it.value) }
-        if (pending.get() === sample) sample.stack = stack
+        if (pending.get() === sample && sample.result.get() == null) sample.stack = stack
     }
 
     /** 启停探针；关闭即作废当前pending（unknown——关闭原因无法归入休眠/断层等已确认类别）。 */
@@ -114,20 +118,20 @@ class Probe(
     fun complete(seq: Long) {
         if (EventQueue.isDispatchThread()) thread.set(Thread.currentThread())
         val completedMono = clock.mono()
-        val taken = takePending(seq) ?: return
-        finalize {
-            emit(sampleDraft(taken, completedMono, VALIDITY_VALID))
-            stall?.onValidSample(taken.observationId, taken.seq, taken.scheduledMono, completedMono, taken.stack)
-        }
+        val taken = pending.get()?.takeIf { it.seq == seq } ?: return
+        if (!taken.result.compareAndSet(null, Resolution(completedMono, VALIDITY_VALID))) return
+        finalize { resolve(taken) }
     }
 
-    /** CAS摘取同序号样本；无pending或序号不符（已作废区间的迟到回调）返回null。 */
-    private fun takePending(seq: Long): PendingSample? {
-        var current = pending.get()
-        while (current != null && current.seq == seq && !pending.compareAndSet(current, null)) {
-            current = pending.get()
+    /** 后台唯一结算：disable也能消费EDT已发布结果，迟到的finalize仅为幂等no-op。 */
+    private fun resolve(sample: PendingSample) {
+        val result = sample.result.get() ?: return
+        if (!sample.emitted.compareAndSet(false, true)) return
+        pending.compareAndSet(sample, null)
+        emit(sampleDraft(sample, result.time, result.validity))
+        if (result.validity == VALIDITY_VALID) {
+            stall?.onValidSample(sample.observationId, sample.seq, sample.scheduledMono, result.time, sample.stack)
         }
-        return if (current != null && current.seq == seq) current else null
     }
 
     /** 以[validity]作废当前pending并更换observation_id（失焦/暂停/调度断层/关闭共用入口）。 */
@@ -136,11 +140,13 @@ class Probe(
     }
 
     private fun invalidate(validity: String) {
-        // 中断标记先于observation_id轮换（设计10.3）：终结当前stall窗口，缺失部分不推断卡顿。
-        stall?.onObservationEnded()
         val taken = pending.getAndSet(null)
-        // 作废方在后台线程（consumer/loop）；Draft就地构造后经emit record（非阻塞）。
-        if (taken != null) emit(sampleDraft(taken, clock.mono(), validity))
+        if (taken != null) {
+            taken.result.compareAndSet(null, Resolution(clock.mono(), validity))
+            resolve(taken)
+        }
+        // 必须先结算已完成样本，再关闭窗口；随后到达的finalize不能重新打开旧窗口。
+        stall?.onObservationEnded()
         observationId.set(randomObservationId())
     }
 

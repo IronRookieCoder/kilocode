@@ -605,6 +605,7 @@ object Dictionary {
                 key("drop_failure", FieldType.NON_NEGATIVE_INTEGER),
                 key("quality", FieldType.STRING, setOf("good", "degraded")),
                 key("last_flush_time", FieldType.NON_NEGATIVE_INTEGER),
+                key("checkpoint", FieldType.BOOLEAN),
             ),
             required = setOf("drop", "write_error", "depth_bytes", "oldest_age_ms"),
         )

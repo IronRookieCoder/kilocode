@@ -6,6 +6,8 @@ import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 
 /** 队列容量（设计7.1）：全部通道合计2000条且4MiB，先到者为准。 */
 private const val TOTAL_MAX_ITEMS = 2000
@@ -83,6 +85,7 @@ internal data class BeginSnapshot(val epoch: String?, val revision: Long?, val p
  * 健康计数全部走AtomicLong，丢弃不递归调用自身record。磁盘占用不设准入闸门：事实文件
  * 预算由writer按failure→critical→sample的整组保留顺序兜底。
  */
+@Suppress("TooManyFunctions") // 准入、快照与writer专用checkpoint共享同一身份/seq所有权。
 class Recorder private constructor(
     private val identity: ProducerIdentity?,
     private val policies: PolicyStore?,
@@ -181,6 +184,30 @@ class Recorder private constructor(
     /** 停止准入：closed后record一律DISABLED；已排队事实留给writer按A4流程处理。 */
     fun close() {
         closed = true
+    }
+
+    /**
+     * writer唯一后台调用：成功data force后的最小health checkpoint，直接写入同一JSONL。
+     * 不入队、不推进Health增量基线；沿用身份、字典、即时许可和critical seq分配。
+     * 仅此固定内部事实允许在close后的最终排空产生，公共record仍然关闭。
+     */
+    @Suppress("ReturnCount") // 所有gate均在分配seq前退出。
+    internal fun checkpoint(time: Long): Fact? {
+        val policy = policies?.current() ?: return null
+        val draft = Draft("telemetry.health", "health", CHANNEL_CRITICAL, buildJsonObject {
+            put("drop", 0)
+            put("write_error", 0)
+            put("depth_bytes", depth().bytes)
+            put("oldest_age_ms", 0)
+            put("checkpoint", true)
+            put("last_flush_time", time)
+        })
+        if (Dictionary.violations(draft).isNotEmpty()) return null
+        val now = clock.wall()
+        val permitted = policy.permit(now, draft.name, CHANNEL_CRITICAL, 1)
+        val purposes = draft.purposes.intersect(permitted).intersect(Dictionary.purposes(draft.name, draft.data))
+        if (purposes.isEmpty()) return null
+        return buildFact(draft, policy, purposes, criticalSeq.incrementAndGet(), now)
     }
 
     /** 健康累计快照；供health.kt生成telemetry.health，本类不递归记录自身丢弃。 */

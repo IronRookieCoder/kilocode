@@ -24,6 +24,22 @@ import kotlinx.serialization.json.put
 class HealthTest {
 
     @Test
+    fun `checkpoint does not consume the periodic health loss baseline`() {
+        Fixture(tickMs = 600_000).use { fixture ->
+            val health = fixture.health()
+            fixture.recorder.record(invalidDraft())
+            assertTrue(health.poll())
+            fixture.flush()
+            repeat(2) { fixture.recorder.record(invalidDraft()) }
+            assertTrue(health.poll())
+            fixture.flush()
+            val facts = fixture.facts().filter { it.name == "telemetry.health" }
+            assertEquals(listOf(1L, 0L, 2L, 0L), facts.map { it.data.getValue("drop").jsonPrimitive.long })
+            assertFalse(health.poll(), "Checkpoint must not create an extra loss delta")
+        }
+    }
+
+    @Test
     fun `health separates reasons and degrades when an operation end is lost`() {
         Fixture(tickMs = 60_000L).use { fixture ->
             val health = fixture.health()
@@ -38,7 +54,7 @@ class HealthTest {
             assertEquals("degraded", sample["quality"]?.jsonPrimitive?.content)
             assertTrue(health.poll())
             fixture.flush()
-            val fact = fixture.facts().single()
+            val fact = fixture.facts().single { "checkpoint" !in it.data }
             assertEquals("degraded", fact.data["quality"]?.jsonPrimitive?.content)
             assertEquals(1L, fact.data["drop_invalid"]?.jsonPrimitive?.long)
         }
@@ -145,7 +161,7 @@ class HealthTest {
             fixture.advanceClock(30_000L)
             assertTrue(health.poll(), "interval due generates the first snapshot")
             fixture.flush()
-            val fact = fixture.facts().single { it.name == "telemetry.health" }
+            val fact = fixture.facts().single { it.name == "telemetry.health" && "checkpoint" !in it.data }
             assertEquals(0L, fact.data["drop"]?.jsonPrimitive?.long)
             assertEquals(0L, fact.data["write_error"]?.jsonPrimitive?.long)
         }
@@ -159,7 +175,7 @@ class HealthTest {
             injectWriteFailure(fixture)
             assertTrue(health.poll(), "a loss delta must generate without waiting for the interval")
             fixture.flush()
-            val fact = fixture.facts().single { it.name == "telemetry.health" }
+            val fact = fixture.facts().single { it.name == "telemetry.health" && "checkpoint" !in it.data }
             assertEquals(1L, fact.data["write_error"]?.jsonPrimitive?.long)
         }
     }
@@ -193,7 +209,7 @@ class HealthTest {
             val facts = fixture.facts()
             assertTrue(facts.none { it.name.startsWith("error.") }, "write failures must never re-record")
             val writeErrors = facts
-                .filter { it.name == "telemetry.health" }
+                .filter { it.name == "telemetry.health" && "checkpoint" !in it.data }
                 .map { it.data["write_error"]?.jsonPrimitive?.long }
             assertEquals(listOf(1L, 1L, 1L), writeErrors, "facts carry the write_error delta since the previous health fact")
         }
@@ -233,7 +249,7 @@ class HealthTest {
             val health = fixture.health()
             assertTrue(health.poll(), "a nonzero drop delta generates immediately")
             fixture.flush()
-            val fact = fixture.facts().single { it.name == "telemetry.health" }
+            val fact = fixture.facts().single { it.name == "telemetry.health" && "checkpoint" !in it.data }
             assertEquals(1L, fact.data.getValue("drop").jsonPrimitive.long)
         }
     }
@@ -248,7 +264,7 @@ class HealthTest {
             assertTrue(health.poll())
 
             fixture.flush()
-            val healths = fixture.facts().filter { it.name == "telemetry.health" }
+            val healths = fixture.facts().filter { it.name == "telemetry.health" && "checkpoint" !in it.data }
             assertEquals(2, healths.size)
             assertEquals(2L, healths[0].data.getValue("drop").jsonPrimitive.long) // 首条=自本实例起算的增量
             assertEquals(3L, healths[1].data.getValue("drop").jsonPrimitive.long) // 距上一条的增量，不是累计5
@@ -262,7 +278,7 @@ class HealthTest {
             assertTrue(fixture.health().poll())                     // 实例1基线0，报2
             assertTrue(fixture.health().poll())                     // 实例2基线0（新run），再报2
             fixture.flush()
-            val healths = fixture.facts().filter { it.name == "telemetry.health" }
+            val healths = fixture.facts().filter { it.name == "telemetry.health" && "checkpoint" !in it.data }
             assertEquals(listOf(2L, 2L), healths.map { it.data.getValue("drop").jsonPrimitive.long })
         }
     }
@@ -281,7 +297,7 @@ class HealthTest {
             assertTrue(evictedBeforePoll > 0, "fixture precondition: capacity rewrite evicted whole lines")
             fixture.health().poll()
             fixture.flush()
-            val drop = fixture.facts().filter { it.name == "telemetry.health" }
+            val drop = fixture.facts().filter { it.name == "telemetry.health" && "checkpoint" !in it.data }
                 .last().data.getValue("drop").jsonPrimitive.long
             assertTrue(drop >= evictedBeforePoll, "eviction must be visible in health")
         }

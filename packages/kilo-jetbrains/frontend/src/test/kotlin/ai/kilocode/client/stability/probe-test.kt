@@ -33,6 +33,73 @@ class ProbeTest : BasePlatformTestCase() {
 
     private val timeout = 15L
 
+    fun `test default channel closes a completed sample when disable was queued first`() {
+        Fixture(tickMs = 600_000).use { fixture ->
+            val dispatcher = Executors.newSingleThreadExecutor().asCoroutineDispatcher()
+            val scope = CoroutineScope(SupervisorJob() + dispatcher)
+            val clock = MutableClock()
+            val callback = CompletableFuture<() -> Unit>()
+            val entered = CountDownLatch(1)
+            val release = CountDownLatch(1)
+            val done = CompletableFuture<Unit>()
+            val host = EdtProbeService(scope, clock, { fixture.operations },
+                dispatchToEdt = { callback.complete(it) }, offerPeriodMs = 600_000)
+            try {
+                host.setActive(this, true)
+                host.tick()
+                val complete = callback.get(timeout, TimeUnit.SECONDS)
+                scope.launch {
+                    entered.countDown()
+                    check(release.await(timeout, TimeUnit.SECONDS)) { "Actor gate was not released" }
+                }
+                assertTrue(entered.await(timeout, TimeUnit.SECONDS))
+                // 默认Channel暂停：disable先入队，EDT随后发布已完成样本。
+                host.setActive(this, false)
+                clock.now = 2_500
+                complete()
+                release.countDown()
+                scope.launch { done.complete(Unit) }
+                done.get(timeout, TimeUnit.SECONDS)
+                fixture.flush()
+                assertEquals(1, fixture.facts().count { it.name == "edt.stall" })
+                assertEquals(1, fixture.facts().count { it.name == "edt.delay" })
+                assertEquals("valid", fixture.facts().single { it.name == "edt.delay" }.data["validity"]?.jsonPrimitive?.content)
+            } finally {
+                release.countDown()
+                scope.cancel()
+                dispatcher.close()
+            }
+        }
+    }
+
+    fun `test default channel ignores callback after disable already consumed the sample`() {
+        Fixture(tickMs = 600_000).use { fixture ->
+            val dispatcher = Executors.newSingleThreadExecutor().asCoroutineDispatcher()
+            val scope = CoroutineScope(SupervisorJob() + dispatcher)
+            val clock = MutableClock()
+            val callback = CompletableFuture<() -> Unit>()
+            val done = CompletableFuture<Unit>()
+            val host = EdtProbeService(scope, clock, { fixture.operations },
+                dispatchToEdt = { callback.complete(it) }, offerPeriodMs = 600_000)
+            try {
+                host.setActive(this, true)
+                host.tick()
+                val complete = callback.get(timeout, TimeUnit.SECONDS)
+                host.setActive(this, false)
+                scope.launch { done.complete(Unit) }
+                done.get(timeout, TimeUnit.SECONDS)
+                clock.now = 2_500
+                complete()
+                fixture.flush()
+                assertEquals(0, fixture.facts().count { it.name == "edt.stall" })
+                assertEquals("unknown", fixture.facts().single { it.name == "edt.delay" }.data["validity"]?.jsonPrimitive?.content)
+            } finally {
+                scope.cancel()
+                dispatcher.close()
+            }
+        }
+    }
+
     fun `test real scheduler captures the blocked edt before recovery`() {
         Fixture(tickMs = 600_000).use { fixture ->
             fixture.enableDiagnostics()
