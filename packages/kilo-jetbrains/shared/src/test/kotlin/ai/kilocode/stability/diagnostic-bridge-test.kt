@@ -3,6 +3,7 @@ package ai.kilocode.stability
 import ai.kilocode.log.KiloLog
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
@@ -91,9 +92,13 @@ class DiagnosticBridgeTest {
         val release = CountDownLatch(1)
         val returned = CountDownLatch(1)
         val queued = CountDownLatch(1)
+        val ready = CountDownLatch(2)
+        val start = CountDownLatch(1)
+        val closing = CountDownLatch(2)
         val firstClosed = CountDownLatch(1)
         val secondClosed = CountDownLatch(1)
         val seen = mutableListOf<String>()
+        val executor = Executors.newFixedThreadPool(2)
         val bridge = DiagnosticBridge.install {
             entered.countDown()
             check(release.await(5, TimeUnit.SECONDS))
@@ -112,15 +117,24 @@ class DiagnosticBridgeTest {
                 queued.countDown()
             }
             assertTrue(queued.await(1, TimeUnit.SECONDS), "contended publish must not wait for the sink")
-            val first = CompletableFuture.runAsync {
+            val first = CompletableFuture.runAsync({
+                ready.countDown()
+                check(start.await(5, TimeUnit.SECONDS))
+                closing.countDown()
                 bridge.close()
                 firstClosed.countDown()
-            }
-            assertFalse(firstClosed.await(100, TimeUnit.MILLISECONDS), "first close must retain ownership while the sink runs")
-            val second = CompletableFuture.runAsync {
+            }, executor)
+            val second = CompletableFuture.runAsync({
+                ready.countDown()
+                check(start.await(5, TimeUnit.SECONDS))
+                closing.countDown()
                 bridge.close()
                 secondClosed.countDown()
-            }
+            }, executor)
+            assertTrue(ready.await(5, TimeUnit.SECONDS), "close tasks did not start")
+            start.countDown()
+            assertTrue(closing.await(5, TimeUnit.SECONDS), "close tasks did not enter close")
+            assertFalse(firstClosed.await(100, TimeUnit.MILLISECONDS), "first close must retain ownership while the sink runs")
             assertFalse(secondClosed.await(100, TimeUnit.MILLISECONDS), "second close must retain ownership while the sink runs")
             release.countDown()
             assertTrue(firstClosed.await(5, TimeUnit.SECONDS), "first close did not wait for the sink")
@@ -135,6 +149,7 @@ class DiagnosticBridgeTest {
             release.countDown()
             bridge.close()
             DiagnosticBridge.await(bridge)
+            executor.shutdownNow()
         }
     }
 
@@ -182,6 +197,7 @@ class DiagnosticBridgeTest {
             assertTrue(closed.await(5, TimeUnit.SECONDS), "sink close deadlocked")
             DiagnosticBridge.await(bridge)
             DiagnosticBridge.publish(DiagnosticInput(DiagnosticSeverity.WARN, "test", "second"))
+            DiagnosticBridge.await(bridge)
             assertEquals(listOf("first"), seen)
         } finally {
             bridge.close()
