@@ -417,7 +417,7 @@ class StabilityE2eTest : IntegrationTestBase() {
         val launchAMs = System.currentTimeMillis()
 
         // —— launch A: collect, then die by process destroy (no graceful close, no shutdown) ——
-        runPluginIde("stabilityE2eResidue", hardKill = true) {
+        runPluginIde("stabilityE2eResidue", hardKill = true, reuseConfig = true) {
             awaitColdStartReady()
             val observed = awaitSingleOutboxFile(timeoutMs = 75_000)
             fileA = observed
@@ -447,18 +447,22 @@ class StabilityE2eTest : IntegrationTestBase() {
 
         // —— launch B: valid permit → same scope file + unclean detection ——
         var runB: String? = null
-        runPluginIde("stabilityE2eResidue") {
+        var producerBId: String? = null
+        runPluginIde("stabilityE2eResidue", reuseConfig = true) {
             awaitColdStartReady()
-            assertFalse(Files.exists(staleSameScope), "same-scope legacy file must be deleted at startup")
-            assertTrue(Files.exists(staleOtherScope), "other-scope legacy file must remain untouched")
             // unclean detection runs at service init; wait for B's started row in A's file
-            awaitTolerantFact(timeoutMs = 60_000) { it.runId != runAId && it.name == "plugin.started" }
+            val startedB = awaitTolerantFact(timeoutMs = 60_000) { it.runId != runAId && it.name == "plugin.started" }
                 ?: throw AssertionError("run B never recorded plugin.started")
-            runB = awaitAnyRunId(fileAAfter, timeoutMs = 30_000)
+            runB = startedB.runId
+            producerBId = startedB.producerId
+            awaitFileGone(staleSameScope, deadlineMs = System.currentTimeMillis() + 30_000, dyingRunId = null)
+            assertFalse(Files.exists(staleSameScope), "same-scope legacy file must be deleted after activation")
+            assertTrue(Files.exists(staleOtherScope), "other-scope legacy file must remain untouched")
             Thread.sleep(20_000)
         }
 
         val runBId = requireNotNull(runB) { "run B's id was never observed" }
+        val producerB = requireNotNull(producerBId) { "run B's producer_id was never observed" }
         assertTrue(runBId != runAId, "restart must use a new run_id in the same file")
         assertTrue(Files.exists(staleOtherScope), "other-scope legacy file must remain outside cleanup scope")
         assertFalse(Files.exists(staleSameScope), "same-scope legacy file must not survive restart")
@@ -468,9 +472,9 @@ class StabilityE2eTest : IntegrationTestBase() {
         val factsB = allFacts.filter { it.runId == runBId }
         assertTrue(factsB.isNotEmpty(), "run B must have recorded facts")
         assertTrue(factsB.all { it.lineNo > factsA.size }, "run B facts must append after run A in the same file")
-        val producerB = factsB.map { it.obj["producer_id"]!!.jsonPrimitive.content }.toSet()
-        assertEquals(1, producerB.size, "run B must use one producer_id")
-        assertTrue(producerB.single() != producerA, "restart must create a new producer_id in the same file")
+        val producerIdsB = factsB.map { it.obj["producer_id"]!!.jsonPrimitive.content }.toSet()
+        assertEquals(setOf(producerB), producerIdsB, "run B facts must use the producer_id from plugin.started")
+        assertTrue(producerB != producerA, "restart must create a new producer_id in the same file")
         assertTrue(factsB.any { it.name == "plugin.unclean" }, "run B must report plugin.unclean in the same file")
         val failures = validateFacts(
             facts = factsB,
@@ -803,6 +807,7 @@ class StabilityE2eTest : IntegrationTestBase() {
 
     private data class TolerantFact(
         val eventId: String,
+        val producerId: String,
         val runId: String,
         val epoch: String,
         val revision: Long,
@@ -827,6 +832,7 @@ class StabilityE2eTest : IntegrationTestBase() {
                         val obj = json.parseToJsonElement(line) as? JsonObject ?: return@mapNotNull null
                         TolerantFact(
                             eventId = obj["event_id"]?.jsonPrimitive?.content ?: return@mapNotNull null,
+                            producerId = obj["producer_id"]?.jsonPrimitive?.content ?: return@mapNotNull null,
                             runId = obj["run_id"]?.jsonPrimitive?.content ?: return@mapNotNull null,
                             epoch = obj["account_epoch"]?.jsonPrimitive?.content ?: return@mapNotNull null,
                             revision = obj["policy_revision"]?.jsonPrimitive?.longOrNull ?: return@mapNotNull null,

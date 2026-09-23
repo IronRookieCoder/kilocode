@@ -164,6 +164,7 @@ abstract class IntegrationTestBase {
         testName: String,
         extraSystemProperties: Map<String, String> = emptyMap(),
         hardKill: Boolean = false,
+        reuseConfig: Boolean = false,
         driverAssertions: Driver.() -> Unit,
     ): IDEStartResult {
         val zipPath = requireNotNull(System.getProperty("path.to.build.plugin")) {
@@ -175,6 +176,11 @@ abstract class IntegrationTestBase {
             TestCase(IdeProductProvider.IU, LocalProjectInfo(fixtureProjectDir)),
         )
         PluginConfigurator(context).installPluginFromPath(Path.of(zipPath))
+        if (reuseConfig) {
+            // Starter writes migrate.config during context setup; remove it for restart scenarios
+            // so ConfigImportHelper does not replace the persisted IDE settings directory.
+            context.removeMigrateConfigAndCreateStubFile()
+        }
         // The sandbox IDE inherits the machine's zh locale (imported config / system language),
         // which translates the platform UI and breaks every English-text driver lookup (Settings
         // dialog, menus). Force the platform UI to English.
