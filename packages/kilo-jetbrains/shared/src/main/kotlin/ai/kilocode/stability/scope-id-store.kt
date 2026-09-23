@@ -18,7 +18,7 @@ private val pattern = Regex("^sc-[0-9a-f]{12}$")
  * IDE配置范围内的同步scope存储：写完临时文件并force后才原子发布，失败不返回随机替代值。
  * JVM内不同store共用创建锁；共享配置目录的多JVM运行仍依赖IDE单实例约束，不在支持范围内。
  */
-internal class FileScopeIdStore(private val config: Path) : ScopeIdStore {
+internal class FileScopeIdStore(private val config: Path, private val seed: () -> String? = { null }) : ScopeIdStore {
     private val file = config.resolve("kilo-stability-scope-id")
     private val id by lazy { synchronized(lock) { load() } }
 
@@ -28,7 +28,8 @@ internal class FileScopeIdStore(private val config: Path) : ScopeIdStore {
         Files.createDirectories(config)
         val stored = read()
         if (stored != null) return stored
-        val id = "sc-" + randomId()
+        val legacy = if (Files.notExists(file, LinkOption.NOFOLLOW_LINKS)) seed()?.takeIf(pattern::matches) else null
+        val id = legacy ?: ("sc-" + randomId())
         val temp = Files.createTempFile(config, "kilo-stability-scope-", ".tmp")
         try {
             FileChannel.open(temp, StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS).use { channel ->

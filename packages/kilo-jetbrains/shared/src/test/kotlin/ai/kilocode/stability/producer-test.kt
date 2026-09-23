@@ -3,6 +3,10 @@ package ai.kilocode.stability
 import java.nio.file.Files
 import java.nio.file.Path
 import java.util.UUID
+import java.util.concurrent.CompletableFuture
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import javax.swing.SwingUtilities
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -22,6 +26,7 @@ import kotlin.test.assertTrue
 
 private const val SERVICE_POLL_MS = 20L
 private const val FAR_EXPIRES = 9_000_000_000_000L
+private const val TIMEOUT_SECONDS = 15L
 
 /** 测试/fixture共用的Json实例约定（writer-test同款）：默认值随wire记录一并编码。 */
 private val factJson = Json { encodeDefaults = true }
@@ -212,6 +217,130 @@ private fun factLine(name: String, runId: String, seq: Long): String =
             data = JsonObject(emptyMap()),
         ),
     ) + "\n"
+
+class StartupTest {
+
+    @Test
+    fun `EDT getters return closed entries while background scope storage is blocked`() {
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val store = ScopeIdStore {
+            assertFalse(SwingUtilities.isEventDispatchThread(), "scope storage must stay off EDT")
+            entered.countDown()
+            check(release.await(TIMEOUT_SECONDS, TimeUnit.SECONDS))
+            "sc-fixed"
+        }
+        Harness(store = store).use { harness ->
+            val result = CompletableFuture<Recorder>()
+            try {
+                assertTrue(entered.await(TIMEOUT_SECONDS, TimeUnit.SECONDS))
+                SwingUtilities.invokeLater {
+                    runCatching {
+                        harness.service.noteConnectionProvider("cs-cloud")
+                        harness.service.operations
+                        harness.service.faults
+                        harness.service.recorder.also { recorder ->
+                            assertEquals(Admission.DISABLED, recorder.record(startedDraft()))
+                        }
+                    }.fold(result::complete, result::completeExceptionally)
+                }
+                result.get(1, TimeUnit.SECONDS)
+                assertFalse(Files.exists(harness.outbox))
+            } finally {
+                release.countDown()
+            }
+            harness.service.start("monolith")
+            harness.awaitReason("ok")
+            assertEquals(Admission.QUEUED, result.get().record(startedDraft()))
+        }
+    }
+
+    @Test
+    fun `upgrade reuses legacy settings scope and deletes its old producer facts`() {
+        val base = Files.createTempDirectory("stability-upgrade")
+        val home = base.resolve("home/.costrict/telemetry")
+        val config = base.resolve("config")
+        val id = "sc-0123456789ab"
+        val file = home.resolve("outbox/$id-pr-old.jsonl")
+        Files.createDirectories(file.parent)
+        Files.writeString(file, factLine("plugin.started", "run-old", 1L))
+        val other = Files.writeString(file.resolveSibling("sc-other-pr-old.jsonl"), "other\n")
+        Harness(base = base, store = FileScopeIdStore(config) { id }).use { harness ->
+            harness.service.start("monolith")
+            harness.awaitReason("ok")
+            assertEquals(id, Files.readString(config.resolve("kilo-stability-scope-id")))
+            assertFalse(Files.exists(file), "legacy facts for the migrated scope must be deleted")
+            assertEquals("other\n", Files.readString(other))
+            harness.service.stop("unload")
+            harness.awaitReason("stopped_unload")
+            val facts = Files.readAllLines(file.resolveSibling("$id.jsonl"))
+                .map { factJson.decodeFromString(Fact.serializer(), it) }
+            assertEquals(1, facts.count { it.name == "plugin.started" })
+            assertTrue(facts.none { it.run_id == "run-old" || it.name == "plugin.unclean" })
+        }
+    }
+
+    @Test
+    fun `initial disabled policy removes old scope data before reauthorization`() {
+        revoked(disabledControl())
+    }
+
+    @Test
+    fun `initial expired policy removes old scope data before reauthorization`() {
+        revoked(controlJson("acct-old", 1L, enabled = true, expiresAt = 1L))
+    }
+
+    @Test
+    fun `failed initial cleanup stays closed until its storage recovers`() {
+        val base = Files.createTempDirectory("stability-cleanup-failure")
+        val home = base.resolve("home/.costrict/telemetry")
+        val file = Files.createDirectories(home.resolve("outbox/sc-fixed.jsonl"))
+        val child = Files.writeString(file.resolve("keep"), "blocked")
+        Files.createDirectories(home.resolve("control"))
+        Files.writeString(home.resolve("control/jetbrains.json"), disabledControl())
+        Harness(base = base).use { harness ->
+            harness.service.start("monolith")
+            val status = harness.awaitReason("writer_disabled")
+            assertFalse(status.metrics || status.logs)
+            assertEquals(Admission.DISABLED, harness.service.recorder.record(startedDraft()))
+            assertEquals("blocked", Files.readString(child))
+            Files.move(file, base.resolve("blocked"))
+            harness.writeControl(validControl())
+            harness.awaitReason("ok")
+            harness.service.stop("unload")
+            harness.awaitReason("stopped_unload")
+            val facts = Files.readAllLines(file).map { factJson.decodeFromString(Fact.serializer(), it) }
+            assertEquals(1, facts.count { it.name == "plugin.started" })
+            assertTrue(facts.none { it.run_id == "run-old" || it.name == "plugin.unclean" })
+        }
+    }
+
+    private fun revoked(control: String) {
+        val base = Files.createTempDirectory("stability-initial-revoke")
+        val home = base.resolve("home/.costrict/telemetry")
+        val file = home.resolve("outbox/sc-fixed.jsonl")
+        Files.createDirectories(file.parent)
+        Files.writeString(file, factLine("plugin.started", "run-old", 1L))
+        val other = Files.writeString(file.resolveSibling("sc-other.jsonl"), "other\n")
+        Files.createDirectories(home.resolve("control"))
+        Files.writeString(home.resolve("control/jetbrains.json"), control)
+        Harness(base = base).use { harness ->
+            harness.service.start("monolith")
+            harness.awaitReason("unbound")
+            assertFalse(Files.exists(file), "initial revocation must remove existing scope facts")
+            assertEquals("other\n", Files.readString(other))
+            assertEquals(Admission.DISABLED, harness.service.recorder.record(startedDraft()))
+            harness.writeControl(validControl())
+            harness.awaitReason("ok")
+            harness.service.stop("unload")
+            harness.awaitReason("stopped_unload")
+            val facts = Files.readAllLines(file).map { factJson.decodeFromString(Fact.serializer(), it) }
+            assertEquals(1, facts.count { it.name == "plugin.started" })
+            assertTrue(facts.none { it.run_id == "run-old" || it.name == "plugin.unclean" })
+        }
+    }
+
+}
 
 class ProducerTest {
 
@@ -555,13 +684,11 @@ class ProducerTest {
             val capturedOperations = harness.service.operations
             val capturedRecorder = harness.service.recorder
             val capturedFaults = harness.service.faults
-            // 任何策略之前：fail open（设计§8）——unbound占位策略默认不限制采集，早捕获的
-            // standby自身队列接收该事实（standby无writer，事实留在队列不落盘）；显式撤销
-            // 才会DISABLED。激活后新事实经forwardTo直投活跃run，不再进入standby队列。
+            // run激活前关闭入口，不在EDT等待身份持久化；激活后同一引用转发至活跃run。
             assertEquals(
-                Admission.QUEUED,
+                Admission.DISABLED,
                 capturedRecorder.record(Draft("plugin.started", "lifecycle", "critical", JsonObject(emptyMap()))),
-                "unbound placeholder admits collection before any policy",
+                "standby rejects facts until a run is available",
             )
             harness.writeControl(validControl())
             harness.service.start("monolith")
@@ -575,9 +702,9 @@ class ProducerTest {
             )
             capturedFaults.report(IllegalStateException("captured standby"), "frontend", handled = true, fault = "f-cap")
             assertEquals(
-                1,
+                0,
                 capturedRecorder.depth().items,
-                "standby queue holds only the pre-activation fact; post-activation facts are forwarded",
+                "standby has no queued facts; post-activation facts are forwarded",
             )
             harness.service.stop("unload")
             harness.awaitReason("stopped_unload")

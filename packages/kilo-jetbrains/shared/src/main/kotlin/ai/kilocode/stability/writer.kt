@@ -16,7 +16,7 @@ import kotlinx.serialization.json.Json
 
 private const val DEFAULT_TICK_MS = 1_000L
 
-/** 事实文件预算（设计7.4）：每producer事实文件上限10MiB，写者后台重写淘汰最旧行。 */
+/** 事实文件预算（设计7.4）：每IDE scope事实文件上限10MiB，写者后台重写淘汰最旧行。 */
 private const val DEFAULT_MAX_FILE_BYTES = 10L * 1024 * 1024
 
 /** 批flush字节阈值（设计7.1）：累计64KiB即flush。 */

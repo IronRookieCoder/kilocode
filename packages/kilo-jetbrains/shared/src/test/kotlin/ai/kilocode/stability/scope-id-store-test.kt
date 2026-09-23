@@ -44,6 +44,33 @@ class ScopeIdStoreTest {
     }
 
     @Test
+    fun `first creation atomically persists a valid legacy setting and never reads it again`() {
+        val legacy = "sc-0123456789ab"
+        assertEquals(legacy, FileScopeIdStore(dir) { legacy }.loadOrCreate())
+        assertEquals(legacy, Files.readString(file))
+        Files.list(dir).use { paths -> assertEquals(listOf(file), paths.toList()) }
+        val store = FileScopeIdStore(dir) { error("existing scope must ignore legacy settings") }
+        assertEquals(legacy, store.loadOrCreate())
+    }
+
+    @Test
+    fun `invalid legacy settings cannot become a scope or path`() {
+        listOf("", "sc-short", "../other-scope", "sc-0123456789ag").forEach { legacy ->
+            val id = FileScopeIdStore(dir) { legacy }.loadOrCreate()
+            assertTrue(Regex("^sc-[0-9a-f]{12}$").matches(id))
+            assertNotEquals(legacy, id)
+            assertEquals(id, Files.readString(file))
+            Files.delete(file)
+        }
+    }
+
+    @Test
+    fun `legacy setting failure does not publish a replacement scope`() {
+        assertFailsWith<IOException> { FileScopeIdStore(dir) { throw IOException("unavailable") }.loadOrCreate() }
+        Files.list(dir).use { paths -> assertTrue(paths.toList().isEmpty()) }
+    }
+
+    @Test
     fun `existing scope is reused across store instances without rewriting`() {
         val id = "sc-0123456789ab"
         Files.writeString(file, id)

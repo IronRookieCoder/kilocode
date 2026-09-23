@@ -79,20 +79,24 @@ internal data class BeginSnapshot(val epoch: String?, val revision: Long?, val p
  * 健康计数全部走AtomicLong，丢弃不递归调用自身record。磁盘占用不设准入闸门：事实文件
  * 预算由writer写前的容量重写兜底（§7.4），超限行为被淘汰最旧行而非拒绝新记录。
  */
-class Recorder(
-    private val identity: ProducerIdentity,
-    private val policies: PolicyStore,
+class Recorder private constructor(
+    private val identity: ProducerIdentity?,
+    private val policies: PolicyStore?,
     private val clock: Clock,
+    @Volatile private var closed: Boolean,
 ) {
+    constructor(identity: ProducerIdentity, policies: PolicyStore, clock: Clock) :
+        this(identity, policies, clock, false)
+
+    /** 初始化前的关闭入口：只分配内存，不读取平台、策略或持久身份；激活后可直接转发。 */
+    internal constructor(clock: Clock) : this(null, null, clock, true)
+
     private val queue = StabilityQueue(
         TOTAL_MAX_ITEMS,
         TOTAL_MAX_BYTES,
         CRITICAL_RESERVED_ITEMS,
         CRITICAL_RESERVED_BYTES,
     )
-
-    /** 生产路径的互斥临界区由[StabilityQueue]的tryLock提供；本类不另持锁，不产生二次等待。 */
-    @Volatile private var closed = false
 
     /**
      * F1（终审，standby捕获黑洞）：本recorder作为激活前standby时，run建立后由服务置位的
@@ -127,7 +131,7 @@ class Recorder(
             disabledShutdown.incrementAndGet()
             return Admission.DISABLED
         }
-        val policy = policies.current()
+        val policy = policies?.current()
         // 防御分支：current()契约永非null（无有效策略时返回unbound占位策略、permit为登记名全集，
         // 不会走到这里）；DISABLED只来自显式策略关闭两用途或撤销（见下方purposes为空集）。
         if (policy == null) {
@@ -208,7 +212,7 @@ class Recorder(
 
     /** Operations.begin的开始时快照：当前epoch/revision与该name的即时许可（可为空集）。 */
     internal fun beginSnapshot(now: Long, name: String): BeginSnapshot {
-        val policy = if (closed) null else policies.current()
+        val policy = if (closed) null else policies?.current()
         return policy?.let { BeginSnapshot(it.epoch, it.revision, it.permit(now, name, CHANNEL_CRITICAL)) }
             ?: BeginSnapshot(null, null, emptySet())
     }
@@ -216,9 +220,8 @@ class Recorder(
     /** 详情配额每次取新策略；关闭日志/类别或quota=0时不产生详情及其补报摘要。 */
     internal fun limit(name: String): Int {
         forwardTo?.let { return it.limit(name) }
-        if (closed) return 0
-        val policy = policies.current()
-        return if ("logs" in policy.permit(clock.wall(), name, "diagnostic")) policy.limit else 0
+        val policy = if (closed) null else policies?.current()
+        return if (policy != null && "logs" in policy.permit(clock.wall(), name, "diagnostic")) policy.limit else 0
     }
 
     /** Operation.fields试图覆盖公共/终态字段时由operation.kt调用计数（记录本体拒绝产出）。 */
@@ -233,32 +236,35 @@ class Recorder(
         purposes: Set<String>,
         seq: Long,
         timestamp: Long,
-    ): Fact = Fact(
-        event_id = UUID.randomUUID().toString(),
-        timestamp = timestamp,
-        producer_id = identity.producerId,
-        run_id = identity.runId,
-        channel = draft.channel,
-        seq = seq,
-        account_epoch = draft.epoch ?: policy.epoch,
-        policy_revision = policy.revision,
-        purposes = purposes,
-        device_id = identity.deviceId,
-        plugin_version = identity.pluginVersion,
-        ide_product = identity.ideProduct,
-        ide_build = identity.ideBuild,
-        ide_build_major = identity.ideBuildMajor,
-        os_family = identity.osFamily,
-        arch = identity.arch,
-        env = identity.env,
-        mode = identity.mode,
-        side = identity.side,
-        connection_provider = identity.connectionProvider,
-        kind = draft.kind,
-        name = draft.name,
-        context = draft.context,
-        data = draft.data,
-    )
+    ): Fact {
+        val identity = requireNotNull(identity)
+        return Fact(
+            event_id = UUID.randomUUID().toString(),
+            timestamp = timestamp,
+            producer_id = identity.producerId,
+            run_id = identity.runId,
+            channel = draft.channel,
+            seq = seq,
+            account_epoch = draft.epoch ?: policy.epoch,
+            policy_revision = policy.revision,
+            purposes = purposes,
+            device_id = identity.deviceId,
+            plugin_version = identity.pluginVersion,
+            ide_product = identity.ideProduct,
+            ide_build = identity.ideBuild,
+            ide_build_major = identity.ideBuildMajor,
+            os_family = identity.osFamily,
+            arch = identity.arch,
+            env = identity.env,
+            mode = identity.mode,
+            side = identity.side,
+            connection_provider = identity.connectionProvider,
+            kind = draft.kind,
+            name = draft.name,
+            context = draft.context,
+            data = draft.data,
+        )
+    }
 }
 
 /** 详情按字段形态归类，不能通过把channel伪装成critical绕过诊断许可。 */

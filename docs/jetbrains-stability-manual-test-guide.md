@@ -42,7 +42,7 @@ IDE 启动 → StabilityService 后台初始化 → 读控制文件（30 秒轮�
 | 控制文件 | `~/.costrict/telemetry/control/jetbrains.json`，cs-cloud 发布的采集策略；人工测试手工编写 |
 | scope 文件 | `~/.costrict/telemetry/outbox/<scope-id>.jsonl`，目录即发现入口；每个 IDE 安装范围一个文件，跨重启和插件升级复用 |
 | producer / run | producer=每 JVM 采集实例（`pr-` 前缀）；run=每次采集生命周期（`run-` 前缀），均作为行内字段。撤销许可重开会换新 run；重启 IDE 会在复用的 scope 文件中写入新的 producer/run |
-| scope-id | 每个 IDE 安装范围持久的随机标识（存于 IDE 持久设置），同一 IDE 多次启动及插件升级共享、不同 IDE 互不相同；它是追加文件名，用于在同一文件中识别前任 run（`plugin.unclean` 判定，§7.3）与同源清理归属（§7.4） |
+| scope-id | 每个 IDE 安装范围持久的随机标识（存于 IDE 配置目录的 `kilo-stability-scope-id` 文件；首次创建复用旧 `ai.kilocode.stability.scope.id` 设置中的有效 ID），同一 IDE 多次启动及插件升级共享、不同 IDE 互不相同；它是追加文件名，用于在同一文件中识别前任 run（`plugin.unclean` 判定，§7.3）与同源清理归属（§7.4） |
 | 通道 channel | critical=计数/结果/生命周期事实；diagnostic=限频诊断详情 |
 | 用途 purposes | metrics（指标链）/ logs（日志链），一条事实可兼有 |
 | 追加文件 | 单写者追加式 NDJSON；无 `.open`/`.ready`/`.claimed`/`.done` 状态机，消费端按字节位移读取 |

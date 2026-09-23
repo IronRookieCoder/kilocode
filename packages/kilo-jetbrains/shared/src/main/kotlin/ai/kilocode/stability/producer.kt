@@ -27,6 +27,7 @@ private const val DEVICE_PREFIX = "device-"
 private const val WORKSPACE_PREFIX = "ws-"
 private const val RANDOM_ID_CHARS = 12
 private const val DEVICE_SETTING_KEY = "ai.kilocode.stability.device.id"
+private const val SCOPE_SETTING_KEY = "ai.kilocode.stability.scope.id"
 
 /** 内部随机短ID：UUID去连字符取前12个十六进制字符。 */
 internal fun randomId(): String = UUID.randomUUID().toString().replace("-", "").take(RANDOM_ID_CHARS)
@@ -87,10 +88,15 @@ fun interface ScopeIdStore {
 
 /**
  * 公开PathManager API定位IDE配置目录；首次scope在返回前同步落盘，不依赖设置保存或EDT。
+ * 首次创建文件时复用旧PropertiesComponent中的有效scope，只迁移身份，不保存旧设置。
  * 路径只用于本地存储，绝不进入telemetry。文件实现通过ScopeIdStore保持可注入。
  */
 fun platformScopeIdStore(): ScopeIdStore {
-    val store by lazy { FileScopeIdStore(PathManager.getConfigDir()) }
+    val store by lazy {
+        FileScopeIdStore(PathManager.getConfigDir()) {
+            PropertiesComponent.getInstance().getValue(SCOPE_SETTING_KEY)
+        }
+    }
     return ScopeIdStore { store.loadOrCreate() }
 }
 
