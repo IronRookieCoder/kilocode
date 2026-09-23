@@ -147,6 +147,7 @@ class StabilityService private constructor(
     @Volatile private var activeFaults: Faults? = null
     @Volatile private var activeHealth: Health? = null
     @Volatile private var activeWriter: Writer? = null
+    @Volatile private var activeBridge: AutoCloseable? = null
     @Volatile private var runActive = false
     /** IDE安装范围持久scope-id（后台初始化经[scopeStore]载入，实例内不变；文件名前缀）。 */
     @Volatile private var scopeId: String = ""
@@ -228,6 +229,7 @@ class StabilityService private constructor(
             activationJob?.cancel()
             healthJob?.cancel()
             resourceGaugeJob?.cancel()
+            closeBridge()
             if (runActive) {
                 if (permitted()) activeRecorder?.record(shutdownDraft(endKind))
                 activeRecorder?.close()
@@ -366,14 +368,17 @@ class StabilityService private constructor(
         // run；stopped_*状态仍由stop协程独占发布。
         if (stoppedOnce.get()) {
             runActive = false
+            closeBridge()
             recorder.close()
             writer.close()
             activeWriter = null
             return
         }
         // A6：安全异常入口与health摘要随run创建（去重缓存与计数随run生命周期绑定）。
-        activeFaults = Faults(recorder, clock)
+        val faults = Faults(recorder, clock)
+        activeFaults = faults
         activeHealth = Health(recorder, writer, clock)
+        installBridge(faults)
     }
 
     /** 公共授权撤销：关准入→writer最后排空（失效事实按入盘前重判期丢弃），不记shutdown；
@@ -382,6 +387,7 @@ class StabilityService private constructor(
      * standby转发随run结束断开，重开后由activateRun重新接管。 */
     private fun deactivateRun() {
         standby.forwardTo = null
+        closeBridge()
         activeRecorder?.close()
         activeWriter?.close() // 有界排空：撤销后重判期使剩余事实不入盘
         activeWriter = null
@@ -397,6 +403,28 @@ class StabilityService private constructor(
             }
         }.isFailure
         runFailure = if (pending) REASON_WRITER_DISABLED else null
+    }
+
+    /** writer活动后才安装；既有Faults适配器保留给Task 5的Diagnostics替换。 */
+    private fun installBridge(faults: Faults) {
+        synchronized(stateLock) {
+            if (stoppedOnce.get()) return
+            val bridge = DiagnosticBridge.install { input ->
+                val error = input.error ?: IllegalStateException(input.message)
+                faults.report(error, input.component, handled = true)
+            }
+            activeBridge = bridge
+        }
+    }
+
+    /** 必须早于recorder/writer关闭；安装句柄自身可重复关闭。 */
+    private fun closeBridge() {
+        val bridge = synchronized(stateLock) {
+            val current = activeBridge
+            activeBridge = null
+            current
+        }
+        bridge?.close()
     }
 
     /** writer启动在自有IO线程完成；等待逻辑见[defaultAwaitActive]（可注入）。 */

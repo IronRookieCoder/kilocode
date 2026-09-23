@@ -1,8 +1,10 @@
 package ai.kilocode.log
 
+import ai.kilocode.stability.DiagnosticBridge
 import java.util.logging.Formatter
 import java.util.logging.Level
 import java.util.logging.LogRecord
+import org.junit.jupiter.api.parallel.ResourceLock
 import kotlin.io.path.createTempDirectory
 import kotlin.io.path.exists
 import kotlin.io.path.readText
@@ -13,6 +15,7 @@ import kotlin.test.assertFalse
 import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
+@ResourceLock("diagnostic-bridge")
 class KiloLogTest {
 
     @Test
@@ -39,6 +42,28 @@ class KiloLogTest {
 
         val composite = log as CompositeLog
         assertEquals(listOf(intellij, file), composite.delegates.toList())
+    }
+
+    @Test
+    fun `created release log mirrors once while raw logger does not`() {
+        val intellij = FakeLog()
+        val file = FakeLog()
+        val seen = mutableListOf<String>()
+
+        DiagnosticBridge.install { seen += it.message }.use {
+            val raw = KiloLog.logger(sandbox = false, intellij = { intellij }, file = { file })
+            raw.warn("raw")
+
+            val log = MirroredLog(
+                KiloLog.logger(sandbox = false, intellij = { intellij }, file = { file }),
+                BridgeFixture::class.java.name,
+            )
+            log.warn("mirrored")
+        }
+
+        assertEquals(listOf("mirrored"), seen)
+        assertEquals(2, intellij.warns)
+        assertEquals(2, file.warns)
     }
 
     @Test
@@ -85,9 +110,14 @@ class KiloLogTest {
 
     private class FakeLog : KiloLog {
         override val isDebugEnabled = false
+        var warns = 0
         override fun debug(block: () -> String) {}
         override fun info(msg: String) {}
-        override fun warn(msg: String, t: Throwable?) {}
+        override fun warn(msg: String, t: Throwable?) {
+            warns += 1
+        }
         override fun error(msg: String, t: Throwable?) {}
     }
+
+    private class BridgeFixture
 }
