@@ -360,7 +360,9 @@ class ProducerTest {
             first.start("frontend")
             val outbox = home.resolve("outbox")
             val file = outbox.resolve("sc-fixed.jsonl")
-            awaitUntil(10_000) { Files.exists(file) }
+            awaitUntil(10_000) {
+                Files.exists(file) && Files.readAllLines(file).any { it.contains("\"plugin.started\"") }
+            }
             first.stop("app_close")
             awaitUntil(10_000) { first.status.value.reason == "stopped_app_close" }
         } finally {

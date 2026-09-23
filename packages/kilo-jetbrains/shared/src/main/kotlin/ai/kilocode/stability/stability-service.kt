@@ -326,6 +326,7 @@ class StabilityService private constructor(
         // 排空的standby队列；启动失败路径随即断开，落回standby自身的unbound占位准入。
         standby?.first?.forwardTo = recorder
         val storage = Storage(outboxDir())
+        val file = outboxDir().resolve(fileName())
         if (runCatching { storage.verifyLayout() }.isFailure) {
             standby?.first?.forwardTo = null
             recorder.close()
@@ -333,10 +334,10 @@ class StabilityService private constructor(
             setStatus(REASON_WRITER_DISABLED)
             return
         }
-        clearLegacy()
         // §7.3/M22：必须在writer打开文件前判定，避免writer为追加补LF后将崩溃尾页误作
-        // 前任shutdown；检测IO失败仍fail open，不阻塞采集启动（R15）。
-        val drafts = runCatching { UncleanDetector(outboxDir().resolve(fileName())).detect() }
+        // 前任shutdown；读取先经Storage拒绝链接/越界/权限不可验证目标，检测失败仍fail open，
+        // 不阻塞采集启动（R15）。
+        val drafts = runCatching { UncleanDetector(file).detect(storage.read(file)) }
             .getOrDefault(emptyList())
         // 追加协议布局（§5.2）：outbox下平铺单文件`<scope-id>.jsonl`，跨run与JVM稳定。
         val writer = Writer(outboxDir(), fileName(), identity, recorder, store, clock, storage = storage)
@@ -361,6 +362,7 @@ class StabilityService private constructor(
         runFailure = null
         activeWriter = writer
         runActive = true
+        clearLegacy()
         drafts.forEach(recorder::record)
         recorder.record(startedDraft())
         // F5：stop落在最后预检与提交序列之间的微窗口——提交后复查裁决，命中即就地收尾

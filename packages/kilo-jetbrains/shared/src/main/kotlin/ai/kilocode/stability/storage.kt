@@ -99,6 +99,27 @@ class Storage(private val root: Path) {
         }
     }
 
+    /** 安全读取root直系事实文件；缺失或非普通文件视为无内容，链接/权限异常拒绝读取。 */
+    fun read(path: Path): ByteArray? {
+        val target = path.toAbsolutePath().normalize()
+        val parent = root.toAbsolutePath().normalize()
+        if (target.parent != parent) throw StorageUnverifiedException("outbox read escapes producer root: $target")
+        if (!Files.exists(target, LinkOption.NOFOLLOW_LINKS)) return null
+        verifyNoLinks(target)
+        if (!Files.isRegularFile(target, LinkOption.NOFOLLOW_LINKS)) return null
+        verifyPermissions(target, isDirectory = false)
+        return try {
+            FileChannel.open(target, StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS).use { channel ->
+                val bytes = ByteArray(channel.size().toInt())
+                val buffer = ByteBuffer.wrap(bytes)
+                while (buffer.hasRemaining() && channel.read(buffer) >= 0) Unit
+                bytes.copyOf(buffer.position())
+            }
+        } catch (exception: IOException) {
+            throw StorageUnverifiedException("outbox file cannot be read: ${exception.message}", exception)
+        }
+    }
+
     /** 写循环：直到ByteBuffer耗尽；返回写入字节数。负返回值视为底层故障。 */
     fun writeAll(channel: FileChannel, buffer: ByteBuffer): Int {
         beforeWrite?.invoke(channel)

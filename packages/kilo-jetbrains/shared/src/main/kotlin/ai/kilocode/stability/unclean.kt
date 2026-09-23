@@ -23,12 +23,16 @@ private val factJson = Json { encodeDefaults = true }
 class UncleanDetector(private val file: Path) {
     fun detect(): List<Draft> {
         if (!Files.isRegularFile(file)) return emptyList()
-        return detectUncleanRun(file)?.let(::listOf) ?: emptyList()
+        return detect(Files.readAllBytes(file))
     }
 
+    /** 服务经Storage安全读取后传入事实文件字节；null表示目标不存在或不是普通文件。 */
+    internal fun detect(bytes: ByteArray?): List<Draft> =
+        bytes?.let(::detectUncleanRun)?.let(::listOf) ?: emptyList()
+
     /** 整读解析完整行，取最后一条started的run_id，其后无同run的shutdown即unclean。 */
-    private fun detectUncleanRun(path: Path): Draft? {
-        val facts = parseFacts(path)
+    private fun detectUncleanRun(bytes: ByteArray): Draft? {
+        val facts = parseFacts(bytes)
         val lastStarted = facts.indexOfLast { it.name == NAME_STARTED }
         if (lastStarted < 0) return null
         val runId = facts[lastStarted].run_id
@@ -50,8 +54,7 @@ class UncleanDetector(private val file: Path) {
      * 受10MiB上限约束的整读（Writer预算，设计7.4）；每实例启动执行一次。按行解析合法
      * Fact；残缺行（无LF崩溃残页）与坏行按§7.2跳过，既不算shutdown也不阻断解析。
      */
-    private fun parseFacts(path: Path): List<Fact> {
-        val bytes = Files.readAllBytes(path)
+    private fun parseFacts(bytes: ByteArray): List<Fact> {
         val text = bytes.toString(Charsets.UTF_8)
         val last = text.lastIndexOf('\n')
         if (last < 0) return emptyList()

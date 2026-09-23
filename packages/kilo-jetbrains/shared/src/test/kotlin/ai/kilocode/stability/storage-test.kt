@@ -9,6 +9,28 @@ import kotlin.test.assertFailsWith
 
 class StorageTest {
     @Test
+    fun `read rejects a linked scope file`() {
+        val base = Files.createTempDirectory("stability-read-link")
+        val dir = base.resolve("outbox")
+        val target = base.resolve("target.jsonl")
+        val link = dir.resolve("sc-live.jsonl")
+        val storage = Storage(dir)
+        try {
+            storage.verifyLayout()
+            Files.writeString(target, "target\n")
+            val created = runCatching { Files.createSymbolicLink(link, target) }.isSuccess
+            if (!created) return
+
+            assertFailsWith<StorageUnverifiedException> { storage.read(link) }
+        } finally {
+            Files.deleteIfExists(link)
+            Files.deleteIfExists(target)
+            Files.deleteIfExists(dir)
+            Files.deleteIfExists(base)
+        }
+    }
+
+    @Test
     fun `existing outbox link is rejected before target permissions change`() {
         val base = Files.createTempDirectory("stability-link")
         val target = Files.createDirectory(base.resolve("target"))
