@@ -64,12 +64,22 @@ private fun awaitUntil(timeoutMs: Long, condition: () -> Boolean) {
     assertTrue(condition(), "condition not met within ${timeoutMs}ms")
 }
 
+/** 可控双时钟（与Fixture的FixtureClock同构）：service测试共用同一时间线。 */
+internal class SweepClock(private val startWallMs: Long = 1_790_000_000_000L) : Clock {
+    private var monoMs = 0L
+    override fun wall(): Long = startWallMs + monoMs
+    override fun mono(): Long = monoMs
+    fun advance(ms: Long) {
+        monoMs += ms
+    }
+}
+
 /** 内存版设备ID存储：loadOrCreate语义与PropertiesComponent一致（首调用生成，之后复用）。 */
 private class MemoryDeviceStore(private var value: String? = null) : DeviceIdStore {
     override fun loadOrCreate(): String = value ?: ("device-" + UUID.randomUUID().toString().replace("-", "").take(12)).also { value = it }
 }
 
-/** 服务夹具：真实临时目录、真实PolicyStore/Writer/Retention，只注入路径、时钟、scope-id与运行模式来源。 */
+/** 服务夹具：真实临时目录、真实PolicyStore/Writer，只注入路径、时钟、scope-id与运行模式来源。 */
 private class Harness(
     val base: Path = Files.createTempDirectory("stability-service"),
     val clock: SweepClock = SweepClock(),
@@ -240,7 +250,7 @@ class ProducerTest {
     }
 
     @Test
-    fun `outbox holds one scope-producer jsonl and no registrations`() {
+    fun `outbox holds one scope jsonl and clears only same-scope legacy files`() {
         val home = Files.createTempDirectory("service-outbox")
         val logDir = Files.createTempDirectory("service-logdir")
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -254,20 +264,24 @@ class ProducerTest {
             pollIntervalMs = 50L,
         )
         try {
-            service.start("frontend") // 无控制文件：fail-open应建立run
             val outbox = home.resolve("outbox")
-            awaitUntil(10_000) { listJsonl(outbox).isNotEmpty() }
+            Files.createDirectories(outbox)
+            val legacy = outbox.resolve("sc-fixed-pr-old.jsonl").apply { Files.writeString(this, "legacy\n") }
+            val other = outbox.resolve("sc-other-pr-old.jsonl").apply { Files.writeString(this, "other\n") }
+            val junk = outbox.resolve("sc-fixed-notes.txt").apply { Files.writeString(this, "notes\n") }
+
+            service.start("frontend") // 无控制文件：fail-open应建立run
+            awaitUntil(10_000) { Files.exists(outbox.resolve("sc-fixed.jsonl")) }
+            assertFalse(Files.exists(legacy))
+            assertTrue(Files.exists(other))
+            assertTrue(Files.exists(junk))
             service.stop("app_close")
             // stop的收尾排空经后台协程完成：等started已落盘再读断言（有界，不依赖实现细节时序）。
             awaitUntil(10_000) {
                 listJsonl(outbox).any { file -> Files.readAllLines(file).any { it.contains("\"plugin.started\"") } }
             }
             val files = listJsonl(outbox)
-            assertEquals(1, files.size)
-            assertTrue(
-                files[0].fileName.toString().matches(Regex("^sc-fixed-pr-[a-z0-9]+\\.jsonl$")),
-                files[0].toString(),
-            )
+            assertEquals(listOf("sc-fixed.jsonl", "sc-other-pr-old.jsonl"), files.map { it.fileName.toString() }.sorted())
             assertFalse(Files.exists(home.resolve("registrations")))
             assertFalse(Files.exists(logDir.resolve("costrict-telemetry")))
 
@@ -281,6 +295,52 @@ class ProducerTest {
             assertTrue(service.status.value.metrics && service.status.value.logs, "unbound run reports both purposes enabled")
         } finally {
             scope.cancel()
+        }
+    }
+
+    @Test
+    fun `sequential launches append distinct producers and runs to one scope file`() {
+        val home = Files.createTempDirectory("service-sequential")
+        val firstScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        val first = StabilityService.create(
+            firstScope, { RunMode("monolith", "monolith") }, ScopeIdStore { "sc-fixed" },
+            home, DeviceIdStore { "device-fixed" }, SweepClock(), pollIntervalMs = 50L,
+        )
+        try {
+            first.start("frontend")
+            val outbox = home.resolve("outbox")
+            val file = outbox.resolve("sc-fixed.jsonl")
+            awaitUntil(10_000) { Files.exists(file) }
+            first.stop("app_close")
+            awaitUntil(10_000) { first.status.value.reason == "stopped_app_close" }
+        } finally {
+            firstScope.cancel()
+        }
+
+        val secondScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        val second = StabilityService.create(
+            secondScope, { RunMode("monolith", "monolith") }, ScopeIdStore { "sc-fixed" },
+            home, DeviceIdStore { "device-fixed" }, SweepClock(), pollIntervalMs = 50L,
+        )
+        try {
+            second.start("frontend")
+            val file = home.resolve("outbox").resolve("sc-fixed.jsonl")
+            awaitUntil(10_000) {
+                Files.exists(file) && Files.readAllLines(file).count { it.contains("\"plugin.started\"") } == 2
+            }
+            second.stop("app_close")
+            awaitUntil(10_000) { second.status.value.reason == "stopped_app_close" }
+
+            assertEquals(listOf("sc-fixed.jsonl"), listJsonl(home.resolve("outbox")).map { it.fileName.toString() })
+            val facts = Files.readAllLines(file).filter { it.isNotBlank() }
+                .map { factJson.decodeFromString(Fact.serializer(), it) }
+                .filter { it.name == "plugin.started" }
+            assertEquals(2, facts.size)
+            assertEquals(2, facts.map { it.producer_id }.toSet().size)
+            assertEquals(2, facts.map { it.run_id }.toSet().size)
+        } finally {
+            secondScope.cancel()
+            home.toFile().deleteRecursively()
         }
     }
 
