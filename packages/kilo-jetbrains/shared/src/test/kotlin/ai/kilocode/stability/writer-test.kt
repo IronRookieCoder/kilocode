@@ -32,6 +32,141 @@ import kotlinx.serialization.json.put
  */
 class WriterTest {
 
+    @Test
+    fun `interrupted partial group write still rolls back the file`() {
+        Fixture(tickMs = 60_000L).use { fixture ->
+            fixture.recorder.record(criticalDraft())
+            fixture.flush()
+            val file = fixture.outboxDir.resolve(fixture.fileName)
+            val before = Files.readAllBytes(file).toList()
+            fixture.storage.beforeWrite = { channel ->
+                fixture.storage.beforeWrite = null
+                channel.write(ByteBuffer.wrap("{\"partial\"".encodeToByteArray()))
+                Thread.currentThread().interrupt()
+            }
+            fixture.recorder.record(criticalDraft())
+            fixture.flush()
+            assertEquals(before, Files.readAllBytes(file).toList())
+            assertEquals(0, fixture.recorder.depth().items)
+        }
+    }
+
+    @Test
+    fun `failed fsync marks pending failure quality degraded`() {
+        Fixture(tickMs = 60_000L).use { fixture ->
+            fixture.failNextForce()
+            fixture.recorder.record(criticalDraft())
+            fixture.flush()
+            assertEquals(1, fixture.writer.stats().droppedFailure)
+            assertEquals(JsonPrimitive("degraded"), Health(fixture.recorder, fixture.writer, fixture.clock).snapshot()["quality"])
+        }
+    }
+
+    @Test
+    fun `new samples cannot evict a failure and incident retention is all or none`() {
+        Fixture(tickMs = 60_000L, maxFileBytes = 13_000).use { fixture ->
+            fixture.base.resolve("control.json").writeText(Fixture.defaultControl().dropLast(1) + ",\"accepted_fact_schema_majors\":[1,2]}")
+            fixture.policies.refresh()
+            repeat(2) { index ->
+                val id = "small-$index"
+                val chunks = DiagnosticPayload.parts(id, "response", "x".repeat(5000).encodeToByteArray()).drafts
+                assertEquals(Admission.QUEUED, fixture.recorder.recordBatch(listOf(v2Draft(id)) + chunks))
+                fixture.flush()
+            }
+            repeat(20) {
+                fixture.recorder.record(Draft("resource.snapshot", "sample", "critical", buildJsonObject {
+                    put("resource", "subscription")
+                    put("count", 1)
+                }))
+            }
+            fixture.flush()
+            val facts = fixture.facts()
+            assertEquals(0, facts.count { it.context["incident_id"] == "small-0" })
+            assertEquals(3, facts.count { it.context["incident_id"] == "small-1" })
+            assertTrue(Files.size(fixture.outboxDir.resolve(fixture.fileName)) <= 13_000)
+            assertEquals(3, fixture.writer.stats().droppedFailure)
+        }
+    }
+
+    @Test
+    fun `partial group write rolls back without leaving parent or chunks`() {
+        Fixture(tickMs = 60_000L).use { fixture ->
+            fixture.base.resolve("control.json").writeText(v2Control(1, 2))
+            fixture.policies.refresh()
+            fixture.recorder.record(v2Draft("kept"))
+            fixture.flush()
+            val chunks = DiagnosticPayload.parts("inc-1", "response", "x".repeat(5000).encodeToByteArray()).drafts
+            fixture.storage.beforeWrite = { channel ->
+                fixture.storage.beforeWrite = null
+                channel.write(ByteBuffer.wrap("{\"partial\"".encodeToByteArray()))
+                channel.close()
+            }
+            assertEquals(Admission.QUEUED, fixture.recorder.recordBatch(listOf(v2Draft()) + chunks))
+            fixture.flush()
+            assertEquals(listOf("kept"), fixture.facts().map { it.context["incident_id"] })
+            assertEquals(3, fixture.writer.stats().writeErrors)
+            assertEquals(3, fixture.writer.stats().droppedFailure)
+            assertEquals(0, fixture.recorder.depth().bytes)
+        }
+    }
+
+    @Test
+    fun `rewrite retains complete newest incidents ahead of operations and samples`() {
+        Fixture(autoStart = false, tickMs = 60_000L, maxFileBytes = 50L * 1024 * 1024).use { fixture ->
+            fixture.base.resolve("control.json").writeText(Fixture.defaultControl().dropLast(1) + ",\"accepted_fact_schema_majors\":[1,2]}")
+            fixture.policies.refresh()
+            fixture.storage.verifyLayout()
+            assertEquals(Admission.QUEUED, fixture.recorder.record(criticalDraft()))
+            val claim = requireNotNull(fixture.recorder.tryClaim(1, 1024 * 1024))
+            val seed = claim.records.single().fact
+            claim.release()
+            val line = factJson.encodeToString(Fact.serializer(), seed.copy(
+                kind = "health", name = "telemetry.health", data = buildJsonObject { put("drop", 0) },
+            )) + "\n"
+            val file = fixture.outboxDir.resolve(fixture.fileName)
+            Files.newBufferedWriter(file).use { out ->
+                repeat((fixture.maxFileBytes / line.encodeToByteArray().size).toInt()) { out.write(line) }
+            }
+            fixture.writer.start()
+            repeat(2) { index ->
+                val id = "inc-$index"
+                val parent = v2Draft(id)
+                val chunks = DiagnosticPayload.parts(id, "response", "x".repeat(50_000).encodeToByteArray()).drafts
+                assertEquals(Admission.QUEUED, fixture.recorder.recordBatch(listOf(parent) + chunks))
+                fixture.flush()
+            }
+            repeat(20) { fixture.recorder.record(criticalDraft()) }
+            fixture.flush()
+            val facts = fixture.facts()
+            repeat(2) { index ->
+                val group = facts.filter { it.context["incident_id"] == "inc-$index" }
+                assertEquals(14, group.size)
+                assertEquals(1, group.count { it.name == "diagnostic.reported" })
+                assertEquals(13, group.count { it.name == "diagnostic.payload" })
+            }
+            assertTrue(Files.size(file) <= fixture.maxFileBytes)
+            assertTrue(fixture.writer.stats().droppedEvicted > 0)
+        }
+    }
+
+    @Test
+    fun `writer rejects a whole batch when capability changes before write`() {
+        Fixture(autoStart = false).use { fixture ->
+            fixture.base.resolve("control.json").writeText(v2Control(1, 2))
+            fixture.policies.refresh()
+            val chunks = DiagnosticPayload.parts("inc-1", "response", "x".repeat(5000).encodeToByteArray()).drafts
+            assertEquals(Admission.QUEUED, fixture.recorder.recordBatch(listOf(v2Draft()) + chunks))
+            fixture.base.resolve("control.json").writeText(v2Control(1))
+            fixture.policies.refresh()
+            fixture.writer.start()
+            fixture.flush()
+            assertTrue(fixture.facts().isEmpty())
+            assertEquals(3, fixture.writer.stats().droppedPolicy)
+            assertEquals(3, fixture.writer.stats().droppedFailure)
+            assertEquals(0, fixture.recorder.depth().items)
+        }
+    }
+
     // ---------- Task 4：Storage追加原语直测（追加不截断、删除后按原名重建） ----------
 
     @Test
@@ -386,7 +521,7 @@ class WriterTest {
         put("count", 1)
     }, purposes = setOf("logs"))
 
-    private fun v2Draft(): Draft = Draft(
+    private fun v2Draft(id: String = "inc-1"): Draft = Draft(
         "diagnostic.reported", "diagnostic", "diagnostic",
         buildJsonObject {
             put("severity", "error")
@@ -398,7 +533,7 @@ class WriterTest {
             put("payload_refs", JsonArray(listOf(JsonPrimitive("response"))))
             put("truncated", false)
         },
-        context = mapOf("incident_id" to "inc-1"),
+        context = mapOf("incident_id" to id),
         purposes = setOf("logs"),
         schemaVersion = "2.0",
     )

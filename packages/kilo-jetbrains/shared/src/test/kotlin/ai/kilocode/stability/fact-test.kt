@@ -378,6 +378,7 @@ class FactTest {
             "connection.state_changed", "connection.recovery", "csc.install", "csc.start",
             "credentials.ready", "cli.download", "migration.required", "session.open",
             "session.restore", "action", "availability", "error.uncaught", "error.reported",
+            "diagnostic.reported", "diagnostic.redaction_failed", "diagnostic.payload",
             "protocol.error", "telemetry.health", "session.dispose_risk", "rpc",
             "edt.delay", "edt.violation", "edt.stall", "render.apply", "ide.operation", "resource.snapshot",
         )

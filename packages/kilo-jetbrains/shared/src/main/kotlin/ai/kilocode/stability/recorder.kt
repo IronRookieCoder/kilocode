@@ -59,6 +59,10 @@ data class RecorderHealth(
     val disabledShutdown: Long,
     val evictedDiagnostic: Long,
     val rejectedOverride: Long,
+    val droppedEvicted: Long = 0,
+    val droppedFailure: Long = 0,
+    val droppedPolicy: Long = 0,
+    val droppedOversize: Long = 0,
 )
 
 /** Operations.begin的开始时快照（设计6.2：跨账户切换保留开始时epoch；用途只能缩小）。 */
@@ -72,12 +76,12 @@ internal data class BeginSnapshot(val epoch: String?, val revision: Long?, val p
  * 无有效策略时该快照为unbound占位策略（设计第8章默认不限制采集），DISABLED只来自显式策略
  * 关闭两用途（含撤销、公共/用途过期）；3) [Dictionary.violations]结构性违规即DROPPED
  * （请求用途为空除外——它交给许可交集判为DISABLED）；4) 三方用途交集（Policy.permit ∩
- * Draft自带purposes ∩ Dictionary.purposes形态出口）为空即DISABLED；5) 生产者锁只tryLock，
- * 争用即DROPPED；6) seq按run/channel在准入前递增（丢弃也产生seq空洞，不复用）；
- * 7) 双维容量由[StabilityQueue]原子判定。
+ * Draft自带purposes ∩ Dictionary.purposes形态出口）为空即DISABLED；5) failure走无锁MPSC，
+ * 低档位只tryLock、争用即DROPPED；6) seq按run/channel在准入前递增（不复用，出队按优先级）；
+ * 7) 双维容量由[StabilityQueue]原子判定，batch校验与预留覆盖整个parent/chunks组。
  *
  * 健康计数全部走AtomicLong，丢弃不递归调用自身record。磁盘占用不设准入闸门：事实文件
- * 预算由writer写前的容量重写兜底（§7.4），超限行为被淘汰最旧行而非拒绝新记录。
+ * 预算由writer按failure→critical→sample的整组保留顺序兜底。
  */
 class Recorder private constructor(
     private val identity: ProducerIdentity?,
@@ -118,68 +122,60 @@ class Recorder private constructor(
     private val disabledShutdown = AtomicLong(0)
     private val evictedDiagnostic = AtomicLong(0)
     private val rejectedOverride = AtomicLong(0)
+    private val droppedPolicy = AtomicLong(0)
+    private val droppedEvicted = AtomicLong(0)
+    private val droppedFailure = AtomicLong(0)
 
-    /** seq按producer+run+channel单调递增；在队列tryLock临界区内调用，丢弃也产生空洞不复用。 */
-    private fun nextSeq(channel: String): Long =
-        if (channel == CHANNEL_CRITICAL) criticalSeq.incrementAndGet() else diagnosticSeq.incrementAndGet()
+    fun record(draft: Draft): Admission = recordBatch(listOf(draft))
 
+    /** 完整校验、单次双维预留、单个group发布；任何拒绝均不会发布部分parent/chunks。 */
     @Suppress("ReturnCount")
-    fun record(draft: Draft): Admission {
-        // F1：standby在run激活后把事实转投活跃run，先于一切本地裁决（目标recorder自行把守准入）。
-        forwardTo?.let { target -> return target.record(draft) }
-        if (closed) {
-            disabledShutdown.incrementAndGet()
-            return Admission.DISABLED
+    fun recordBatch(drafts: List<Draft>): Admission {
+        forwardTo?.let { return it.recordBatch(drafts) }
+        val inputs = drafts.toList()
+        if (inputs.isEmpty()) return Admission.DROPPED
+        fun loss(counter: AtomicLong, admission: Admission): Admission {
+            droppedFailure.addAndGet(inputs.count {
+                priority(it.name, it.channel, it.data) == Priority.FAILURE
+            }.toLong())
+            counter.addAndGet(inputs.size.toLong())
+            return admission
         }
-        val policy = policies?.current()
-        // 防御分支：current()契约永非null（无有效策略时返回unbound占位策略、permit为登记名全集，
-        // 不会走到这里）；DISABLED只来自显式策略关闭两用途或撤销（见下方purposes为空集）。
-        if (policy == null) {
-            disabledPolicy.incrementAndGet()
-            return Admission.DISABLED
-        }
-        val violations = Dictionary.violations(draft)
-        if (violations.any { it != PURPOSES_EMPTY }) {
-            droppedInvalid.incrementAndGet()
-            return Admission.DROPPED
+        if (closed) return loss(disabledShutdown, Admission.DISABLED)
+        val policy = policies?.current() ?: return loss(droppedPolicy, Admission.DISABLED)
+        if (Dictionary.violations(inputs).any { it != PURPOSES_EMPTY }) {
+            return loss(droppedInvalid, Admission.DROPPED)
         }
         val now = clock.wall()
-        val permitted = policy.permit(now, draft.name, category(draft.channel, draft.data), draft.schemaVersion.substringBefore('.').toIntOrNull() ?: 0)
-        val purposes = buildSet {
-            draft.purposes.forEach { purpose ->
-                if (purpose in permitted && purpose in Dictionary.purposes(draft.name, draft.data)) add(purpose)
+        val facts = inputs.map { draft ->
+            val schema = draft.schemaVersion.substringBefore('.').toIntOrNull() ?: 0
+            val permitted = policy.permit(now, draft.name, category(draft.channel, draft.data), schema)
+            val purposes = draft.purposes.intersect(permitted).intersect(Dictionary.purposes(draft.name, draft.data))
+            if (purposes.isEmpty()) {
+                disabledPolicy.addAndGet(inputs.size.toLong())
+                return loss(droppedPolicy, Admission.DISABLED)
             }
+            // 优先级claim不保证wire行的seq有序；seq仍按run/channel唯一递增分配。
+            val counter = if (draft.channel == CHANNEL_CRITICAL) criticalSeq else diagnosticSeq
+            val seq = counter.incrementAndGet()
+            buildFact(draft, policy, purposes, seq, now)
         }
-        if (purposes.isEmpty()) {
-            disabledPolicy.incrementAndGet()
-            return Admission.DISABLED
-        }
-
-        val channel = draft.channel
-        // 生产者临界区=队列锁：seq分配、Fact构建、字节估算与准入判定在同一tryLock内完成，
-        // 保证同通道队列顺序与seq顺序一致；争用时factory不被调用，不消耗seq。
-        val outcome = queue.tryOffer {
-            val seq = nextSeq(channel)
-            val fact = buildFact(draft, policy, purposes, seq, now)
-            QueuedRecord(fact, channel, seq, estimateBytes(fact), clock.mono())
-        }
-        val admission = when (outcome.offer) {
+        if (!complete(facts)) return loss(droppedInvalid, Admission.DROPPED)
+        val mono = clock.mono()
+        val group = QueuedGroup(facts.map { fact ->
+            QueuedRecord(fact, fact.channel, fact.seq, estimateBytes(fact), mono)
+        })
+        val outcome = queue.tryOffer(group)
+        droppedEvicted.addAndGet(outcome.evicted.toLong())
+        evictedDiagnostic.addAndGet(outcome.evictedDiagnostics.toLong())
+        return when (outcome.offer) {
             QueueOffer.QUEUED -> {
-                accepted.incrementAndGet()
+                accepted.addAndGet(inputs.size.toLong())
                 Admission.QUEUED
             }
-            QueueOffer.FULL -> {
-                droppedCapacity.incrementAndGet()
-                Admission.DROPPED
-            }
-            QueueOffer.CONTENTION -> {
-                droppedContention.incrementAndGet()
-                Admission.DROPPED
-            }
+            QueueOffer.FULL -> loss(droppedCapacity, Admission.DROPPED)
+            QueueOffer.CONTENTION -> loss(droppedContention, Admission.DROPPED)
         }
-        // 逐出计量对三种结论统一执行（争用时无逐出，计数为0即no-op）。
-        if (outcome.evictedDiagnostics > 0) evictedDiagnostic.addAndGet(outcome.evictedDiagnostics.toLong())
-        return admission
     }
 
     /** 停止准入：closed后record一律DISABLED；已排队事实留给writer按A4流程处理。 */
@@ -197,6 +193,9 @@ class Recorder private constructor(
         disabledShutdown = disabledShutdown.get(),
         evictedDiagnostic = evictedDiagnostic.get(),
         rejectedOverride = rejectedOverride.get(),
+        droppedPolicy = droppedPolicy.get(),
+        droppedEvicted = droppedEvicted.get(),
+        droppedFailure = droppedFailure.get(),
     )
 
     internal fun depth(): QueueDepth = QueueDepth(

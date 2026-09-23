@@ -35,8 +35,163 @@ import kotlinx.serialization.json.putJsonArray
  */
 class QueueTest {
 
+    @Test
+    fun `one hundred concurrent incidents evict samples without losing failures`() {
+        Fixture(autoStart = false).use { fixture ->
+            fixture.base.resolve("control.json").writeText(Fixture.defaultControl().dropLast(1) + ",\"accepted_fact_schema_majors\":[1,2]}")
+            fixture.policies.refresh()
+            while (fixture.recorder.record(Draft("telemetry.health", "health", "critical", healthData())) == Admission.QUEUED) Unit
+            val pool = Executors.newFixedThreadPool(8)
+            try {
+                val jobs = (0 until 100).map { index ->
+                    pool.submit<Admission> { fixture.recorder.recordBatch(incident("inc-$index")) }
+                }
+                jobs.forEach { job -> assertEquals(Admission.QUEUED, job.get(30, TimeUnit.SECONDS)) }
+            } finally {
+                pool.shutdownNow()
+            }
+            val claim = assertNotNull(fixture.recorder.tryClaim(MAX_ITEMS, MAX_BYTES))
+            assertEquals(300, claim.records.take(300).count { it.fact.context["incident_id"] != null })
+            assertEquals(100, claim.records.count { it.fact.name == "diagnostic.reported" })
+            assertEquals(200, claim.records.count { it.fact.name == "diagnostic.payload" })
+            assertEquals(0, fixture.recorder.health().droppedFailure)
+            assertTrue(fixture.recorder.health().droppedEvicted > 0)
+            assertEquals(JsonPrimitive("good"), Health(fixture.recorder, fixture.writer, fixture.clock).snapshot()["quality"])
+            claim.release()
+            claim.release()
+            assertEquals(0, fixture.recorder.depth().items)
+            assertEquals(0, fixture.recorder.depth().bytes)
+        }
+    }
+
+    @Test
+    fun `batch validation and reservation never publish partial incidents`() {
+        Fixture(autoStart = false).use { fixture ->
+            fixture.base.resolve("control.json").writeText(Fixture.defaultControl().dropLast(1) + ",\"accepted_fact_schema_majors\":[1,2]}")
+            fixture.policies.refresh()
+            val drafts = incident("invalid")
+            assertEquals(Admission.DROPPED, fixture.recorder.recordBatch(drafts + drafts.last()))
+            assertEquals(Admission.DROPPED, fixture.recorder.recordBatch(drafts.drop(1)))
+            assertEquals(Admission.DROPPED, fixture.recorder.recordBatch(drafts.dropLast(1)))
+            assertEquals(0, fixture.recorder.depth().items)
+            while (fixture.recorder.record(Draft("rpc", "operation", "critical", endData("rpc"))) == Admission.QUEUED) Unit
+            val before = fixture.recorder.depth()
+            assertEquals(Admission.DROPPED, fixture.recorder.recordBatch(incident("full")))
+            assertEquals(before, fixture.recorder.depth())
+        }
+    }
+
+    private fun incident(id: String): List<Draft> = listOf(Draft(
+        "diagnostic.reported", "diagnostic", "diagnostic",
+        buildJsonObject {
+            put("severity", "error")
+            put("component", "backend.rpc")
+            put("code", "decode")
+            put("message", "failed")
+            put("thread_name", "worker")
+            put("thread_id", 1)
+            putJsonArray("payload_refs") { add("response") }
+            put("truncated", false)
+        },
+        context = mapOf("incident_id" to id), purposes = setOf("logs"), schemaVersion = "2.0",
+    )) + DiagnosticPayload.parts(id, "response", "x".repeat(5000).encodeToByteArray()).drafts
+
     private val tempDirs = mutableListOf<Path>()
     private val stores = mutableListOf<PolicyStore>()
+
+    @Test
+    fun `concurrent failure reservations and releases preserve the budget`() {
+        val queue = StabilityQueue(MAX_ITEMS, MAX_BYTES, RESERVED_ITEMS, RESERVED_BYTES)
+        repeat(1600) { queue.tryOffer { record("diagnostic", 16, seq = it + 1L) } }
+        val gate = CountDownLatch(1)
+        val done = CountDownLatch(8)
+        val pool = Executors.newFixedThreadPool(9)
+        try {
+            val consumer = pool.submit<List<Fact>> {
+                gate.await()
+                val facts = ArrayList<Fact>()
+                while (done.count > 0 || queue.depthItems > 0) {
+                    val claim = queue.tryClaim(17, 1024)
+                    if (claim == null) {
+                        Thread.yield()
+                        continue
+                    }
+                    try {
+                        facts += claim.records.map { it.fact }
+                        assertTrue(queue.depthItems in 0..MAX_ITEMS)
+                        assertTrue(queue.depthBytes in 0..MAX_BYTES)
+                    } finally {
+                        claim.release()
+                    }
+                }
+                facts
+            }
+            val jobs = (0 until 8).map { worker ->
+                pool.submit {
+                    gate.await()
+                    try {
+                        repeat(100) { index ->
+                            val group = QueuedGroup((0..1).map { part ->
+                                val seq = (worker * 200 + index * 2 + part + 1).toLong()
+                                val fact = queueFact(seq, "critical").copy(name = "error.reported")
+                                QueuedRecord(fact, "critical", seq, 16, 0)
+                            })
+                            assertEquals(QueueOffer.QUEUED, queue.tryOffer(group).offer)
+                        }
+                    } finally {
+                        done.countDown()
+                    }
+                }
+            }
+            gate.countDown()
+            jobs.forEach { it.get(30, TimeUnit.SECONDS) }
+            val facts = consumer.get(30, TimeUnit.SECONDS).filter { it.name == "error.reported" }
+            assertEquals(1600, facts.size)
+            assertEquals(1600, facts.map { it.event_id }.distinct().size)
+            assertEquals(0, queue.depthItems)
+            assertEquals(0, queue.depthBytes)
+        } finally {
+            gate.countDown()
+            pool.shutdownNow()
+        }
+    }
+
+    @Test
+    fun `failure group evicts and claims while the producer lock is held`() {
+        val queue = StabilityQueue(6, 600, 2, 100)
+        repeat(4) { queue.tryOffer { record("diagnostic", 16, seq = it + 1L) } }
+        repeat(2) { queue.tryOffer { record("critical", 16, seq = it + 1L) } }
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val pool = Executors.newSingleThreadExecutor()
+        try {
+            val job = pool.submit {
+                queue.tryWithProducerLock {
+                    entered.countDown()
+                    assertTrue(release.await(30, TimeUnit.SECONDS))
+                }
+            }
+            assertTrue(entered.await(30, TimeUnit.SECONDS))
+            val group = QueuedGroup((1L..3L).map { seq ->
+                QueuedRecord(queueFact(seq, "diagnostic").copy(name = "error.reported"), "diagnostic", seq, 16, 0)
+            })
+            val outcome = queue.tryOffer(group)
+            assertEquals(QueueOffer.QUEUED, outcome.offer)
+            assertEquals(3, outcome.evicted)
+            val claim = assertNotNull(queue.tryClaim(1, 1))
+            assertEquals(3, claim.records.size, "batch limits must not split a group")
+            assertEquals(6, queue.depthItems, "claimed records remain reserved")
+            claim.release()
+            claim.release()
+            assertEquals(3, queue.depthItems)
+            assertEquals(48, queue.depthBytes)
+            release.countDown()
+            job.get(30, TimeUnit.SECONDS)
+        } finally {
+            release.countDown()
+            pool.shutdownNow()
+        }
+    }
 
     @AfterTest
     fun tearDown() {
@@ -114,15 +269,15 @@ class QueueTest {
     }
 
     @Test
-    fun `critical larger than total capacity is refused after evicting every diagnostic`() {
+    fun `impossible group is refused without evicting diagnostics`() {
         val queue = StabilityQueue(MAX_ITEMS, MAX_BYTES, RESERVED_ITEMS, RESERVED_BYTES)
         repeat(100) { assertEquals(QueueOffer.QUEUED, queue.tryOffer({ record("diagnostic", 16, seq = it + 1L) }).offer) }
 
         val outcome = queue.tryOffer({ record("critical", bytes = MAX_BYTES + 1, seq = 1) })
         assertEquals(QueueOffer.FULL, outcome.offer)
-        assertEquals(100, outcome.evictedDiagnostics)
-        assertEquals(0, queue.depthItems)
-        assertEquals(0, queue.diagnosticDepthItems)
+        assertEquals(0, outcome.evictedDiagnostics)
+        assertEquals(100, queue.depthItems)
+        assertEquals(100, queue.diagnosticDepthItems)
     }
 
     // ---------- writer交接（claim仍计入预算） ----------
@@ -234,7 +389,7 @@ class QueueTest {
         assertTrue(queued in 1 until 1600, "byte budget must bind first, queued=$queued")
         assertEquals(Admission.QUEUED, recorder.record(Draft("rpc", "operation", "critical", endData("rpc"))))
         val depth = fixture.depth()
-        assertTrue(depth.diagnosticBytes <= DIAGNOSTIC_BYTES, "diagnostic depth must respect the byte budget")
+        assertTrue(depth.diagnosticBytes <= MAX_BYTES, "failure diagnostics may use the full byte budget")
         assertEquals(queued + 1, depth.items)
         assertEquals(1L, recorder.health().droppedCapacity)
     }
@@ -361,7 +516,8 @@ class QueueTest {
 
         val criticalSeqs = facts.filter { fact -> fact.channel == "critical" }.map { it.seq }
         assertEquals(criticalSeqs.size, criticalSeqs.distinct().size, "seq must be unique per channel")
-        assertEquals(criticalSeqs.sorted(), criticalSeqs, "queued order must match seq order")
+        val phases = facts.map { it.data["phase"] }
+        assertTrue(phases.take(40).all { it == JsonPrimitive("end") }, "failure ends must be claimed first")
     }
 
     // ---------- 夹具 ----------

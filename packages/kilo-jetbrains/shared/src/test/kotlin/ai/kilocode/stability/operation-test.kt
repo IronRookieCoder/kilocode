@@ -446,7 +446,8 @@ class OperationTest {
                 claim.release()
                 if (claimed < MAX_CLAIM_ITEMS) break
             }
-            return facts
+            // failure优先出队；operation测试按分配序号观察业务时间线。
+            return facts.sortedBy { it.seq }
         }
 
         fun replaceControl(text: String) {

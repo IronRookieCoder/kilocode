@@ -36,12 +36,16 @@ private data class HealthSample(
     val writeError: Long,
     val depthBytes: Int,
     val oldestAgeMs: Long,
+    val reasons: Map<String, Long>,
+    val quality: String,
 ) {
     fun toJson(): JsonObject = buildJsonObject {
         put("drop", drop)
         put("write_error", writeError)
         put("depth_bytes", depthBytes)
         put("oldest_age_ms", oldestAgeMs)
+        reasons.forEach { (key, value) -> put(key, value) }
+        put("quality", quality)
     }
 }
 
@@ -72,6 +76,7 @@ class Health(
     private var lastGenerateMonoMs = clock.mono()
     private var lastWarnMonoMs = -WARN_INTERVAL_MS
     private var nonEmptySinceMonoMs = -1L
+    private var baseline = emptyMap<String, Long>()
 
     /** 原始累计读数（观测用；data键集与telemetry.health一致，落盘事实则是[poll]折算的增量）；一次观测，同时推进积压年龄采样。 */
     fun snapshot(): JsonObject = sample().toJson()
@@ -80,15 +85,17 @@ class Health(
      * 后台生成入口：采样→折算自上一条事实的增量→（写盘失败增量时）限频告警→到期或损失
      * 变化时记录增量事实。返回是否生成了一条事实。只读计数器与深度，绝不从告警路径调用record。
      */
+    @Suppress("ReturnCount") // 未到周期或准入失败均不推进基线。
     internal fun poll(): Boolean {
         val nowMono = clock.mono()
         val sample = sample()
         val dropDelta = sample.drop - lastDrop
         val writeDelta = sample.writeError - lastWriteError
         if (writeDelta > 0) maybeWarn(writeDelta, sample.writeError, nowMono)
-        val lossChanged = dropDelta > 0 || writeDelta > 0
+        val lossChanged = dropDelta > 0 || writeDelta > 0 ||
+            sample.reasons.getValue("drop_failure") > baseline.getOrDefault("drop_failure", 0)
         if (!lossChanged && nowMono - lastGenerateMonoMs < intervalMs) return false
-        recorder.record(
+        val admission = recorder.record(
             Draft(
                 NAME_HEALTH, KIND_HEALTH, CHANNEL_CRITICAL,
                 buildJsonObject {
@@ -96,23 +103,38 @@ class Health(
                     put("write_error", writeDelta)
                     put("depth_bytes", sample.depthBytes)
                     put("oldest_age_ms", sample.oldestAgeMs)
+                    sample.reasons.forEach { (key, value) -> put(key, value - baseline.getOrDefault(key, 0)) }
+                    put("quality", sample.quality)
                 },
                 emptyMap(), null, DUAL_PURPOSES,
             ),
         )
+        if (admission != Admission.QUEUED) return false
         lastDrop = sample.drop
         lastWriteError = sample.writeError
         lastGenerateMonoMs = nowMono
+        baseline = sample.reasons
         return true
     }
 
     private fun sample(): HealthSample {
         val counters = recorder.health()
         val stats = writer.stats()
-        val drop = counters.droppedInvalid + counters.droppedContention + counters.droppedCapacity +
-            stats.droppedPolicy + stats.droppedOversize + stats.droppedEvicted
+        val reasons = linkedMapOf(
+            "drop_invalid" to counters.droppedInvalid,
+            "drop_contention" to counters.droppedContention,
+            "drop_capacity" to counters.droppedCapacity,
+            "drop_policy" to counters.droppedPolicy + stats.droppedPolicy,
+            "drop_oversize" to counters.droppedOversize + stats.droppedOversize,
+            "drop_evicted" to counters.droppedEvicted + stats.droppedEvicted,
+            "drop_failure" to counters.droppedFailure + stats.droppedFailure,
+        )
+        val drop = reasons.filterKeys { it != "drop_failure" }.values.sum()
         val depth = recorder.depth()
-        return HealthSample(drop, stats.writeErrors, depth.bytes, oldestAgeMs(clock.mono(), depth.items))
+        return HealthSample(
+            drop, stats.writeErrors, depth.bytes, oldestAgeMs(clock.mono(), depth.items), reasons,
+            if (reasons.getValue("drop_failure") > 0) "degraded" else "good",
+        )
     }
 
     /** 队列非空的持续时长下界；空队列归零（无积压）。 */

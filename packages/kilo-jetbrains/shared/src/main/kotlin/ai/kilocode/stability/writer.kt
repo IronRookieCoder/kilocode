@@ -1,5 +1,6 @@
 package ai.kilocode.stability
 
+import java.io.ByteArrayOutputStream
 import java.io.IOException
 import java.nio.ByteBuffer
 import java.nio.channels.FileChannel
@@ -16,8 +17,8 @@ import kotlinx.serialization.json.Json
 
 private const val DEFAULT_TICK_MS = 1_000L
 
-/** 事实文件预算（设计7.4）：每IDE scope事实文件上限10MiB，写者后台重写淘汰最旧行。 */
-private const val DEFAULT_MAX_FILE_BYTES = 10L * 1024 * 1024
+/** 事实文件预算（设计7.4）：每IDE scope事实文件上限50MiB，写者后台重写淘汰最旧行。 */
+private const val DEFAULT_MAX_FILE_BYTES = 50L * 1024 * 1024
 
 /** 批flush字节阈值（设计7.1）：累计64KiB即flush。 */
 private const val DEFAULT_BATCH_FLUSH_BYTES = 64L * 1024
@@ -44,6 +45,7 @@ data class WriterStats(
     val droppedPolicy: Long,
     val droppedOversize: Long,
     val droppedEvicted: Long,
+    val droppedFailure: Long = 0,
 )
 
 /**
@@ -56,8 +58,8 @@ data class WriterStats(
  *
  * flush阈值（设计7.1/7.4）：累计16条或64KiB即flush；首条未fsync写入起最迟30秒flush+fsync
  * 一次，只有非空批次参与定时flush；diagnostic随critical同批写出，不设更长延迟。
- * 事实文件预算[maxFileBytes]：写前预检超限即后台重写——按完整行从尾部保留至预算内、
- * 原子替换后重开追加，被淘汰行计入[WriterStats.droppedEvicted]；文件被删时下次追加
+ * 事实文件预算[maxFileBytes]：超限时按failure、critical、sample整组保留，档内优先最近记录；
+ * 原子替换一并提交保留事实和新组，被淘汰行计入[WriterStats.droppedEvicted]；文件被删时下次追加
  * 按原名重建，不视为错误。
  */
 // 参数列表 = 依赖（root/fileName/identity/recorder/policies/clock/storage）+ 校准旋钮
@@ -90,6 +92,7 @@ class Writer(
     private val droppedPolicy = AtomicLong(0)
     private val droppedOversize = AtomicLong(0)
     private val droppedEvicted = AtomicLong(0)
+    private val droppedFailure = AtomicLong(0)
     private val waking = AtomicBoolean(false)
     private val started = AtomicBoolean(false)
     private val stopping = AtomicBoolean(false)
@@ -111,6 +114,7 @@ class Writer(
     private var pendingSinceMonoMs = -1L // 首条未fsync写入的时刻；-1=无积压
     private var pendingRecords = 0
     private var pendingBytes = 0L
+    private var pendingFailures = 0L
 
     /** 启动：校验目录与权限、打开追加句柄后才进入ACTIVE；失败即禁采。无锁、无exchange.lock。 */
     fun start() {
@@ -171,7 +175,9 @@ class Writer(
 
     /** writer健康累计快照。 */
     fun stats(): WriterStats =
-        WriterStats(writeErrors.get(), droppedPolicy.get(), droppedOversize.get(), droppedEvicted.get())
+        WriterStats(
+            writeErrors.get(), droppedPolicy.get(), droppedOversize.get(), droppedEvicted.get(), droppedFailure.get(),
+        )
 
     /** 定时器只唤醒：tryLock去重避免积压任务排队，实际循环仍在唯一IO线程执行。 */
     private fun wake() {
@@ -217,84 +223,104 @@ class Writer(
         while (state == WriterState.ACTIVE) {
             val claim = recorder.tryClaim(CLAIM_MAX_ITEMS, CLAIM_MAX_BYTES) ?: return
             val aborted = try {
-                recordsAborted(claim.records)
+                recordsAborted(claim.groups)
             } finally {
                 claim.release()
             }
-            if (aborted || claim.records.size < CLAIM_MAX_ITEMS) return
+            if (aborted) return
         }
     }
 
-    /** 逐条写入；返回true表示当前写会话故障，本批剩余记录不再尝试（逐条计入write_error）。 */
-    private fun recordsAborted(records: List<QueuedRecord>): Boolean {
+    /** 写故障放弃本批余组；每个损失记录只归入一个原因，failure是正交子集。 */
+    private fun recordsAborted(groups: List<QueuedGroup>): Boolean {
         var failed = false
-        records.forEach { record ->
+        groups.forEach { group ->
             if (failed) {
-                writeErrors.incrementAndGet()
+                loss(writeErrors, group.records.map { it.fact })
                 return@forEach
             }
-            val line = encodeLine(record.fact) ?: return@forEach
-            if (!writeLine(line)) failed = true
+            val lines = encode(group) ?: return@forEach
+            if (!write(group, lines)) failed = true
         }
         return failed
     }
 
-    /**
-     * 入盘前重判期（policy.kt契约：writer入盘前必须以当前时刻重新permit）：
-     * 无有效策略或该记录用途已全部不被许可→丢弃并计数，绝不落盘；真实UTF-8编码后
-     * 超过32KiB→丢弃并计数。返回null表示该记录不写。
-     *
-     * 已退役epoch的排队事实同样在此丢弃（设计8.1：插件观察到epoch更替即清空尚未写出
-     * 的旧epoch事实，不改绑新epoch）——策略快照本身仍有效时purposes重判覆盖不到这批
-     * 记录，必须显式对照[PolicyStore.retiredEpochs]；轮询窗口内已落盘的旧epoch记录
-     * 由consumer按退役集合丢弃，不属于本守卫职责。
-     */
-    @Suppress("ReturnCount")
-    private fun encodeLine(fact: Fact): ByteArray? {
-        val policy = policies.current()
-        if (fact.account_epoch in policies.retiredEpochs) {
-            droppedPolicy.incrementAndGet()
-            return null
-        }
-        val schema = fact.schema_version.substringBefore('.').toIntOrNull() ?: 0
-        val permitted = policy.permit(clock.wall(), fact.name, category(fact.channel, fact.data), schema)
-        if (permitted.none { it in fact.purposes }) {
-            droppedPolicy.incrementAndGet()
-            return null
-        }
-        val bytes = (json.encodeToString(Fact.serializer(), fact) + "\n").encodeToByteArray()
-        if (bytes.size - 1 > MAX_RECORD_BYTES) {
-            droppedOversize.incrementAndGet()
-            return null
-        }
-        return bytes
+    private fun loss(counter: AtomicLong, facts: List<Fact>) {
+        droppedFailure.addAndGet(facts.count {
+            priority(it.name, it.channel, it.data) == Priority.FAILURE
+        }.toLong())
+        counter.addAndGet(facts.size.toLong())
     }
 
-    /**
-     * 单条落盘：写入前预检文件预算（超限先重写淘汰最旧行）→一行（含LF）一次write→
-     * pending计数→16条/64KiB即flush。存储不可验证→禁用采集；磁盘故障→计数并丢弃本条
-     * （句柄就地作废，下一条写入时按原名重建）。
-     */
-    private fun writeLine(bytes: ByteArray): Boolean {
+    /** 整组复检当前策略、schema capability、epoch和实际32KiB大小后才允许写第一行。 */
+    @Suppress("ReturnCount")
+    private fun encode(group: QueuedGroup): List<ByteArray>? {
+        val facts = group.records.map { it.fact }
+        val policy = policies.current()
+        val now = clock.wall()
+        if (facts.any { fact ->
+            val schema = fact.schema_version.substringBefore('.').toIntOrNull() ?: 0
+            val permitted = policy.permit(now, fact.name, category(fact.channel, fact.data), schema)
+            fact.account_epoch in policies.retiredEpochs || permitted.none { it in fact.purposes }
+        }) {
+            loss(droppedPolicy, facts)
+            return null
+        }
+        val lines = facts.map { (json.encodeToString(Fact.serializer(), it) + "\n").encodeToByteArray() }
+        if (lines.any { it.size - 1 > MAX_RECORD_BYTES } || lines.sumOf { it.size.toLong() } > maxFileBytes) {
+            loss(droppedOversize, facts)
+            return null
+        }
+        return lines
+    }
+
+    /** 单组追加；容量重写把新组一并纳入保留排序，避免后来的sample驱逐failure。 */
+    private fun write(group: QueuedGroup, lines: List<ByteArray>): Boolean {
+        val facts = group.records.map { it.fact }
+        var offset = fileBytes
         return try {
-            if (fileBytes + bytes.size > maxFileBytes) rewrite(bytes.size)
             if (channel == null) reopen()
-            val target = channel ?: return false // reopen已计数，本条放弃
-            storage.writeAll(target, ByteBuffer.wrap(bytes))
-            fileBytes += bytes.size
+            offset = fileBytes
+            val bytes = lines.sumOf { it.size }
+            if (fileBytes + bytes > maxFileBytes) {
+                rewrite(facts, lines)
+                return true
+            }
+            val target = requireNotNull(channel)
+            val buffer = ByteBuffer.allocate(bytes)
+            lines.forEach { buffer.put(it) }
+            buffer.flip()
+            storage.writeAll(target, buffer)
+            fileBytes += bytes
             if (pendingSinceMonoMs < 0) pendingSinceMonoMs = clock.mono()
-            pendingRecords += 1
-            pendingBytes += bytes.size
+            pendingRecords += facts.size
+            pendingBytes += bytes
+            pendingFailures += facts.count { priority(it.name, it.channel, it.data) == Priority.FAILURE }
             if (pendingRecords >= batchFlushRecords || pendingBytes >= batchFlushBytes) doFlush()
             true
         } catch (unverified: StorageUnverifiedException) {
+            loss(writeErrors, facts)
             disable(unverified.reason)
             false
         } catch (_: IOException) {
-            writeErrors.incrementAndGet()
+            loss(writeErrors, facts)
             runCatching { channel?.close() }
             channel = null
+            rollback(offset)
+            fileBytes = offset
             false
+        }
+    }
+
+    /** 清除中断仅覆盖回滚IO，随后恢复中断标志，保证shutdown中途也不留下部分组。 */
+    private fun rollback(offset: Long) {
+        val interrupted = Thread.interrupted()
+        try {
+            runCatching {
+                FileChannel.open(file, StandardOpenOption.WRITE).use { it.truncate(offset) }
+            }.onFailure { disable("writer cannot roll back an incomplete group") }
+        } finally {
+            if (interrupted) Thread.currentThread().interrupt()
         }
     }
 
@@ -354,58 +380,81 @@ class Writer(
             pendingRecords = 0
             pendingBytes = 0L
             pendingSinceMonoMs = -1L
+            pendingFailures = 0
         } catch (_: IOException) {
             writeErrors.incrementAndGet()
+            // fsync失败后不能保证这些failure已持久化，保守降级且不重复计同批。
+            droppedFailure.addAndGet(pendingFailures)
+            pendingFailures = 0
             runCatching { open.close() }
             channel = null
         }
     }
 
-    /**
-     * 容量重写（§7.4）：按完整行从尾部保留至[maxFileBytes]预算内（预留[reserveBytes]给
-     * 紧随其后的追加行，保证本条写入后仍在预算内），经atomicWrite原子替换后重开追加；
-     * 被淘汰的整行计入[droppedEvicted]，保留行内容绝不改写。尾部无LF的崩溃残页不参与
-     * 保留（读取方§7.2本就跳过不完整行）。先行关旧句柄——Windows下打开中的文件无法被
-     * 原子替换。替换失败由调用方按写故障计数，下次写入按现存文件重建句柄。
-     */
-    private fun rewrite(reserveBytes: Int) {
-        val (kept, evicted) = tailWithinBudget(reserveBytes)
-        runCatching { channel?.close() }
-        channel = null
-        storage.atomicWrite(file, kept)
-        droppedEvicted.addAndGet(evicted.toLong())
-        reopen()
+    private class Stored(val fact: Fact?, val bytes: ByteArray, val order: Int) {
+        fun key(): List<String> {
+            val id = fact?.context?.get("incident_id")
+            val grouped = fact?.name in setOf("diagnostic.reported", "diagnostic.payload") ||
+                fact?.name?.startsWith("error.") == true
+            return if (id != null && grouped) listOf(fact.producer_id, fact.run_id, id) else listOf(order.toString())
+        }
     }
 
     /**
-     * 读全部字节，从最后一段完整行起向首部按预算收纳；返回(保留字节, 淘汰整行数)。
-     * 保留切片止于最后一个LF——无LF的崩溃残页被截断丢弃，既不进入重写结果（否则下一条
-     * 追加会拼接在残页上），也不计入fileBytes预算。
+     * 完整行按producer/run/incident分组。先保留最近failure，再critical、sample；
+     * 不完整或孤立分片组整体丢弃。新组也参与排序；原子替换同时提交新组与保留结果。
      */
-    private fun tailWithinBudget(reserveBytes: Int): Pair<ByteArray, Int> {
-        if (!Files.exists(file)) return ByteArray(0) to 0
-        val all = Files.readAllBytes(file)
-        val starts = ArrayList<Int>()
+    private fun rewrite(facts: List<Fact>, lines: List<ByteArray>) {
+        val rows = stored()
+        facts.forEachIndexed { index, fact -> rows += Stored(fact, lines[index], rows.size) }
+        val groups = rows.groupBy { it.key() }.values.sortedWith(
+            compareBy<List<Stored>> { group ->
+                group.minOf { row -> row.fact?.let { priority(it.name, it.channel, it.data) } ?: Priority.SAMPLE }
+            }.thenByDescending { group -> group.maxOf { it.fact?.timestamp ?: 0 } }
+                .thenByDescending { group -> group.maxOf { it.order } },
+        )
+        val kept = ArrayList<Stored>()
+        val dropped = ArrayList<Stored>()
+        var bytes = 0L
+        groups.forEach { group ->
+            val size = group.sumOf { it.bytes.size.toLong() }
+            val valid = group.all { it.fact != null } && complete(group.mapNotNull { it.fact })
+            if (!valid || size > maxFileBytes - bytes) {
+                dropped.addAll(group)
+                return@forEach
+            }
+            kept.addAll(group)
+            bytes += size
+        }
+        val output = ByteArrayOutputStream(bytes.toInt())
+        kept.sortedBy { it.order }.forEach { output.write(it.bytes) }
+        runCatching { channel?.close() }
+        channel = null
+        storage.atomicWrite(file, output.toByteArray())
+        loss(droppedEvicted, dropped.mapNotNull { it.fact })
+        // 非法旧行也属于被淘汰行，但不能据此推断failure类别。
+        droppedEvicted.addAndGet(dropped.count { it.fact == null }.toLong())
+        pendingRecords = 0
+        pendingBytes = 0
+        pendingSinceMonoMs = -1
+        pendingFailures = 0
+        reopen()
+    }
+
+    private fun stored(): ArrayList<Stored> {
+        val rows = ArrayList<Stored>()
+        val all = storage.read(file) ?: ByteArray(0)
         var start = 0
         for (index in all.indices) {
-            if (all[index] == LF_BYTE) {
-                starts.add(start)
-                start = index + 1
-            }
+            if (all[index] != LF_BYTE) continue
+            val bytes = all.copyOfRange(start, index + 1)
+            val fact = runCatching {
+                json.decodeFromString(Fact.serializer(), bytes.toString(Charsets.UTF_8))
+            }.getOrNull()
+            rows += Stored(fact, bytes, rows.size)
+            start = index + 1
         }
-        if (starts.isEmpty()) return ByteArray(0) to 0 // 无完整行：空文件或残页
-        val budget = (maxFileBytes - reserveBytes).coerceAtLeast(0L)
-        var keepFrom = starts.size
-        var keptBytes = 0L
-        for (position in starts.indices.reversed()) {
-            val lineEnd = if (position + 1 < starts.size) starts[position + 1] else start
-            val lineBytes = (lineEnd - starts[position]).toLong()
-            if (keptBytes + lineBytes > budget) break
-            keepFrom = position
-            keptBytes += lineBytes
-        }
-        if (keepFrom == starts.size) return ByteArray(0) to starts.size
-        return all.copyOfRange(starts[keepFrom], start) to keepFrom
+        return rows
     }
 
     /** 禁用采集：原因固定可见并通知一次（A6在回调里做本地限频报告），绝不静默继续。 */

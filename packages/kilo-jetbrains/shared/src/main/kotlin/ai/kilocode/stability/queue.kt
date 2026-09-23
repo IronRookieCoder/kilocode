@@ -1,16 +1,47 @@
 package ai.kilocode.stability
 
 import java.util.Collections
+import java.util.concurrent.ConcurrentLinkedQueue
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicReference
 import java.util.concurrent.locks.ReentrantLock
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.intOrNull
 
-private const val CHANNEL_CRITICAL = "critical"
-private const val CHANNEL_DIAGNOSTIC = "diagnostic"
+/** 分片必须有同一incident的父记录、完整连续索引，以及一致的重组元数据。 */
+internal fun complete(facts: List<Fact>): Boolean {
+    val chunks = facts.filter { it.name == "diagnostic.payload" }
+    return chunks.groupBy { it.context["incident_id"] }.all { (id, parts) ->
+        id != null && facts.any {
+            it.context["incident_id"] == id && (it.name == "diagnostic.reported" || it.name.startsWith("error."))
+        } && parts.groupBy { it.data["payload_kind"] }.all { (_, rows) ->
+            val count = (rows.first().data["chunk_count"] as? JsonPrimitive)?.intOrNull
+            count == rows.size &&
+                rows.map { (it.data["chunk_index"] as? JsonPrimitive)?.intOrNull }.toSet() == rows.indices.toSet() &&
+                listOf("chunk_count", "encoding", "original_bytes", "sha256", "truncated").all { key ->
+                    rows.all { it.data[key] == rows.first().data[key] }
+                }
+        }
+    }
+}
 
-/**
- * 队列中的一条记录：[fact]为入队时补齐公共身份字段的完整wire记录，[estimatedBytes]是
- * 保守字节上界（recorder计算，writer真实编码后再核对32KiB），[enqueuedMonoMs]用于
- * claim时跨通道取最老记录。不可变：入队后任何一方不得改写。
- */
+internal enum class Priority { FAILURE, CRITICAL, SAMPLE }
+
+private val SAMPLES = setOf("telemetry.health", "edt.delay", "edt.stall", "resource.snapshot", "render.apply")
+private val SEVERITIES = setOf("warn", "error")
+
+/** 优先级只用于内存和保留策略，不改变两个wire channel。 */
+internal fun priority(name: String, channel: String, data: JsonObject): Priority = when {
+    name.startsWith("error.") || name.startsWith("diagnostic.") ||
+        name == "protocol.error" || name == "edt.violation" ||
+        (data["phase"] as? JsonPrimitive)?.content == "end" ||
+        (data["severity"] as? JsonPrimitive)?.content?.lowercase() in SEVERITIES -> Priority.FAILURE
+    name in SAMPLES || channel == "diagnostic" -> Priority.SAMPLE
+    else -> Priority.CRITICAL
+}
+
 internal class QueuedRecord(
     val fact: Fact,
     val channel: String,
@@ -19,27 +50,58 @@ internal class QueuedRecord(
     val enqueuedMonoMs: Long,
 )
 
-/** 单次入队结果：QUEUED入队；FULL双维容量不足（critical已驱逐全部diagnostic仍不够）；CONTENTION锁争用。 */
+/** 一次原子准入单位；state只允许QUEUED→CLAIMED或QUEUED→EVICTED。 */
+internal class QueuedGroup(records: List<QueuedRecord>) {
+    @Volatile var records: List<QueuedRecord> = Collections.unmodifiableList(records.toList())
+        private set
+    val priority = records.minOf { priority(it.fact.name, it.channel, it.fact.data) }
+    val items = records.size
+    val bytes = records.sumOf { it.estimatedBytes.toLong() }
+    val diagnostics = records.count { it.channel == "diagnostic" }
+    val diagnosticBytes = records.filter { it.channel == "diagnostic" }.sumOf { it.estimatedBytes.toLong() }
+    val mono = records.first().enqueuedMonoMs
+    private val state = AtomicInteger(0)
+
+    fun claim(): Boolean = state.compareAndSet(0, 1)
+    fun evict(): Boolean = state.compareAndSet(0, 2)
+    fun available(): Boolean = state.get() == 0
+    fun clear() { records = emptyList() }
+    fun fits(items: Int, bytes: Long): Boolean = this.items <= items && this.bytes <= bytes
+}
+
 internal enum class QueueOffer { QUEUED, FULL, CONTENTION }
 
-internal data class QueueOfferOutcome(val offer: QueueOffer, val evictedDiagnostics: Int) {
-    companion object {
-        val CONTENTION = QueueOfferOutcome(QueueOffer.CONTENTION, 0)
-    }
+internal data class QueueOfferOutcome(
+    val offer: QueueOffer,
+    val evictedDiagnostics: Int,
+    val evicted: Int = evictedDiagnostics,
+) {
+    companion object { val CONTENTION = QueueOfferOutcome(QueueOffer.CONTENTION, 0) }
+}
+
+/** 全部维度在一个CAS中预留/释放，不存在只预留条数或只预留字节的中间状态。 */
+private data class Budget(
+    val items: Int = 0,
+    val bytes: Long = 0,
+    val samples: Int = 0,
+    val sampleBytes: Long = 0,
+    val diagnostics: Int = 0,
+    val diagnosticBytes: Long = 0,
+) {
+    fun change(group: QueuedGroup, sign: Int): Budget = Budget(
+        items + sign * group.items,
+        bytes + sign * group.bytes,
+        samples + if (group.priority == Priority.SAMPLE) sign * group.items else 0,
+        sampleBytes + if (group.priority == Priority.SAMPLE) sign * group.bytes else 0,
+        diagnostics + sign * group.diagnostics,
+        diagnosticBytes + sign * group.diagnosticBytes,
+    )
 }
 
 /**
- * 有界内存队列（设计7.1）：critical与diagnostic分通道FIFO，双维容量原子维护。
- *
- * 容量模型：全部通道合计[maxItems]条且[maxBytes]字节，先到者为准；[reservedItems]与
- * [reservedBytes]是critical的预留（diagnostic至多使用扣除预留后的余量），critical可使用
- * 全部容量。diagnostic触顶直接拒绝，不驱逐任何记录；critical需空间时先驱逐最老
- * diagnostic（仅diagnostic），驱逐后仍不足则拒绝新记录并交由recorder计数。
- *
- * 锁纪律：生产与writer路径都只[tryWithProducerLock]（tryLock），争用立即放弃——生产侧
- * 返回CONTENTION由recorder计为丢弃，绝不阻塞EDT或业务线程；锁内只有内存操作。
- * writer经[tryClaim]取出的记录在[Claim.release]前仍计入全部预算，防止批次在队列外
- * 无界积压（序列化完成后再release，真实编码由writer执行）。
+ * failure通过MPSC发布，不获取producer锁。低档位保留tryLock队列；并行淘汰索引与claim
+ * 通过group的CAS争夺所有权，因此已经claim的记录不会被淘汰。被淘汰的墓碑立即清空记录
+ * 引用，下次低档位操作清理deque。claim到release期间仍占预算；producer全程只有内存操作。
  */
 internal class StabilityQueue(
     private val maxItems: Int,
@@ -48,141 +110,138 @@ internal class StabilityQueue(
     private val reservedBytes: Int,
 ) {
     private val lock = ReentrantLock()
-    private val critical = ArrayDeque<QueuedRecord>()
-    private val diagnostic = ArrayDeque<QueuedRecord>()
+    private val failure = ConcurrentLinkedQueue<QueuedGroup>()
+    private val critical = ArrayDeque<QueuedGroup>()
+    private val sample = ArrayDeque<QueuedGroup>()
+    private val criticalIndex = ConcurrentLinkedQueue<QueuedGroup>()
+    private val sampleIndex = ConcurrentLinkedQueue<QueuedGroup>()
+    private val budget = AtomicReference(Budget())
 
-    private var totalItems = 0
-    private var totalBytes = 0
-    private var diagnosticItems = 0
-    private var diagnosticBytes = 0
-
-    /** 当前内存深度（含已被claim、尚未release的记录）；供health摘要读取，允许读取时的微小滞后。 */
-    val depthItems: Int get() = totalItems
-    val depthBytes: Int get() = totalBytes
-    val diagnosticDepthItems: Int get() = diagnosticItems
-    val diagnosticDepthBytes: Int get() = diagnosticBytes
-
-    /**
-     * 生产路径入口：tryLock成功后在锁内调用[factory]完成seq分配、Fact构建与字节估算，
-     * 并随即按通道做准入判定（同一次临界区，保证队列顺序与seq顺序一致）；
-     * [factory]不得阻塞或做IO。争用时不调用factory，返回CONTENTION。
-     */
-    internal fun tryOffer(factory: () -> QueuedRecord): QueueOfferOutcome =
-        tryWithProducerLock {
-            val record = factory()
-            if (record.channel == CHANNEL_CRITICAL) offerCritical(record) else offerDiagnostic(record)
-        } ?: QueueOfferOutcome.CONTENTION
-
-    /**
-     * writer路径：tryLock成功时按[enqueuedMonoMs]取最老记录，至多[maxItems]条且
-     * [maxBytes]字节（首条总是取出，避免单条超限记录永久堵塞批次）；空队列或争用返回null。
-     */
-    internal fun tryClaim(maxItems: Int, maxBytes: Int): Claim? = tryWithProducerLock {
-        val claimed = ArrayList<QueuedRecord>()
-        var bytes = 0
-        while (true) {
-            val next = claimable(claimed.size, bytes, maxItems, maxBytes) ?: break
-            removeOldest()
-            claimed += next
-            bytes += next.estimatedBytes
-        }
-        if (claimed.isEmpty()) null else Claim(claimed)
+    init {
+        require(maxItems > 0 && maxBytes > 0)
+        require(reservedItems in 0..maxItems && reservedBytes in 0..maxBytes)
     }
 
-    /** 批次下一条可取的最老记录；条数到顶或再取将超字节预算时返回null终止批次。 */
-    private fun claimable(claimed: Int, bytes: Int, maxItems: Int, maxBytes: Int): QueuedRecord? =
-        peekOldest()?.takeIf { next ->
-            claimed < maxItems && (claimed == 0 || bytes + next.estimatedBytes <= maxBytes)
-        }
+    val depthItems: Int get() = budget.get().items
+    val depthBytes: Int get() = budget.get().bytes.toInt()
+    val diagnosticDepthItems: Int get() = budget.get().diagnostics
+    val diagnosticDepthBytes: Int get() = budget.get().diagnosticBytes.toInt()
 
-    /**
-     * 在生产者锁内执行[block]；争用返回null不等待。inline以便tryOffer/tryClaim/测试共用，
-     * block内禁止任何阻塞调用（文件、网络、其他锁）。
-     */
+    internal fun tryOffer(factory: () -> QueuedRecord): QueueOfferOutcome = tryOffer(QueuedGroup(listOf(factory())))
+
+    internal fun tryOffer(group: QueuedGroup): QueueOfferOutcome {
+        if (group.priority == Priority.FAILURE) return offer(group)
+        return tryWithProducerLock { offer(group) } ?: QueueOfferOutcome.CONTENTION
+    }
+
+    @Suppress("ReturnCount") // 准入失败尽早返回，预留成功后才发布。
+    private fun offer(group: QueuedGroup): QueueOfferOutcome {
+        // 永远不为不可能装下的分组驱逐现有事实。
+        if (group.items > maxItems || group.bytes > maxBytes) return QueueOfferOutcome(QueueOffer.FULL, 0)
+        var evicted = 0
+        var diagnostics = 0
+        while (!reserve(group)) {
+            val victim = if (group.priority == Priority.SAMPLE) null else
+                evict(sampleIndex) ?: if (group.priority == Priority.FAILURE) evict(criticalIndex) else null
+            if (victim == null) return QueueOfferOutcome(QueueOffer.FULL, diagnostics, evicted)
+            evicted += victim.items
+            diagnostics += victim.diagnostics
+        }
+        if (group.priority == Priority.FAILURE) {
+            failure.add(group)
+            return QueueOfferOutcome(QueueOffer.QUEUED, diagnostics, evicted)
+        }
+        // 只有持producer锁的路径访问两个deque；索引在预留之后发布。
+        val deque = if (group.priority == Priority.SAMPLE) sample else critical
+        val index = if (group.priority == Priority.SAMPLE) sampleIndex else criticalIndex
+        deque.removeAll { !it.available() }
+        deque.addLast(group)
+        index.add(group)
+        return QueueOfferOutcome(QueueOffer.QUEUED, diagnostics, evicted)
+    }
+
+    @Suppress("ReturnCount")
+    private fun reserve(group: QueuedGroup): Boolean {
+        while (true) {
+            val before = budget.get()
+            // 减法比较避免条数加法溢出；bytes为Long，单组来自有界Int估算。
+            if (group.items > maxItems - before.items || group.bytes > maxBytes - before.bytes) return false
+            if (group.priority == Priority.SAMPLE &&
+                (group.items > maxItems - reservedItems - before.samples ||
+                    group.bytes > maxBytes - reservedBytes - before.sampleBytes)) return false
+            if (budget.compareAndSet(before, before.change(group, 1))) return true
+        }
+    }
+
+    private fun evict(index: ConcurrentLinkedQueue<QueuedGroup>): QueuedGroup? {
+        while (true) {
+            val group = index.poll() ?: return null
+            if (!group.evict()) continue
+            group.clear()
+            release(group)
+            return group
+        }
+    }
+
+    private fun release(group: QueuedGroup) {
+        budget.updateAndGet { it.change(group, -1) }
+    }
+
+    /** failure先取，低档位按入队时间合并；首组可超过批阈值以保证incident永不拆开。 */
+    internal fun tryClaim(maxItems: Int, maxBytes: Int): Claim? {
+        val groups = ArrayList<QueuedGroup>()
+        var items = 0
+        var bytes = 0L
+        fun fits(group: QueuedGroup) = items == 0 || group.fits(maxItems - items, maxBytes - bytes)
+        while (true) {
+            val group = failure.peek() ?: break
+            if (!fits(group)) return Claim(groups)
+            failure.poll()
+            check(group.claim())
+            groups += group
+            items += group.items
+            bytes += group.bytes
+        }
+        tryWithProducerLock {
+            while (true) {
+                val group = oldest()?.takeIf(::fits) ?: break
+                val deque = if (group.priority == Priority.SAMPLE) sample else critical
+                deque.removeFirst()
+                val index = if (group.priority == Priority.SAMPLE) sampleIndex else criticalIndex
+                index.remove(group)
+                if (group.claim()) {
+                    groups += group
+                    items += group.items
+                    bytes += group.bytes
+                }
+            }
+        }
+        return if (groups.isEmpty()) null else Claim(groups)
+    }
+
+    private fun oldest(): QueuedGroup? {
+        while (sample.firstOrNull()?.available() == false) sample.removeFirst()
+        while (critical.firstOrNull()?.available() == false) critical.removeFirst()
+        val first = sample.firstOrNull()
+        val second = critical.firstOrNull()
+        return if (first != null && (second == null || first.mono < second.mono)) first else second
+    }
+
     internal inline fun <T> tryWithProducerLock(block: () -> T): T? {
         if (!lock.tryLock()) return null
-        return try {
-            block()
-        } finally {
-            lock.unlock()
-        }
+        return try { block() } finally { lock.unlock() }
     }
 
-    private fun offerCritical(record: QueuedRecord): QueueOfferOutcome {
-        var evicted = 0
-        while (totalItems + 1 > maxItems || totalBytes + record.estimatedBytes > maxBytes) {
-            val victim = diagnostic.removeFirstOrNull()
-                ?: return QueueOfferOutcome(QueueOffer.FULL, evicted)
-            totalItems -= 1
-            totalBytes -= victim.estimatedBytes
-            diagnosticItems -= 1
-            diagnosticBytes -= victim.estimatedBytes
-            evicted += 1
-        }
-        critical.addLast(record)
-        totalItems += 1
-        totalBytes += record.estimatedBytes
-        return QueueOfferOutcome(QueueOffer.QUEUED, evicted)
-    }
-
-    private fun offerDiagnostic(record: QueuedRecord): QueueOfferOutcome {
-        val fits = diagnosticItems + 1 <= maxItems - reservedItems &&
-            diagnosticBytes + record.estimatedBytes <= maxBytes - reservedBytes &&
-            totalItems + 1 <= maxItems &&
-            totalBytes + record.estimatedBytes <= maxBytes
-        if (!fits) return QueueOfferOutcome(QueueOffer.FULL, 0)
-        diagnostic.addLast(record)
-        totalItems += 1
-        totalBytes += record.estimatedBytes
-        diagnosticItems += 1
-        diagnosticBytes += record.estimatedBytes
-        return QueueOfferOutcome(QueueOffer.QUEUED, 0)
-    }
-
-    /** 查看最老记录（不移出）；跨通道按[QueuedRecord.enqueuedMonoMs]比较，平局critical优先。 */
-    private fun peekOldest(): QueuedRecord? {
-        val headCritical = critical.firstOrNull()
-        val headDiagnostic = diagnostic.firstOrNull()
-        return when {
-            headCritical == null -> headDiagnostic
-            headDiagnostic == null -> headCritical
-            headDiagnostic.enqueuedMonoMs < headCritical.enqueuedMonoMs -> headDiagnostic
-            else -> headCritical
-        }
-    }
-
-    /** 取最老记录并移出deque（预算不变：取出的记录仍计入内存直至release）。 */
-    private fun removeOldest() {
-        val headCritical = critical.firstOrNull()
-        val headDiagnostic = diagnostic.firstOrNull()
-        when {
-            headCritical == null -> diagnostic.removeFirst()
-            headDiagnostic == null -> critical.removeFirst()
-            headDiagnostic.enqueuedMonoMs < headCritical.enqueuedMonoMs -> diagnostic.removeFirst()
-            else -> critical.removeFirst()
-        }
-    }
-
-    /**
-     * 已取出的批次：[records]仍计入全部内存预算，writer序列化写入完成后必须调用[release]
-     * 释放预算。release短暂lock()（writer线程可等待，生产者不受影响——生产者只tryLock）。
-     */
-    internal inner class Claim internal constructor(private val claimed: List<QueuedRecord>) {
-        val records: List<QueuedRecord> = Collections.unmodifiableList(claimed)
+    internal inner class Claim internal constructor(groups: List<QueuedGroup>) {
+        val groups: List<QueuedGroup> = Collections.unmodifiableList(groups.toList())
+        val records: List<QueuedRecord> = Collections.unmodifiableList(groups.flatMap { it.records })
+        private val released = AtomicBoolean(false)
 
         fun release() {
-            lock.lock()
-            try {
-                claimed.forEach { record ->
-                    totalItems -= 1
-                    totalBytes -= record.estimatedBytes
-                    if (record.channel == CHANNEL_DIAGNOSTIC) {
-                        diagnosticItems -= 1
-                        diagnosticBytes -= record.estimatedBytes
-                    }
-                }
-            } finally {
-                lock.unlock()
+            if (!released.compareAndSet(false, true)) return
+            groups.forEach { group ->
+                group.clear()
+                release(group)
             }
         }
     }

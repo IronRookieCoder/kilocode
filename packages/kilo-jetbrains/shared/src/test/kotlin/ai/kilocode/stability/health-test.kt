@@ -1,5 +1,8 @@
 package ai.kilocode.stability
 
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -20,8 +23,102 @@ import kotlinx.serialization.json.put
  */
 class HealthTest {
 
+    @Test
+    fun `health separates reasons and degrades when an operation end is lost`() {
+        Fixture(tickMs = 60_000L).use { fixture ->
+            val health = fixture.health()
+            assertEquals("good", health.snapshot()["quality"]?.jsonPrimitive?.content)
+            fixture.recorder.record(invalidDraft())
+            val sample = health.snapshot()
+            assertEquals(1L, sample["drop_invalid"]?.jsonPrimitive?.long)
+            assertEquals(1L, sample["drop_failure"]?.jsonPrimitive?.long)
+            listOf("drop_contention", "drop_capacity", "drop_policy", "drop_oversize", "drop_evicted").forEach { key ->
+                assertEquals(0L, sample[key]?.jsonPrimitive?.long, key)
+            }
+            assertEquals("degraded", sample["quality"]?.jsonPrimitive?.content)
+            assertTrue(health.poll())
+            fixture.flush()
+            val fact = fixture.facts().single()
+            assertEquals("degraded", fact.data["quality"]?.jsonPrimitive?.content)
+            assertEquals(1L, fact.data["drop_invalid"]?.jsonPrimitive?.long)
+        }
+    }
+
     /** 夹具辅助：沿用既有三参构造；两次调用得到两个实例——基线随实例、不随源计数走。 */
     private fun Fixture.health(): Health = Health(recorder, writer, clock)
+
+    @Test
+    fun `sample contention is reported without degrading failure quality`() {
+        Fixture(autoStart = false).use { fixture ->
+            val field = Recorder::class.java.getDeclaredField("queue").apply { isAccessible = true }
+            val queue = field.get(fixture.recorder) as StabilityQueue
+            val entered = CountDownLatch(1)
+            val release = CountDownLatch(1)
+            val pool = Executors.newSingleThreadExecutor()
+            try {
+                val job = pool.submit {
+                    queue.tryWithProducerLock {
+                        entered.countDown()
+                        assertTrue(release.await(30, TimeUnit.SECONDS))
+                    }
+                }
+                assertTrue(entered.await(30, TimeUnit.SECONDS))
+                assertEquals(Admission.DROPPED, fixture.recorder.record(startedDraft()))
+                val sample = fixture.health().snapshot()
+                assertEquals(1L, sample["drop_contention"]?.jsonPrimitive?.long)
+                assertEquals(0L, sample["drop_failure"]?.jsonPrimitive?.long)
+                assertEquals("good", sample["quality"]?.jsonPrimitive?.content)
+                release.countDown()
+                job.get(30, TimeUnit.SECONDS)
+            } finally {
+                release.countDown()
+                pool.shutdownNow()
+            }
+        }
+    }
+
+    @Test
+    fun `policy and oversize losses have distinct reason counters`() {
+        Fixture(tickMs = 60_000L).use { fixture ->
+            fixture.expireControl()
+            assertEquals(Admission.DISABLED, fixture.recorder.record(wideCriticalDraft()))
+            val sample = fixture.health().snapshot()
+            assertEquals(1L, sample["drop_policy"]?.jsonPrimitive?.long)
+            assertEquals(0L, sample["drop_invalid"]?.jsonPrimitive?.long)
+            assertEquals(1L, sample["drop_failure"]?.jsonPrimitive?.long)
+            assertEquals("degraded", sample["quality"]?.jsonPrimitive?.content)
+        }
+        Fixture(tickMs = 60_000L, maxFileBytes = 1).use { fixture ->
+            assertEquals(Admission.QUEUED, fixture.recorder.record(wideCriticalDraft()))
+            fixture.flush()
+            val sample = fixture.health().snapshot()
+            assertEquals(1L, sample["drop_oversize"]?.jsonPrimitive?.long)
+            assertEquals(0L, sample["drop_policy"]?.jsonPrimitive?.long)
+            assertEquals(1L, sample["drop_failure"]?.jsonPrimitive?.long)
+        }
+    }
+
+    @Test
+    fun `an unadmitted health report preserves its reason baseline`() {
+        Fixture(autoStart = false).use { fixture ->
+            val health = fixture.health()
+            val draft = Draft("resource.snapshot", "sample", "critical", buildJsonObject {
+                put("resource", "subscription")
+                put("count", 1)
+            })
+            while (fixture.recorder.record(draft) == Admission.QUEUED) Unit
+            assertFalse(health.poll(), "a saturated sample queue must refuse the report")
+            val claim = requireNotNull(fixture.recorder.tryClaim(2000, 4 * 1024 * 1024))
+            claim.release()
+            assertTrue(health.poll())
+            val report = requireNotNull(fixture.recorder.tryClaim(1, 4096))
+            try {
+                assertEquals(2L, report.records.single().fact.data["drop_capacity"]?.jsonPrimitive?.long)
+            } finally {
+                report.release()
+            }
+        }
+    }
 
     @Test
     fun `snapshot carries cumulative counters and queue gauges`() {
@@ -173,7 +270,10 @@ class HealthTest {
     @Test
     fun `evicted lines count toward the drop delta`() {
         Fixture(tickMs = 50L, maxFileBytes = 2L * 1024).use { fixture ->
-            repeat(40) { fixture.recorder.record(wideCriticalDraft()) }
+            repeat(40) { fixture.recorder.record(Draft("resource.snapshot", "sample", "critical", buildJsonObject {
+                put("resource", "subscription")
+                put("count", 1)
+            })) }
             fixture.flush()
             // 采样基线取poll前读数：写入health事实自身的追加还可能触发重写淘汰，
             // 那部分按增量协议归入下一条health事实（writeLine先采样后追加）。
