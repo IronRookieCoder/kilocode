@@ -433,7 +433,7 @@ object Dictionary {
             key("method", FieldType.STRING),
             key("route", FieldType.TEXT),
             key("http_status", FieldType.NON_NEGATIVE_INTEGER),
-            key("content_type", FieldType.STRING),
+            key("content_type", FieldType.TEXT),
             key("payload_bytes", FieldType.NON_NEGATIVE_INTEGER),
             key("json_path", FieldType.TEXT),
             key("expected_type", FieldType.STRING),

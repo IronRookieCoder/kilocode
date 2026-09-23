@@ -44,7 +44,10 @@ private const val CATEGORY_DIAGNOSTIC = "diagnostic"
  * diagnostic类别承载详情形态的事件name（设计第9/11.2章：error/protocol/violation的详情）；
  * 其余name与全部计数形态按critical类别放行。与[Dictionary]登记集求交，未登记name不放行。
  */
-private val DETAIL_NAMES = setOf("error.uncaught", "error.reported", "protocol.error", "edt.violation")
+private val DETAIL_NAMES = setOf(
+    "error.uncaught", "error.reported", "protocol.error", "edt.violation",
+    "diagnostic.reported", "diagnostic.payload", "diagnostic.redaction_failed",
+)
 
 private val REGISTERED_NAMES = Dictionary.names.toSet()
 

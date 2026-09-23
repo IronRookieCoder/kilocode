@@ -36,7 +36,7 @@
       "ide_build_major": "2026.1", "os_family": "windows", "arch": "x64", "env": "test", "mode": "monolith",
       "side": "monolith", "connection_provider": "kilo-cli", "kind": "diagnostic", "name": "diagnostic.payload",
       "context": {"incident_id": "inc-1"},
-      "data": {"incident_id": "inc-1", "payload_kind": "response", "chunk_index": 0, "chunk_count": 2, "encoding": "utf8", "content": "first", "original_bytes": 11, "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "truncated": false}
+      "data": {"incident_id": "inc-1", "payload_kind": "response", "chunk_index": 0, "chunk_count": 2, "encoding": "utf8", "content": "first", "original_bytes": 11, "sha256": "da83f63e1a473003712c18f5afc5a79044221943d1083c7c5a7ac7236d85e8d2", "truncated": false}
     },
     {
       "schema_version": "2.0", "event_id": "00000000-0000-0000-0000-000000000004", "timestamp": 1789862400253,
@@ -46,7 +46,7 @@
       "ide_build_major": "2026.1", "os_family": "windows", "arch": "x64", "env": "test", "mode": "monolith",
       "side": "monolith", "connection_provider": "kilo-cli", "kind": "diagnostic", "name": "diagnostic.payload",
       "context": {"incident_id": "inc-1"},
-      "data": {"incident_id": "inc-1", "payload_kind": "response", "chunk_index": 1, "chunk_count": 2, "encoding": "utf8", "content": "second", "original_bytes": 11, "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "truncated": false}
+      "data": {"incident_id": "inc-1", "payload_kind": "response", "chunk_index": 1, "chunk_count": 2, "encoding": "utf8", "content": "second", "original_bytes": 11, "sha256": "da83f63e1a473003712c18f5afc5a79044221943d1083c7c5a7ac7236d85e8d2", "truncated": false}
     }
   ]
 }

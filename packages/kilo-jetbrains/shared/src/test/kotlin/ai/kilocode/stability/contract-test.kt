@@ -1,5 +1,6 @@
 package ai.kilocode.stability
 
+import java.security.MessageDigest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -265,6 +266,13 @@ class ContractTest {
     }
 
     @Test
+    fun `v2 diagnostic content type accepts common MIME values`() {
+        val parent = diagnosticParent()
+        assertTrue(Dictionary.validate(parent.with(data = parent.data.with("content_type", "application/json"))))
+        assertTrue(Dictionary.validate(parent.with(data = parent.data.with("content_type", "text/plain"))))
+    }
+
+    @Test
     fun `output vectors retain mixed v1 and v2 facts`() {
         val json = loadObject("output-vectors.json")
         val facts = json.getValue("vectors").jsonArray.map { vector ->
@@ -277,6 +285,14 @@ class ContractTest {
         facts.forEachIndexed { index, fact ->
             assertEquals(json.getValue("vectors").jsonArray[index], wire.encodeToJsonElement(Fact.serializer(), fact))
         }
+        val chunks = facts.filter { fact -> fact.name == "diagnostic.payload" }.sortedBy { fact -> fact.data.getValue("chunk_index").jsonPrimitive.int }
+        val content = chunks.joinToString("") { fact -> fact.data.getValue("content").jsonPrimitive.content }
+        val bytes = content.encodeToByteArray()
+        val sha = MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { byte -> "%02x".format(byte) }
+        assertEquals("firstsecond", content)
+        assertEquals(11, bytes.size)
+        assertEquals("da83f63e1a473003712c18f5afc5a79044221943d1083c7c5a7ac7236d85e8d2", sha)
+        assertEquals(setOf(sha), chunks.map { fact -> fact.data.getValue("sha256").jsonPrimitive.content }.toSet())
     }
 
     private fun loadObject(name: String): JsonObject = Json.parseToJsonElement(resourceText(name)).jsonObject
@@ -315,6 +331,25 @@ class ContractTest {
             put("content", "chunk-$index")
             put("original_bytes", 14)
             put("sha256", "a".repeat(64))
+            put("truncated", false)
+        },
+    )
+
+    private fun diagnosticParent(): Draft = Draft(
+        name = "diagnostic.reported",
+        kind = "diagnostic",
+        channel = "diagnostic",
+        context = mapOf("incident_id" to "inc-1", "operation_id" to "op-1"),
+        purposes = setOf("logs"),
+        schemaVersion = "2.0",
+        data = buildJsonObject {
+            put("severity", "error")
+            put("component", "backend.rpc")
+            put("code", "json_decode_failed")
+            put("message", "Expected object at $.projectID")
+            put("thread_name", "DefaultDispatcher-worker-1")
+            put("thread_id", 42)
+            putJsonArray("payload_refs") { add("response") }
             put("truncated", false)
         },
     )

@@ -100,6 +100,16 @@ class PolicyTest {
     }
 
     @Test
+    fun `diagnostic-only control admits all v2 diagnostic names`() {
+        val store = newStore(
+            writeControl(controlJson(metricsEnabled = false, metricsCategories = emptyList(), logsCategories = listOf("diagnostic"), accepted = listOf(2))),
+        ) { 2_000L }
+        listOf("diagnostic.reported", "diagnostic.payload", "diagnostic.redaction_failed").forEach { name ->
+            assertEquals(setOf("logs"), store.current().permit(2_000L, name, "diagnostic", schema = 2), name)
+        }
+    }
+
+    @Test
     fun `absent purpose permit closes only that purpose`() {
         assertEquals(setOf("logs"), readyPolicy(metrics = null).permit(2_000, "action"))
         assertEquals(setOf("metrics"), readyPolicy(logs = null).permit(2_000, "action"))

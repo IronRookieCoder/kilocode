@@ -8,6 +8,7 @@ import java.nio.file.attribute.AclEntry
 import java.nio.file.attribute.AclEntryFlag
 import java.nio.file.attribute.AclEntryType
 import java.nio.file.attribute.AclFileAttributeView
+import kotlin.io.path.writeText
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -82,6 +83,37 @@ class WriterTest {
             val facts = lines.map { factJson.decodeFromString(Fact.serializer(), it) }
             assertEquals((1L..8L).toList(), facts.filter { it.channel == "critical" }.map { it.seq })
             assertEquals((1L..8L).toList(), facts.filter { it.channel == "diagnostic" }.map { it.seq })
+        }
+    }
+
+    @Test
+    fun `writer preserves queued v2 diagnostics when only v2 is accepted`() {
+        Fixture(autoStart = false).use { fixture ->
+            fixture.base.resolve("control.json").writeText(v2Control(2))
+            fixture.policies.refresh()
+            assertEquals(Admission.QUEUED, fixture.recorder.record(v2Draft()))
+
+            fixture.writer.start()
+            fixture.flush()
+
+            assertEquals(listOf("diagnostic.reported"), fixture.facts().map { fact -> fact.name })
+        }
+    }
+
+    @Test
+    fun `writer drops queued v2 diagnostics after v2 capability is revoked`() {
+        Fixture(autoStart = false).use { fixture ->
+            fixture.base.resolve("control.json").writeText(v2Control(1, 2))
+            fixture.policies.refresh()
+            assertEquals(Admission.QUEUED, fixture.recorder.record(v2Draft()))
+
+            fixture.base.resolve("control.json").writeText(v2Control(1))
+            fixture.policies.refresh()
+            fixture.writer.start()
+            fixture.flush()
+
+            assertTrue(fixture.facts().isEmpty())
+            assertEquals(1L, fixture.writer.stats().droppedPolicy)
         }
     }
 
@@ -353,6 +385,40 @@ class WriterTest {
         put("fingerprint", "fp-diagnostic-1")
         put("count", 1)
     }, purposes = setOf("logs"))
+
+    private fun v2Draft(): Draft = Draft(
+        "diagnostic.reported", "diagnostic", "diagnostic",
+        buildJsonObject {
+            put("severity", "error")
+            put("component", "backend.rpc")
+            put("code", "json_decode_failed")
+            put("message", "Expected object at $.projectID")
+            put("thread_name", "DefaultDispatcher-worker-1")
+            put("thread_id", 42)
+            put("payload_refs", JsonArray(listOf(JsonPrimitive("response"))))
+            put("truncated", false)
+        },
+        context = mapOf("incident_id" to "inc-1"),
+        purposes = setOf("logs"),
+        schemaVersion = "2.0",
+    )
+
+    private fun v2Control(vararg majors: Int): String = buildJsonObject {
+        put("schema_major", 1)
+        put("revision", 12L)
+        put("enabled", true)
+        put("metrics_enabled", false)
+        put("metrics_expires_at", 9_000_000_000_000L)
+        put("metrics_allowed_categories", JsonArray(emptyList()))
+        put("logs_enabled", true)
+        put("logs_expires_at", 9_000_000_000_000L)
+        put("logs_allowed_categories", JsonArray(listOf(JsonPrimitive("diagnostic"))))
+        put("account_epoch", "acct-a")
+        put("account_state", "ready")
+        put("expires_at", 9_000_000_000_000L)
+        put("log_detail_rate_limit", buildJsonObject { put("per_fingerprint_max_per_minute", 3) })
+        put("accepted_fact_schema_majors", JsonArray(majors.map { major -> JsonPrimitive(major) }))
+    }.toString()
 
     /** 更宽的critical载荷：error_code取64字节内长值，在小预算下更快触发容量重写。 */
     private fun wideCriticalDraft(): Draft = Draft("rpc", "operation", "critical", buildJsonObject {

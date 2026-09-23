@@ -256,7 +256,8 @@ class Writer(
             droppedPolicy.incrementAndGet()
             return null
         }
-        val permitted = policy.permit(clock.wall(), fact.name, category(fact.channel, fact.data))
+        val schema = fact.schema_version.substringBefore('.').toIntOrNull() ?: 0
+        val permitted = policy.permit(clock.wall(), fact.name, category(fact.channel, fact.data), schema)
         if (permitted.none { it in fact.purposes }) {
             droppedPolicy.incrementAndGet()
             return null
