@@ -210,7 +210,7 @@ RPC 终态复测：测试 RPC 时须保持 metrics 许可至少超过其 deadlin
 | C9 | 依次写入：`schema_major=2` / 加一个多余键 `"foo":1` / 写成 `{坏json` | 每种都回到无有效策略：`unbound` 占位并默认采集；恢复合法文件后按新 revision 执行显式策略 |
 | C10 | `account_state` 改为 `pending`（revision+1）；观察后改回 `ready`（再 +1） | 显式账户未就绪：两种用途同时停止（表现同 C3，但属显式限制而非 fail-open，§3.3）；改回 `ready` 后恢复采集。`disabled` 同理 |
 | C11 | 仅把 `logs_expires_at` 改为过去（`metrics_expires_at`/`expires_at` 保持未来，revision+1）；观察后恢复，再对称地仅过期 `metrics_expires_at` | 用途独立判期（§13 用途隔离）：日志停、指标继续（metrics-only 照常、dual 投影 `purposes=["metrics"]`）；对称方向亦然。每项用途的有效截止取自身截止与公共 `expires_at` 的较早值（§8） |
-| C12 | 先经场景 E 或真实异常触发过 error 详情，再把 `per_fingerprint_max_per_minute` 改为 `0`（revision+1） | 窗口内收紧立即生效（§11.1）：0 后不再新增 error 详情与限频摘要；critical 通道的 error 计数事实不受影响 |
+| C12 | 先经场景 E 或真实异常触发过 error 详情，再把 `per_fingerprint_max_per_minute` 改为 `0`（revision+1） | 窗口内收紧立即生效（§11.1）：0 后不再新增 error 详情与限频摘要；critical 通道的 error 计数事实不受影响。注意：自检 fault_id 是跨重复报告的去重键——**同一 IDE 进程内再次触发不会重发 error 事实**（计数与详情都不发），检验 C12 须改完限频后重启 IDE 用全新进程触发 |
 
 ## 7. 场景 D：崩溃、追加文件与残留
 
@@ -229,22 +229,22 @@ RPC 终态复测：测试 RPC 时须保持 metrics 许可至少超过其 deadlin
 ### 8.1 准备
 
 1. 控制文件用 §3.1 双用途模板（须含 diagnostic 类别，否则 error 详情不落盘）；
-2. `Help → Edit Custom VM Options...`，追加一行 `-Dcostrict.stability.selftest=true`，保存并重启 IDE；
+2. `Help → Edit Custom VM Options...`，追加一行 `-Dcostrict.stability.selftest=true`，保存并重启 IDE（Windows 下生成的文件是 `%APPDATA%\JetBrains\<产品><版本>\idea64.exe.vmoptions`；手工编辑写成 `idea.vmoptions` 不会被读取）；
 3. 确认采集已激活（场景 A 的 A2~A5）。
 
 ### 8.2 触发隐藏自检动作 `Kilo.StabilitySelfTest`
 
-该动作是设计上的隐藏入口：不挂任何菜单、默认 no-op（无系统属性时误触发也不产生事实）。人工触发按顺序尝试：
+该动作是设计上的隐藏入口：不挂任何菜单、默认 no-op（无系统属性时误触发也不产生事实）、**触发成功也无任何 UI 反馈**——判定是否生效只能靠查盘（触发后 ~40 秒内 outbox 应出现自检事实）。人工触发按顺序尝试：
 
 - **方式一**：双击 Shift（Find Action）搜索 "Stability"。当前构建未给动作设置标题，大概率搜不到——搜不到属正常，转方式二。
 - **方式二（确定可用）**：为它挂快捷键——
   1. `Settings → Keymap`，复制当前 keymap（Duplicate），命名如 `stability-test`，应用；
   2. 关闭 IDE；
-  3. 编辑 `%APPDATA%\JetBrains\<产品><版本>\keymaps\stability-test.xml`，确保内容包含：
+  3. 编辑 `%APPDATA%\JetBrains\<产品><版本>\keymaps\stability-test.xml`，确保内容包含（元素必须是 `keyboard-shortcut`，写成 `shortcut` 会被静默忽略）：
      ```xml
      <keymap version="1" name="stability-test" parent="$default">
        <action id="Kilo.StabilitySelfTest">
-         <shortcut first-keystroke="control alt shift F12"/>
+         <keyboard-shortcut first-keystroke="control alt shift F12"/>
        </action>
      </keymap>
      ```
