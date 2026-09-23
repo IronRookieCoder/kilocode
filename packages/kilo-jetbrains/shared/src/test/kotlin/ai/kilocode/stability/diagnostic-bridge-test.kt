@@ -13,6 +13,8 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
+private const val TIMEOUT = 5L
+
 @ResourceLock("diagnostic-bridge")
 class DiagnosticBridgeTest {
 
@@ -90,60 +92,33 @@ class DiagnosticBridgeTest {
     fun `publish returns while a sink blocks and close prevents later delivery`() {
         val entered = CountDownLatch(1)
         val release = CountDownLatch(1)
-        val returned = CountDownLatch(1)
-        val queued = CountDownLatch(1)
-        val ready = CountDownLatch(2)
-        val start = CountDownLatch(1)
-        val closing = CountDownLatch(2)
-        val firstClosed = CountDownLatch(1)
-        val secondClosed = CountDownLatch(1)
         val seen = mutableListOf<String>()
-        val executor = Executors.newFixedThreadPool(2)
+        val executor = Executors.newFixedThreadPool(3)
         val bridge = DiagnosticBridge.install {
             entered.countDown()
-            check(release.await(5, TimeUnit.SECONDS))
+            release.await()
             seen += it.message
         }
 
         try {
-            val task = CompletableFuture.runAsync {
+            CompletableFuture.runAsync {
                 DiagnosticBridge.publish(DiagnosticInput(DiagnosticSeverity.WARN, "test", "first"))
-                returned.countDown()
-            }
-            assertTrue(returned.await(1, TimeUnit.SECONDS), "publish must not wait for the sink")
-            assertTrue(entered.await(5, TimeUnit.SECONDS), "background sink did not start")
+            }.get(TIMEOUT, TimeUnit.SECONDS)
+            assertTrue(entered.await(TIMEOUT, TimeUnit.SECONDS), "background sink did not start")
             CompletableFuture.runAsync {
                 DiagnosticBridge.publish(DiagnosticInput(DiagnosticSeverity.WARN, "test", "queued"))
-                queued.countDown()
-            }
-            assertTrue(queued.await(1, TimeUnit.SECONDS), "contended publish must not wait for the sink")
-            val first = CompletableFuture.runAsync({
-                ready.countDown()
-                check(start.await(5, TimeUnit.SECONDS))
-                closing.countDown()
-                bridge.close()
-                firstClosed.countDown()
-            }, executor)
-            val second = CompletableFuture.runAsync({
-                ready.countDown()
-                check(start.await(5, TimeUnit.SECONDS))
-                closing.countDown()
-                bridge.close()
-                secondClosed.countDown()
-            }, executor)
-            assertTrue(ready.await(5, TimeUnit.SECONDS), "close tasks did not start")
-            start.countDown()
-            assertTrue(closing.await(5, TimeUnit.SECONDS), "close tasks did not enter close")
-            assertFalse(firstClosed.await(100, TimeUnit.MILLISECONDS), "first close must retain ownership while the sink runs")
-            assertFalse(secondClosed.await(100, TimeUnit.MILLISECONDS), "second close must retain ownership while the sink runs")
+            }.get(TIMEOUT, TimeUnit.SECONDS)
+            val first = CompletableFuture.runAsync(bridge::close, executor)
+            val second = CompletableFuture.runAsync(bridge::close, executor)
+            CompletableFuture.runAsync({ DiagnosticBridge.awaitClosing(bridge, 2) }, executor)
+                .get(TIMEOUT, TimeUnit.SECONDS)
+            assertFalse(first.isDone, "first close must retain ownership while the sink runs")
+            assertFalse(second.isDone, "second close must retain ownership while the sink runs")
             release.countDown()
-            assertTrue(firstClosed.await(5, TimeUnit.SECONDS), "first close did not wait for the sink")
-            assertTrue(secondClosed.await(5, TimeUnit.SECONDS), "second close did not wait for the sink")
-            first.get(5, TimeUnit.SECONDS)
-            second.get(5, TimeUnit.SECONDS)
+            first.get(TIMEOUT, TimeUnit.SECONDS)
+            second.get(TIMEOUT, TimeUnit.SECONDS)
             DiagnosticBridge.publish(DiagnosticInput(DiagnosticSeverity.WARN, "test", "second"))
             DiagnosticBridge.await(bridge)
-            task.get(5, TimeUnit.SECONDS)
             assertEquals(listOf("first", "queued"), seen)
         } finally {
             release.countDown()

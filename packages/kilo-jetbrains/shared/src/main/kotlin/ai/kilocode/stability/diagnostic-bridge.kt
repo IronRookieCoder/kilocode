@@ -63,6 +63,7 @@ object DiagnosticBridge {
         private val worker = AtomicReference<Thread?>()
         @Suppress("PLATFORM_CLASS_MAPPED_TO_KOTLIN")
         private val monitor = java.lang.Object()
+        private var closing = 0
 
         fun offer(input: DiagnosticInput) {
             if (!active.get() || !reserve()) return
@@ -85,7 +86,19 @@ object DiagnosticBridge {
         fun awaitClosed() {
             if (worker.get() === Thread.currentThread()) return
             synchronized(monitor) {
-                while (!deactivated.get() || pending.get() > 0 || running.get() > 0) monitor.wait()
+                closing++
+                monitor.notifyAll()
+                try {
+                    while (!deactivated.get() || pending.get() > 0 || running.get() > 0) monitor.wait()
+                } finally {
+                    closing--
+                }
+            }
+        }
+
+        fun awaitClosing(count: Int) {
+            synchronized(monitor) {
+                while (closing < count) monitor.wait()
             }
         }
 
@@ -190,6 +203,11 @@ object DiagnosticBridge {
 
     internal fun await() {
         current.get()?.await()
+    }
+
+    /** 内部同步点：与 close 共用锁，只有关闭调用释放锁进入等待后才能观察到它们。 */
+    internal fun awaitClosing(bridge: AutoCloseable, count: Int) {
+        (bridge as Installation).entry.awaitClosing(count)
     }
 
     private fun deactivate(entry: Entry) {
