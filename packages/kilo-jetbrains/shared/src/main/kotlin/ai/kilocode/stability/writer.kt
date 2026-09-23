@@ -48,7 +48,7 @@ data class WriterStats(
 
 /**
  * 专用后台单writer（设计6.1/7.1/7.4）：消费Recorder队列、按当前Policy入盘前重判期、
- * 追加为UTF-8无BOM、LF结尾的单文件NDJSON（每producer事实文件`<scope-id>-<producer-id>.jsonl`）。
+ * 追加为UTF-8无BOM、LF结尾的单文件NDJSON（每IDE scope事实文件`<scope-id>.jsonl`）。
  *
  * 单writer纪律：全部文件操作只在自有IO线程执行；EDT永不触碰本类。后台定时器只唤醒
  * （tryLock去重），不直接多线程写；flush()提交同一IO线程并等待，排空并force未同步批次，

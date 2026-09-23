@@ -285,7 +285,7 @@ class ProducerTest {
             assertFalse(Files.exists(home.resolve("registrations")))
             assertFalse(Files.exists(logDir.resolve("costrict-telemetry")))
 
-            val facts = Files.readAllLines(files[0]).filter { it.isNotBlank() }
+            val facts = Files.readAllLines(outbox.resolve("sc-fixed.jsonl")).filter { it.isNotBlank() }
                 .map { factJson.decodeFromString(Fact.serializer(), it) }
             assertEquals("plugin.started", facts.first().name)
             assertEquals("unbound", facts.first().account_epoch)
