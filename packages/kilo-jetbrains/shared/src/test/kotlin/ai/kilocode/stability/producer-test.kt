@@ -6,6 +6,7 @@ import java.util.UUID
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 import javax.swing.SwingUtilities
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -159,16 +160,23 @@ private class Harness(
     }
 }
 
-private fun control(enabled: Boolean, metrics: Boolean, logs: Boolean): String = buildJsonObject {
+private fun control(
+    enabled: Boolean,
+    metrics: Boolean,
+    logs: Boolean,
+    metricsExpires: Long = FAR_EXPIRES,
+    logsExpires: Long = FAR_EXPIRES,
+    logsCategories: JsonArray = categories(logs),
+): String = buildJsonObject {
     put("schema_major", 1)
     put("revision", 12L)
     put("enabled", enabled)
     put("metrics_enabled", metrics)
-    put("metrics_expires_at", FAR_EXPIRES)
+    put("metrics_expires_at", metricsExpires)
     put("metrics_allowed_categories", categories(metrics))
     put("logs_enabled", logs)
-    put("logs_expires_at", FAR_EXPIRES)
-    put("logs_allowed_categories", categories(logs))
+    put("logs_expires_at", logsExpires)
+    put("logs_allowed_categories", logsCategories)
     put("account_epoch", "acct-a")
     put("account_state", if (enabled) "ready" else "disabled")
     put("expires_at", FAR_EXPIRES)
@@ -343,6 +351,68 @@ class StartupTest {
 }
 
 class ProducerTest {
+
+    @Test
+    fun `bridge skips metrics only policy without evaluating payloads`() {
+        Harness().use { harness ->
+            harness.writeControl(validControl())
+            harness.service.start("monolith")
+            harness.awaitReason("ok")
+            harness.writeControl(metricsOnlyControl())
+            harness.awaitStatus(15_000) { it.metrics && !it.logs }
+
+            assertBridgeSkipped(harness)
+        }
+    }
+
+    @Test
+    fun `bridge skips independently expired logs permit without evaluating payloads`() {
+        Harness().use { harness ->
+            harness.writeControl(validControl())
+            harness.service.start("monolith")
+            harness.awaitReason("ok")
+            harness.writeControl(control(true, true, true, logsExpires = harness.clock.wall() + 1))
+            harness.clock.advance(2)
+            harness.awaitStatus(15_000) { it.metrics && !it.logs }
+
+            assertBridgeSkipped(harness)
+        }
+    }
+
+    @Test
+    fun `bridge skips diagnostic category rejection without evaluating payloads`() {
+        Harness().use { harness ->
+            harness.writeControl(validControl())
+            harness.service.start("monolith")
+            harness.awaitReason("ok")
+            harness.writeControl(metricsOnlyControl())
+            harness.awaitStatus(15_000) { it.metrics && !it.logs }
+            harness.writeControl(
+                control(
+                    enabled = true,
+                    metrics = true,
+                    logs = true,
+                    logsCategories = JsonArray(listOf(JsonPrimitive("critical"))),
+                ),
+            )
+            harness.awaitStatus(15_000) { it.metrics && it.logs }
+
+            assertBridgeSkipped(harness)
+        }
+    }
+
+    @Test
+    fun `bridge skips disabled policy without evaluating payloads`() {
+        Harness().use { harness ->
+            harness.writeControl(validControl())
+            harness.service.start("monolith")
+            harness.awaitReason("ok")
+            harness.writeControl(disabledControl())
+            harness.awaitReason("unbound")
+
+            assertBridgeSkipped(harness)
+        }
+    }
 
     @Test
     fun `unclean detects complete shutdown tail before writer terminates it`() {
@@ -910,4 +980,19 @@ class ProducerTest {
     }
 
     private fun Harness.outboxFiles(): List<Path> = listJsonl(outbox)
+}
+
+private fun assertBridgeSkipped(harness: Harness) {
+    val calls = AtomicInteger()
+    DiagnosticBridge.publish(
+        DiagnosticInput(
+            severity = DiagnosticSeverity.ERROR,
+            component = "test",
+            message = "blocked",
+            payloads = mapOf("request" to { calls.incrementAndGet(); "body" }),
+        ),
+    )
+    DiagnosticBridge.await()
+    assertEquals(0, calls.get())
+    assertTrue(harness.facts().none { it.name == "error.reported" })
 }

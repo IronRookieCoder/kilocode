@@ -1,11 +1,15 @@
 package ai.kilocode.stability
 
 import ai.kilocode.log.KiloLog
+import java.util.concurrent.CompletableFuture
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import org.junit.jupiter.api.parallel.ResourceLock
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 @ResourceLock("diagnostic-bridge")
@@ -79,6 +83,79 @@ class DiagnosticBridgeTest {
 
         assertEquals(listOf("first"), first.map { it.message })
         assertTrue(second.isEmpty())
+    }
+
+    @Test
+    fun `publish returns while a sink blocks and close prevents later delivery`() {
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val returned = CountDownLatch(1)
+        val queued = CountDownLatch(1)
+        val closed = CountDownLatch(1)
+        val seen = mutableListOf<String>()
+        val bridge = DiagnosticBridge.install {
+            entered.countDown()
+            check(release.await(5, TimeUnit.SECONDS))
+            seen += it.message
+        }
+
+        try {
+            val task = CompletableFuture.runAsync {
+                DiagnosticBridge.publish(DiagnosticInput(DiagnosticSeverity.WARN, "test", "first"))
+                returned.countDown()
+            }
+            assertTrue(returned.await(1, TimeUnit.SECONDS), "publish must not wait for the sink")
+            assertTrue(entered.await(5, TimeUnit.SECONDS), "background sink did not start")
+            CompletableFuture.runAsync {
+                DiagnosticBridge.publish(DiagnosticInput(DiagnosticSeverity.WARN, "test", "queued"))
+                queued.countDown()
+            }
+            assertTrue(queued.await(1, TimeUnit.SECONDS), "contended publish must not wait for the sink")
+            val closing = CompletableFuture.runAsync {
+                bridge.close()
+                closed.countDown()
+            }
+            assertFalse(closed.await(100, TimeUnit.MILLISECONDS), "close must retain ownership while the sink runs")
+            release.countDown()
+            assertTrue(closed.await(5, TimeUnit.SECONDS), "close did not wait for the sink")
+            closing.get(5, TimeUnit.SECONDS)
+            DiagnosticBridge.publish(DiagnosticInput(DiagnosticSeverity.WARN, "test", "second"))
+            DiagnosticBridge.await(bridge)
+            task.get(5, TimeUnit.SECONDS)
+            assertEquals(listOf("first", "queued"), seen)
+        } finally {
+            release.countDown()
+            bridge.close()
+            DiagnosticBridge.await(bridge)
+        }
+    }
+
+    @Test
+    fun `sink failure is isolated from the publishing thread`() {
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val returned = CountDownLatch(1)
+        val bridge = DiagnosticBridge.install {
+            entered.countDown()
+            check(release.await(5, TimeUnit.SECONDS))
+            error("sink failure")
+        }
+
+        try {
+            val task = CompletableFuture.runAsync {
+                DiagnosticBridge.publish(DiagnosticInput(DiagnosticSeverity.ERROR, "test", "failed"))
+                returned.countDown()
+            }
+            assertTrue(returned.await(1, TimeUnit.SECONDS), "publish must not wait for a failing sink")
+            assertTrue(entered.await(5, TimeUnit.SECONDS), "background sink did not start")
+            release.countDown()
+            DiagnosticBridge.await(bridge)
+            task.get(5, TimeUnit.SECONDS)
+        } finally {
+            release.countDown()
+            bridge.close()
+            DiagnosticBridge.await(bridge)
+        }
     }
 
     @Test

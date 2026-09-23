@@ -24,6 +24,8 @@ private const val KIND_LIFECYCLE = "lifecycle"
 private const val CHANNEL_CRITICAL = "critical"
 private const val NAME_STARTED = "plugin.started"
 private const val NAME_SHUTDOWN = "plugin.shutdown"
+private const val NAME_BRIDGED = "error.reported"
+private const val CATEGORY_DIAGNOSTIC = "diagnostic"
 private const val END_KIND_APP_CLOSE = "app_close"
 private const val END_KIND_UNLOAD = "unload"
 private const val PROFILE_DEFAULT = "default"
@@ -378,7 +380,7 @@ class StabilityService private constructor(
         val faults = Faults(recorder, clock)
         activeFaults = faults
         activeHealth = Health(recorder, writer, clock)
-        installBridge(faults)
+        installBridge(faults, store)
     }
 
     /** 公共授权撤销：关准入→writer最后排空（失效事实按入盘前重判期丢弃），不记shutdown；
@@ -406,10 +408,11 @@ class StabilityService private constructor(
     }
 
     /** writer活动后才安装；既有Faults适配器保留给Task 5的Diagnostics替换。 */
-    private fun installBridge(faults: Faults) {
+    private fun installBridge(faults: Faults, store: PolicyStore) {
         synchronized(stateLock) {
             if (stoppedOnce.get()) return
             val bridge = DiagnosticBridge.install { input ->
+                if (!logsPermitted(store)) return@install
                 val error = input.error ?: IllegalStateException(input.message)
                 faults.report(error, input.component, handled = true)
             }
@@ -420,11 +423,14 @@ class StabilityService private constructor(
     /** 必须早于recorder/writer关闭；安装句柄自身可重复关闭。 */
     private fun closeBridge() {
         val bridge = synchronized(stateLock) {
-            val current = activeBridge
-            activeBridge = null
-            current
+            activeBridge
         }
-        bridge?.close()
+        if (bridge == null) return
+        bridge.close()
+        DiagnosticBridge.await(bridge)
+        synchronized(stateLock) {
+            if (activeBridge === bridge) activeBridge = null
+        }
     }
 
     /** writer启动在自有IO线程完成；等待逻辑见[defaultAwaitActive]（可注入）。 */
@@ -438,6 +444,9 @@ class StabilityService private constructor(
         val policy = policies?.current() ?: return emptySet()
         return policy.permit(clock.wall(), NAME_STARTED)
     }
+
+    private fun logsPermitted(store: PolicyStore): Boolean =
+        PURPOSE_LOGS in store.current().permit(clock.wall(), NAME_BRIDGED, CATEGORY_DIAGNOSTIC)
 
     private fun currentRunReason(): String = REASON_OK
 
