@@ -813,6 +813,42 @@ class KiloCliDataParserTest {
         }
 
         @Test
+        fun `parseChatEvent - flat daemon session created frame`() {
+            val data = globalEvent("""
+                "type": "session.created",
+                "properties": {
+                    "created_at": 1790222162624,
+                    "session_id": "ses_flat",
+                    "status": "running",
+                    "timestamp": 1790222162625
+                }
+            """)
+
+            val result = KiloCliDataParser.parseChatEvent("session.created", data)
+            assertNotNull(result)
+            assertTrue(result is ChatEventDto.SessionCreated)
+            assertEquals("ses_flat", result.sessionID)
+        }
+
+        @Test
+        fun `parseChatEvent - flat daemon session updated frame`() {
+            val data = globalEvent("""
+                "type": "session.updated",
+                "properties": {
+                    "sessionID": "ses_flat",
+                    "status": "running",
+                    "title": "Live title"
+                }
+            """)
+
+            val result = KiloCliDataParser.parseChatEvent("session.updated", data)
+            assertNotNull(result)
+            assertTrue(result is ChatEventDto.SessionUpdated)
+            assertEquals("ses_flat", result.sessionID)
+            assertEquals("Live title", result.session.title)
+        }
+
+        @Test
         fun `parseChatEvent - session diff`() {
             val data = globalEvent("""
                 "type": "session.diff",

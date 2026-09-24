@@ -143,11 +143,10 @@ class KiloSessionRpcApiImpl internal constructor(
         app.requireReady()
         log.info("delete session: id=$id, directory=$directory")
         val dir = sessions.getDirectory(id, directory)
-        try {
-            workspaces.get(dir).deleteSession(id)
-        } finally {
-            app.sessionCapabilities?.release(id, CapabilityReleaseReason.DELETE)
-        }
+        // Release the IDE capability while the conversation still exists so the daemon's
+        // clear reaches the live agent session; a failed delete just re-ensures on the next prompt.
+        app.sessionCapabilities?.release(id, CapabilityReleaseReason.DELETE)
+        workspaces.get(dir).deleteSession(id)
     }
 
     override suspend fun rename(id: String, directory: String, title: String): ai.kilocode.rpc.dto.SessionDto {

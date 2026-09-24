@@ -254,6 +254,51 @@ class CsCloudRouteTest {
     }
 
     @Test
+    fun `keeps csc session status map decodable for the generated client`() {
+        val server = MockWebServer()
+        server.enqueue(MockResponse().setBody("""{"ses_1":{"type":"busy"},"ses_2":{"type":"idle"}}"""))
+        server.start()
+        val client = OkHttpClient.Builder()
+            .addInterceptor(CsCloudRoute.interceptor())
+            .addInterceptor(CsCloudRoute.responseInterceptor())
+            .build()
+
+        try {
+            val api = DefaultApi(server.url("/").toString().trimEnd('/'), client)
+            val statuses = api.sessionStatus(directory = "/tmp/workspace")
+
+            assertEquals("/api/v1/conversations/status", server.takeRequest().path)
+            assertEquals("busy", statuses.getValue("ses_1").type.value)
+            assertEquals("idle", statuses.getValue("ses_2").type.value)
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun `keeps csc conversation delete response decodable as boolean`() {
+        val server = MockWebServer()
+        server.enqueue(MockResponse().setBody("""{"deleted":true}"""))
+        server.start()
+        val client = OkHttpClient.Builder()
+            .addInterceptor(CsCloudRoute.interceptor())
+            .addInterceptor(CsCloudRoute.responseInterceptor())
+            .build()
+
+        try {
+            val api = DefaultApi(server.url("/").toString().trimEnd('/'), client)
+
+            assertTrue(api.sessionDelete(sessionID = "ses_1", directory = "/tmp/workspace"))
+
+            val request = server.takeRequest()
+            assertEquals("DELETE", request.method)
+            assertEquals("/api/v1/conversations/ses_1", request.path)
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
     fun `session routes require a workspace directory`() {
         val request = Request.Builder().url("http://127.0.0.1:8080/session").post("{}".toRequestBody()).build()
         assertFailsWith<IllegalArgumentException> { CsCloudRoute.rewrite(request) }
