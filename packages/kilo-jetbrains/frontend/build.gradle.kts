@@ -32,6 +32,7 @@ dependencies {
     testImplementation(kotlin("test"))
     testImplementation(libs.junit)
     testRuntimeOnly(libs.junit.vintage.engine)
+    testImplementation(testFixtures(project(":shared")))
 }
 
 val providerIcons = tasks.register<Copy>("generateProviderIcons") {

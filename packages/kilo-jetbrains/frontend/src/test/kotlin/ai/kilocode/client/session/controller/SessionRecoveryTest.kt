@@ -1,5 +1,6 @@
 package ai.kilocode.client.session.controller
 
+import ai.kilocode.client.app.KiloSessionService
 import ai.kilocode.client.session.model.SessionState
 import ai.kilocode.rpc.dto.ConfigDto
 import ai.kilocode.rpc.dto.KiloAppStateDto
@@ -11,6 +12,8 @@ import ai.kilocode.rpc.dto.PermissionRequestDto
 import ai.kilocode.rpc.dto.QuestionInfoDto
 import ai.kilocode.rpc.dto.QuestionRequestDto
 import ai.kilocode.rpc.dto.SessionStatusDto
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.serialization.json.jsonPrimitive
 
 /**
  * Tests for pending permission/question recovery after history load.
@@ -45,6 +48,58 @@ class SessionRecoveryTest : SessionControllerTestBase() {
         val perm = (m.model.state as SessionState.AwaitingPermission).permission
         assertEquals("perm_pending", perm.id)
         assertEquals("read", perm.name)
+
+        // 在已建立的真实恢复场景中，复用基座的flush和断言。
+        flush()
+        fixture.flush()
+        val ends = fixture.facts().filter {
+            it.name == "session.restore" && it.data["phase"]?.jsonPrimitive?.content == "end"
+        }
+        assertEquals(1, ends.size)
+        assertEquals("success", ends.single().data.getValue("result").jsonPrimitive.content)
+        assertEquals("ui", ends.single().data.getValue("stage").jsonPrimitive.content)
+    }
+
+    fun `test restore end waits for delayed pending recovery`() {
+        // 延迟pending返回但先返回history：history已应用期间不得存在success end。
+        val gate = CompletableDeferred<Unit>()
+        sessions = KiloSessionService(project, scope, GatedPendingApi(rpc, gate = gate))
+        rpc.pendingPermissionList.add(
+            PermissionRequestDto(
+                id = "perm_pending",
+                sessionID = "ses_test",
+                permission = "read",
+                patterns = listOf("*.json"),
+            )
+        )
+
+        projectRpc.state.value = workspaceReady()
+        val m = controller("ses_test")
+        flush()
+
+        // history已返回，pending仍在途中：无权限卡片、无success end。
+        assertFalse(m.model.state is SessionState.AwaitingPermission)
+        fixture.flush()
+        val pending = fixture.facts().filter {
+            it.name == "session.restore" && it.data["phase"]?.jsonPrimitive?.content == "end"
+        }
+        assertEquals(0, pending.count { it.data["result"]?.jsonPrimitive?.content == "success" })
+
+        gate.complete(Unit)
+        flush()
+
+        // 完成后既有权限卡片出现，且只结算一次success。
+        assertTrue(m.model.state is SessionState.AwaitingPermission)
+        val perm = (m.model.state as SessionState.AwaitingPermission).permission
+        assertEquals("perm_pending", perm.id)
+
+        fixture.flush()
+        val ends = fixture.facts().filter {
+            it.name == "session.restore" && it.data["phase"]?.jsonPrimitive?.content == "end"
+        }
+        assertEquals(1, ends.size)
+        assertEquals("success", ends.single().data.getValue("result").jsonPrimitive.content)
+        assertEquals("ui", ends.single().data.getValue("stage").jsonPrimitive.content)
     }
 
     fun `test pending question is recovered when no pending permissions`() {

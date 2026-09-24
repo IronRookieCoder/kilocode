@@ -6,6 +6,8 @@ import ai.kilocode.backend.app.KiloBackendSessionManager
 import ai.kilocode.backend.testing.FakeCliServer
 import ai.kilocode.backend.testing.MockCliServer
 import ai.kilocode.backend.testing.TestLog
+import ai.kilocode.stability.Fixture
+import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -23,8 +25,69 @@ import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
+import ai.kilocode.jetbrains.api.client.DefaultApi
+import ai.kilocode.backend.cli.KiloBackendHttpClients
+import ai.kilocode.stability.rpc
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.serialization.SerializationException
 
 class KiloBackendSessionManagerTest {
+
+    @Test
+    fun `recent HTTP 404 records exact failure body and query free route`() = runBlocking {
+        mock.recentSessionsStatus = 404
+        mock.recentSessions = """{"message":"recent not found","password":"hidden-secret"}"""
+        Fixture().use { fixture ->
+            fixture.enableDiagnostics()
+            val base = "http://127.0.0.1:${mock.start()}"
+            val http = KiloBackendHttpClients.api(mock.password)
+            val manager = KiloBackendSessionManager(scope, log, fixture.operations)
+            manager.start(DefaultApi(base, http), http, base, MutableSharedFlow())
+            try {
+                assertFailsWith<Exception> { fixture.operations.rpc("session") { manager.recent("/sensitive?token=query-secret", 5) } }
+                fixture.flush()
+                val facts = fixture.facts()
+                val incident = facts.single { it.name == "diagnostic.reported" }
+                assertEquals("404", incident.data.getValue("http_status").jsonPrimitive.content)
+                assertEquals("/experimental/session", incident.data.getValue("route").jsonPrimitive.content)
+                assertTrue(fixture.payload("response").contains("recent not found"))
+                assertTrue(fixture.payload("stack").contains("KiloBackendSessionManager"))
+                assertTrue(!facts.joinToString().contains("hidden-secret"))
+                assertTrue(!fixture.payload("attributes").contains("query-secret"))
+                val end = facts.single { it.name == "rpc" && it.data["phase"]?.jsonPrimitive?.content == "end" }
+                assertEquals(end.context["operation_id"], incident.context["operation_id"])
+                assertEquals("not_found", end.data.getValue("error_code").jsonPrimitive.content)
+            } finally {
+                manager.stop()
+                KiloBackendHttpClients.shutdown(http)
+            }
+        }
+    }
+
+    @Test
+    fun `recent real generated serializer failure records exact received payload`() = runBlocking {
+        mock.recentSessions = """[{"id":"ses_invalid","projectID":"prj_string","time":"wrong-object","project":null}]"""
+        Fixture().use { fixture ->
+            fixture.enableDiagnostics()
+            val base = "http://127.0.0.1:${mock.start()}"
+            val http = KiloBackendHttpClients.api(mock.password)
+            val manager = KiloBackendSessionManager(scope, log, fixture.operations)
+            manager.start(DefaultApi(base, http), http, base, MutableSharedFlow())
+            try {
+                assertFailsWith<SerializationException> { fixture.operations.rpc("session") { manager.recent("/repo", 5) } }
+                fixture.flush()
+                val incident = fixture.facts().single { it.name == "diagnostic.reported" }
+                assertEquals(mock.recentSessions, fixture.payload("response"))
+                assertEquals("$[0].time", incident.data.getValue("json_path").jsonPrimitive.content)
+                assertEquals("object", incident.data.getValue("expected_type").jsonPrimitive.content)
+                assertEquals("string", incident.data.getValue("actual_type").jsonPrimitive.content)
+                assertTrue(fixture.payload("stack").contains("GlobalSession"))
+            } finally {
+                manager.stop()
+                KiloBackendHttpClients.shutdown(http)
+            }
+        }
+    }
 
     private val mock = MockCliServer()
     private val log = TestLog()
@@ -358,6 +421,84 @@ class KiloBackendSessionManagerTest {
         val status = app.sessions.statuses.value["ses_live"]
         assertNotNull(status)
         assertEquals("busy", status.type)
+    }
+
+    @Test
+    fun `invalid SSE status records one decode protocol error and continues`() = runBlocking {
+        Fixture().use { fixture ->
+            val app = setup()
+            ready(app)
+            val manager = KiloBackendSessionManager(scope, log, fixture.operations)
+            manager.start(app.api ?: error("missing API"), app.http ?: error("missing HTTP"), app.base ?: error("missing base"), app.events)
+
+            mock.awaitSseConnection()
+            mock.pushEvent("session.status", "{invalid-secret-session-status")
+            mock.pushEvent("session.status", """{"type":"session.status","properties":{"sessionID":"ses_good","status":{"type":"idle"}}}""")
+
+            withTimeout(5_000) {
+                manager.statuses.first { it["ses_good"]?.type == "idle" }
+            }
+            fixture.flush()
+            manager.stop()
+
+            val facts = fixture.facts().filter { it.name == "protocol.error" }
+            assertEquals(1, facts.size)
+            val fact = facts.single()
+            assertEquals("sse", fact.data.getValue("transport").jsonPrimitive.content)
+            assertEquals("decode", fact.data.getValue("stage").jsonPrimitive.content)
+            assertEquals("decode_failed", fact.data.getValue("error_code").jsonPrimitive.content)
+            assertFalse(fact.data.toString().contains("invalid-secret-session-status"))
+        }
+    }
+
+    @Test
+    fun `incomplete SSE status records one decode protocol error and continues`() = runBlocking {
+        Fixture().use { fixture ->
+            val app = setup()
+            ready(app)
+            val manager = KiloBackendSessionManager(scope, log, fixture.operations)
+            manager.start(app.api ?: error("missing API"), app.http ?: error("missing HTTP"), app.base ?: error("missing base"), app.events)
+
+            mock.awaitSseConnection()
+            mock.pushEvent("session.status", """{"type":"session.status","properties":{"status":{"type":"idle"}}}""")
+            mock.pushEvent("session.status", """{"type":"session.status","properties":{"sessionID":"ses_good","status":{"type":"idle"}}}""")
+
+            withTimeout(5_000) {
+                manager.statuses.first { it["ses_good"]?.type == "idle" }
+            }
+            fixture.flush()
+            manager.stop()
+
+            val facts = fixture.facts().filter { it.name == "protocol.error" }
+            assertEquals(1, facts.size)
+            assertEquals("sse", facts.single().data.getValue("transport").jsonPrimitive.content)
+            assertEquals("decode", facts.single().data.getValue("stage").jsonPrimitive.content)
+            assertEquals("decode_failed", facts.single().data.getValue("error_code").jsonPrimitive.content)
+        }
+    }
+
+    @Test
+    fun `nested invalid SSE status records one decode error and continues`() = runBlocking {
+        Fixture().use { fixture ->
+            val app = setup()
+            ready(app)
+            val manager = KiloBackendSessionManager(scope, log, fixture.operations)
+            manager.start(app.api ?: error("missing API"), app.http ?: error("missing HTTP"), app.base ?: error("missing base"), app.events)
+
+            mock.awaitSseConnection()
+            mock.pushEvent("session.status", """{"type":"session.status","properties":{"sessionID":"ses_bad","status":{"type":{}}}}""")
+            mock.pushEvent("session.status", """{"type":"session.status","properties":{"sessionID":"ses_good","status":{"type":"busy"}}}""")
+
+            withTimeout(5_000) {
+                manager.statuses.first { it["ses_good"]?.type == "busy" }
+            }
+            fixture.flush()
+            manager.stop()
+
+            val facts = fixture.facts().filter { it.name == "protocol.error" }
+            assertEquals(1, facts.size)
+            assertEquals("decode_failed", facts.single().data.getValue("error_code").jsonPrimitive.content)
+        }
     }
 
     @Test

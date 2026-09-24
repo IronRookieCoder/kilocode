@@ -8,6 +8,8 @@ import ai.kilocode.backend.testing.FakeCliServer
 import ai.kilocode.backend.testing.MockCliServer
 import ai.kilocode.backend.testing.TestLog
 import ai.kilocode.log.KiloLog
+import ai.kilocode.stability.Fact
+import ai.kilocode.stability.Fixture
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
@@ -15,6 +17,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.take
 import kotlinx.coroutines.flow.toList
@@ -22,6 +25,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.Request
 import okhttp3.sse.EventSource
 import okhttp3.sse.EventSourceListener
@@ -357,6 +361,112 @@ class KiloConnectionServiceTest {
         // Should transition away from Connected
         withTimeout(10_000) {
             svc.state.first { it !is ConnectionState.Connected }
+        }
+    }
+
+    // ------ B2：M04/M05 同语义（kilo-cli provider，fixture观测经单消费者串行上下文） ------
+
+    private fun ends(facts: List<Fact>, name: String) =
+        facts.filter { it.name == name && it.data["phase"]?.jsonPrimitive?.content == "end" }
+
+    /** 观测任务经Channel异步推进：轮询flush直到谓词满足（真实落盘后断言）。 */
+    private fun factsUntil(fixture: Fixture, timeoutMs: Long = 10_000, predicate: (List<Fact>) -> Boolean): List<Fact> {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        var facts = emptyList<Fact>()
+        while (System.currentTimeMillis() < deadline) {
+            fixture.flush()
+            facts = fixture.facts()
+            if (predicate(facts)) return facts
+            Thread.sleep(50)
+        }
+        error("observation condition not met within ${timeoutMs}ms; facts=${facts.map { it.name to it.data.toString() }}")
+    }
+
+    @Test
+    fun `connection success and sse loss share the recovery semantics`() = runBlocking {
+        val fixture = Fixture()
+        val svc = KiloConnectionService(scope, fake, {}, log, 30_000L, fixture.operations)
+        try {
+            svc.connect()
+            mock.awaitSseConnection()
+            withTimeout(5_000) { svc.state.first { it is ConnectionState.Connected } }
+            // 一次用户旅程恰好一个逻辑成功end；attempt诊断层另计（brief逐字语义）。
+            factsUntil(fixture) { facts -> ends(facts, "connection").size == 1 }
+            fixture.flush()
+            var facts = fixture.facts()
+            assertEquals("success", ends(facts, "connection").single().data["result"]?.jsonPrimitive?.content)
+            assertTrue(ends(facts, "connection.attempt").any { it.data["result"]?.jsonPrimitive?.content == "success" })
+
+            // SSE断开：恰好一次退化transition与一个恢复区间（ready前失败不会走到这里）。
+            mock.closeSse()
+            factsUntil(fixture) { f -> f.count { it.name == "connection.state_changed" } == 1 }
+            factsUntil(fixture) { f -> f.count { it.name == "connection.recovery" && it.data["phase"]?.jsonPrimitive?.content == "start" } == 1 }
+            assertEquals("sse_closed", fixture.facts().first { it.name == "connection.state_changed" }.data["reason"]?.jsonPrimitive?.content)
+
+            // 正常dispose：恢复区间结算cancelled（成熟区间外），不新增断连事实。
+            svc.dispose()
+            fixture.flush()
+            facts = fixture.facts()
+            assertEquals(1, facts.count { it.name == "connection.state_changed" })
+            val recoveryEnds = ends(facts, "connection.recovery")
+            assertEquals(1, recoveryEnds.size)
+            assertEquals("cancelled", recoveryEnds.single().data["result"]?.jsonPrimitive?.content)
+        } finally {
+            svc.dispose()
+            fixture.close()
+        }
+    }
+
+    @Test
+    fun `normal dispose records no disconnect`() = runBlocking {
+        val fixture = Fixture()
+        val svc = KiloConnectionService(scope, fake, {}, log, 30_000L, fixture.operations)
+        try {
+            svc.connect()
+            mock.awaitSseConnection()
+            withTimeout(5_000) { svc.state.first { it is ConnectionState.Connected } }
+            factsUntil(fixture) { facts -> ends(facts, "connection").size == 1 }
+            svc.dispose()
+            fixture.flush()
+            val facts = fixture.facts()
+            assertEquals(0, facts.count { it.name == "connection.state_changed" })
+            assertEquals(0, facts.count { it.name == "connection.recovery" })
+            assertEquals("success", ends(facts, "connection").single().data["result"]?.jsonPrimitive?.content)
+        } finally {
+            svc.dispose()
+            fixture.close()
+        }
+    }
+
+    @Test
+    fun `terminal init failure ends the connection as failure`() = runBlocking {
+        val fixture = Fixture()
+        val failing = object : CliServer {
+            override var forceExtract = false
+            override fun process(): Process? = null
+            override suspend fun init(onProgress: (CliDownload) -> Unit, onResolved: () -> Unit) =
+                CliServer.State.Error("binary not found", "stderr line")
+            override fun exited(proc: Process) {}
+            override fun stop() {}
+            override fun dispose() {}
+        }
+        val svc = KiloConnectionService(scope, failing, {}, log, 30_000L, fixture.operations)
+        try {
+            svc.connect()
+            withTimeout(5_000) { svc.state.first { it is ConnectionState.Error } }
+            // 终局失败无重试：逻辑op按failure结算（映射stage/cause/code），而非等到30s timeout。
+            factsUntil(fixture) { facts -> ends(facts, "connection").size == 1 }
+            fixture.flush()
+            val journeyEnd = ends(fixture.facts(), "connection").single()
+            assertEquals("failure", journeyEnd.data["result"]?.jsonPrimitive?.content)
+            assertEquals("resolve", journeyEnd.data["stage"]?.jsonPrimitive?.content)
+            assertEquals("environment", journeyEnd.data["cause"]?.jsonPrimitive?.content)
+            assertEquals("other", journeyEnd.data["error_code"]?.jsonPrimitive?.content)
+            assertEquals("failure", ends(fixture.facts(), "connection.attempt").single().data["result"]?.jsonPrimitive?.content)
+            assertEquals(0, fixture.facts().count { it.name == "connection.recovery" })
+        } finally {
+            svc.dispose()
+            fixture.close()
         }
     }
 

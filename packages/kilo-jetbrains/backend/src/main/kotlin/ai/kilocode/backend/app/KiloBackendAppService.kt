@@ -11,6 +11,8 @@ import ai.kilocode.backend.migration.LegacyMigrationStatus
 import ai.kilocode.backend.telemetry.KiloBackendTelemetry
 import ai.kilocode.log.KiloLog
 import ai.kilocode.backend.workspace.KiloBackendWorkspaceManager
+import ai.kilocode.stability.Operation
+import ai.kilocode.stability.StabilityService
 import ai.kilocode.jetbrains.api.client.DefaultApi
 import ai.kilocode.jetbrains.api.infrastructure.ClientError
 import ai.kilocode.jetbrains.api.infrastructure.ClientException
@@ -30,6 +32,12 @@ import ai.kilocode.rpc.dto.DeviceAuthDto
 import ai.kilocode.rpc.dto.ConfigPatchDto
 import ai.kilocode.rpc.dto.CsCloudStartDto
 import ai.kilocode.rpc.dto.HealthDto
+import ai.kilocode.stability.Draft
+import ai.kilocode.stability.Operations
+import ai.kilocode.stability.DiagnosticInput
+import ai.kilocode.stability.DiagnosticRedactor
+import ai.kilocode.stability.ErrorClassifier
+import okio.buffer
 import com.intellij.openapi.Disposable
 import com.intellij.openapi.components.Service
 import com.intellij.openapi.components.service
@@ -61,6 +69,8 @@ import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -68,6 +78,7 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import java.net.ConnectException
 import java.net.SocketTimeoutException
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.coroutines.resume
@@ -90,6 +101,7 @@ import kotlin.coroutines.resumeWithException
  * Profile is optional — 401 (not logged in) is not an error.
  */
 @Service(Service.Level.APP)
+@Suppress("LongParameterList") // Existing connection dependencies plus the run-scoped diagnostic entry point.
 class KiloBackendAppService private constructor(
   private val cs: CoroutineScope,
   private val server: CliServer,
@@ -97,6 +109,7 @@ class KiloBackendAppService private constructor(
   private val loadTimeoutMs: Long,
   private val providers: List<KiloConnectionProvider>, // kilocode_change
   private val runtime: Boolean, // kilocode_change
+  private val operations: Operations? = runCatching { service<StabilityService>().operations }.getOrNull(),
 ) : Disposable {
 
     /** IntelliJ service injection entry point. */
@@ -116,6 +129,7 @@ class KiloBackendAppService private constructor(
         private const val READY_TIMEOUT_MS = 120_000L
 
         /** Test factory — no IntelliJ deps needed. */
+        @Suppress("LongParameterList")
         internal fun create(
             cs: CoroutineScope,
             server: CliServer,
@@ -123,7 +137,8 @@ class KiloBackendAppService private constructor(
             loadTimeoutMs: Long = APP_LOAD_TIMEOUT_MS,
             providers: List<KiloConnectionProvider> = emptyList(), // kilocode_change
             runtime: Boolean = true, // kilocode_change
-        ) = KiloBackendAppService(cs, server, log, loadTimeoutMs, providers, runtime)
+            operations: Operations? = null,
+        ) = KiloBackendAppService(cs, server, log, loadTimeoutMs, providers, runtime, operations)
 
         // kilocode_change start
         internal fun create(
@@ -157,6 +172,10 @@ class KiloBackendAppService private constructor(
     private var watcher: Job? = null
     private var eventWatcher: Job? = null
     private var loader: Job? = null
+
+    /** M02当前load逻辑操作句柄（brief Step 4）：被替换/取消时结算cancelled，迟到完成不二次end。 */
+    @Volatile
+    private var loadOperation: Operation? = null
     private var closed = false
     private var migrationOffered = false
     private var migrationSuppressed = false
@@ -164,6 +183,11 @@ class KiloBackendAppService private constructor(
     private var reconnecting = false
     private val loadLock = Any()
     private val rev = AtomicLong()
+
+    /** M10（brief Step 5）：每次激活首次进入MigrationRequired记一次transition。 */
+    private val migrationObservation = MigrationObservation {
+        runCatching { service<StabilityService>().operations }.getOrNull()
+    }
 
     private val _appState = MutableStateFlow<KiloAppState>(KiloAppState.Disconnected)
     val appState: StateFlow<KiloAppState> = _appState.asStateFlow()
@@ -175,11 +199,21 @@ class KiloBackendAppService private constructor(
     val base: String? get() = connection.target?.base
     val sessionCapabilities: KiloSessionCapabilities? get() = connection.capabilities // kilocode_change
 
-    val sessions = KiloBackendSessionManager(cs, log)
+    val sessions = KiloBackendSessionManager(cs, log, operations)
     val chat = KiloBackendChatManager(cs, log)
     val activity = KiloBackendActivityManager(cs, log)
     val models = KiloBackendModelStateManager(log)
     val workspaces = KiloBackendWorkspaceManager(cs, sessions, log)
+
+    init {
+        // Shared stability collector entry (backend side): idempotent start with the platform
+        // run-mode source as the identity authority; provider id attributed best effort.
+        runCatching {
+            val stability = service<StabilityService>()
+            stability.noteConnectionProvider(connectionProvider.id)
+            stability.start("backend")
+        }.onFailure { log.warn("Stability collector start failed", it) }
+    }
 
     private val _codeReviewReports = MutableSharedFlow<CodeReviewReportDto>(extraBufferCapacity = 32)
     val codeReviewReports: SharedFlow<CodeReviewReportDto> get() = _codeReviewReports.asSharedFlow()
@@ -476,6 +510,10 @@ class KiloBackendAppService private constructor(
     private fun load(recover: Boolean = false) {
         synchronized(loadLock) {
             loader?.cancel()
+            // 被替换的load协程：其逻辑操作结算cancelled（已终态则CAS丢弃，不二次end）。
+            loadOperation?.end("cancelled", LOAD_STAGE, "user")
+            loadOperation = beginLoadOperation(recover)
+            val operation = loadOperation
             loader = cs.launch {
                 val start = System.currentTimeMillis()
                 log.info("Application starting — loading config, profile, notifications")
@@ -484,6 +522,12 @@ class KiloBackendAppService private constructor(
 
                 val migration = detectMigration()
                 if (migration != null) {
+                    // M10：迁移transition每激活首次转换记录一次；M03的blocked由同一分支的
+                    // backend.load end承载（B1），此处不重复。
+                    migrationObservation.onMigrationRequired()
+                    operation?.end("blocked", LOAD_STAGE, "environment", fields = buildJsonObject {
+                        put("reason", LOAD_REASON_MIGRATION)
+                    })
                     captureLoad("Backend Migration Required", start, mapOf("migrationRequired" to "true"))
                     stopRuntime()
                     profile = null
@@ -563,6 +607,8 @@ class KiloBackendAppService private constructor(
                         runCatching { sessions.recover(chat) }
                             .onFailure { log.warn("Session recovery failed after reconnect", it) }
                     }
+                    // M02终点：profile/config/notifications加载与恢复全部完成后结算唯一success。
+                    operation?.end("success", LOAD_STAGE)
                     startWatchingGlobalSseEvents()
                     setTelemetry(true)
                     captureBackend("Backend Connected", mapOf("portKnown" to "true"))
@@ -585,6 +631,9 @@ class KiloBackendAppService private constructor(
                     )
                     log.info("Application started — config, profile, notifications loaded")
                 } catch (e: TimeoutCancellationException) {
+                    operation?.end("timeout", LOAD_STAGE, "environment", fields = buildJsonObject {
+                        put("reason", LOAD_REASON_TIMEOUT)
+                    })
                     val err = LoadError(
                         resource = "app",
                         detail = "Timed out loading app data after ${loadTimeoutMs}ms",
@@ -600,10 +649,14 @@ class KiloBackendAppService private constructor(
                         errors = errors.toList() + err,
                     )
                 } catch (e: CancellationException) {
+                    operation?.end("cancelled", LOAD_STAGE, "user")
                     throw e
                 } catch (e: Exception) {
                     ensureActive()
                     log.warn("Application start failed: ${e.message}")
+                    operation?.end("failure", LOAD_STAGE, "plugin", "other", fields = buildJsonObject {
+                        put("reason", loadFailureReason(errors))
+                    })
                     captureLoad("Backend Load Failed", start, mapOf(
                         "errorCount" to errors.size.toString(),
                         "resources" to errors.map { it.resource }.distinct().joinToString(","),
@@ -617,6 +670,19 @@ class KiloBackendAppService private constructor(
             }
         }
     }
+
+    /**
+     * M02 begin（brief Step 4）：30秒（与业务withTimeout同一[loadTimeoutMs]上界），
+     * begin的name专属fields携带trigger=initial/recovery。begin失败（采集禁用）绝不
+     * 阻碍业务加载；观察deadline到点不取消业务本身（Operation定时器独立于load协程）。
+     */
+    private fun beginLoadOperation(recover: Boolean): Operation? = runCatching {
+        operations?.begin(
+            LOAD_OPERATION_NAME,
+            loadTimeoutMs,
+            fields = buildJsonObject { put("trigger", loadTrigger(recover)) },
+        )
+    }.getOrNull()
 
     private fun captureLoad(event: String, start: Long, props: Map<String, String>) {
         val http = connection.apiClient
@@ -733,6 +799,8 @@ class KiloBackendAppService private constructor(
             ?: return FetchResult.fail("config", detail = "Not connected")
         val base = connection.target?.base
             ?: return FetchResult.fail("config", detail = "Connection target unavailable")
+        val capture = HttpCapture()
+        val context = loadOperation?.let { mapOf("operation_id" to it.id) }.orEmpty()
         return try {
             val request = Request.Builder()
                 .url("$base/global/config")
@@ -741,13 +809,12 @@ class KiloBackendAppService private constructor(
                 .build()
             val body = withContext(Dispatchers.IO) {
                 suspendCancellableCoroutine { cont ->
-                    val call = http.newCall(request)
+                    val call = capture.client(http).newCall(request)
                     cont.invokeOnCancellation { call.cancel() }
                     try {
                         val text = call.execute().use { response ->
                             val text = response.body?.string().orEmpty()
                             if (!response.isSuccessful) {
-                                log.warn("Global config fetch failed: HTTP ${response.code} ${response.message} $text")
                                 throw IllegalStateException("Global config fetch failed: HTTP ${response.code} ${response.message}")
                             }
                             text
@@ -762,6 +829,7 @@ class KiloBackendAppService private constructor(
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
+            operations?.report(capture.input("backend.config", e, context))
             log.warn("Global config fetch failed: ${e.message}", e)
             FetchResult.fail("config", e)
         }
@@ -953,11 +1021,13 @@ class KiloBackendAppService private constructor(
     }
 
     private fun refreshWorkspaces(event: SseEvent) {
+        // M23（C5）：采集入口来源（StabilityService；采集不可用时null，业务照常）。
+        val operations = runCatching { service<StabilityService>().operations }.getOrNull()
         ProjectManager.getInstance().openProjects
             .filterNot { it.isDefault }
             .forEach { project ->
                 val root = project.basePath ?: return@forEach
-                KiloBackendWorkspaceRefresh(project, root, log).handle(event)
+                KiloBackendWorkspaceRefresh(project, root, log, operations).handle(event)
             }
     }
 
@@ -1231,3 +1301,240 @@ internal fun migrationGate(
 internal fun preservesMigration(appState: KiloAppState, next: ConnectionState): Boolean =
     appState is KiloAppState.MigrationRequired &&
         (next == ConnectionState.Discovering || next == ConnectionState.Connecting || next is ConnectionState.Connected || next is ConnectionState.Error) // kilocode_change
+
+/** M02 backend.load的end公共stage值（≤32字节；begin携带trigger，end的fields携带reason）。 */
+private const val LOAD_STAGE = "load"
+private const val LOAD_OPERATION_NAME = "backend.load"
+
+/** blocked reason安全常量token（G0登记闭集；绝不透传服务端message）。 */
+private const val LOAD_REASON_MIGRATION = "migration_required"
+private const val LOAD_REASON_TIMEOUT = "timeout"
+
+/** 失败reason安全闭集（brief Step 4）：按首个加载失败资源归因，其余归other。 */
+internal const val LOAD_REASON_PROFILE = "profile_error"
+internal const val LOAD_REASON_CONFIG = "config_error"
+internal const val LOAD_REASON_NOTIFICATIONS = "notifications_error"
+internal const val LOAD_REASON_OTHER = "other"
+
+/** M02 trigger闭集：initial=连接后首次加载，recovery=重连后的恢复加载。 */
+internal fun loadTrigger(recover: Boolean): String = if (recover) "recovery" else "initial"
+
+/** migration_kind受控值（R11，G0字典登记）：现有LegacyV5迁移路径，绝不按错误文本拼值。 */
+internal const val MIGRATION_KIND_LEGACY_V5 = "legacy_v5"
+
+/**
+ * M10（brief Step 5）：每次激活首次进入MigrationRequired记录一次transition；重复load
+ * 状态与提示渲染不增计（含用户强制重跑迁移检测的再次进入）。purposes请求metrics+logs，
+ * 由字典收窄为metrics-only出口；kind是G0字典/Spec同时登记的受控值。
+ *
+ * @param operations采集入口来源（生产为StabilityService，测试注入fixture）；null时本次
+ * 不记录也不消耗once标志，采集恢复后的首次进入仍会记录。
+ */
+internal class MigrationObservation(private val operations: () -> Operations?) {
+    private val recorded = AtomicBoolean(false)
+
+    /** 首次进入返回true并记录；已记录过（重复提示/再次进入）或采集不可用返回false。 */
+    @Synchronized
+    fun onMigrationRequired(): Boolean {
+        if (recorded.get()) return false
+        return operations()?.also { ops ->
+            ops.record(
+                Draft(
+                    "migration.required",
+                    "transition",
+                    "critical",
+                    buildJsonObject { put("migration_kind", MIGRATION_KIND_LEGACY_V5) },
+                    purposes = setOf("metrics", "logs"),
+                ),
+            )
+            recorded.set(true)
+        } != null
+    }
+}
+
+/**
+ * 失败reason映射（brief Step 4）：timeout单独结算（TimeoutCancellationException分支），
+ * 这里只映射业务加载失败。errors为空（如连接目标不可用等非fetch失败）归other。
+ */
+internal fun loadFailureReason(errors: List<LoadError>): String = when (errors.firstOrNull()?.resource) {
+    "profile" -> LOAD_REASON_PROFILE
+    "config" -> LOAD_REASON_CONFIG
+    "notifications" -> LOAD_REASON_NOTIFICATIONS
+    else -> LOAD_REASON_OTHER
+}
+
+/** Captures bounded wire evidence and the actual decoder input without pre-reading either body. */
+class HttpCapture(request: Request? = null, private val secrets: Set<String> = emptySet()) {
+    companion object {
+        const val LIMIT = 64 * 1024
+    }
+
+    private class Snapshot {
+        val bytes = okio.Buffer()
+        var count = 0L
+
+        fun append(source: okio.Buffer, offset: Long, size: Long) {
+            source.copyTo(bytes, offset, minOf(size, LIMIT - bytes.size))
+            count += size
+        }
+
+        fun clear() {
+            bytes.clear()
+            count = 0L
+        }
+
+        fun wrap(body: okhttp3.RequestBody) = object : okhttp3.RequestBody() {
+            override fun contentType() = body.contentType()
+            override fun contentLength() = body.contentLength()
+            override fun isDuplex() = body.isDuplex()
+            override fun isOneShot() = body.isOneShot()
+            override fun writeTo(sink: okio.BufferedSink) {
+                val tee = object : okio.ForwardingSink(sink) {
+                    override fun write(source: okio.Buffer, byteCount: Long) {
+                        append(source, 0, byteCount)
+                        super.write(source, byteCount)
+                    }
+                }.buffer()
+                body.writeTo(tee)
+                tee.emit()
+            }
+        }
+
+        fun wrap(body: okhttp3.ResponseBody): okhttp3.ResponseBody {
+            val source = object : okio.ForwardingSource(body.source()) {
+                override fun read(sink: okio.Buffer, byteCount: Long): Long {
+                    val offset = sink.size
+                    val size = super.read(sink, byteCount)
+                    if (size > 0) append(sink, offset, size)
+                    return size
+                }
+            }.buffer()
+            return object : okhttp3.ResponseBody() {
+                override fun contentType() = body.contentType()
+                override fun contentLength() = body.contentLength()
+                override fun source() = source
+            }
+        }
+    }
+
+    private var request: Request? = null
+    private val sent = Snapshot()
+    private val received = Snapshot()
+    private val decoded = Snapshot()
+    private var status: Int? = null
+    private var type: String? = null
+    private var encoding: String? = null
+    private var headers = ""
+
+    init { request?.let(::capture) }
+
+    fun client(http: okhttp3.OkHttpClient): okhttp3.OkHttpClient = http.newBuilder()
+        .apply {
+            // The outermost interceptor observes the body after existing response adapters.
+            interceptors().add(0, okhttp3.Interceptor { chain ->
+                capture(chain.request())
+                val response = chain.proceed(chain.request())
+                val body = response.body ?: return@Interceptor response
+                response.newBuilder().body(decoded.wrap(body)).build()
+            })
+        }
+        .addNetworkInterceptor { chain ->
+            capture(chain.request())
+            val original = chain.request()
+            val body = original.body
+            val outbound = body?.let {
+                original.newBuilder().method(original.method, sent.wrap(it)).build()
+            } ?: original
+            val response = chain.proceed(outbound)
+            status = response.code
+            type = response.body?.contentType()?.toString()
+            encoding = response.header("Content-Encoding")
+            headers += filtered(response.headers)
+            val incoming = response.body ?: return@addNetworkInterceptor response
+            response.newBuilder().body(received.wrap(incoming)).build()
+        }.build()
+
+    private fun capture(value: Request) {
+        request = value
+        sent.clear()
+        received.clear()
+        decoded.clear()
+        headers = filtered(value.headers)
+    }
+
+    private fun filtered(values: okhttp3.Headers): String = values.joinToString("\n", postfix = "\n") {
+        "${it.first}: ${DiagnosticRedactor.field(it.first, it.second).text}"
+    }
+
+    private fun text(snapshot: Snapshot): String = snapshot.bytes.clone().readUtf8()
+
+    private data class Body(val text: String, val bytes: Long, val state: String)
+
+    private fun inflate(bytes: okio.Buffer, decoded: okio.Buffer) {
+        okio.GzipSource(bytes).use { source ->
+            while (decoded.size < LIMIT) {
+                if (source.read(decoded, LIMIT - decoded.size) < 0) break
+            }
+        }
+    }
+
+    private fun response(): Body {
+        val bytes = received.bytes.clone()
+        val truncated = received.count > bytes.size
+        if (!encoding.equals("gzip", ignoreCase = true)) {
+            return Body(bytes.readUtf8(), received.bytes.size, if (truncated) "truncated" else "complete")
+        }
+        val decoded = okio.Buffer()
+        val state = try {
+            inflate(bytes, decoded)
+            if (truncated || decoded.size == LIMIT.toLong()) "truncated" else "complete"
+        } catch (_: java.io.EOFException) {
+            // A bounded compressed snapshot can end before the gzip stream or trailer does.
+            if (truncated) "truncated" else "invalid_gzip"
+        } catch (_: java.io.IOException) {
+            "invalid_gzip" // Keep any decoded prefix; damage must not discard the other incident evidence.
+        }
+        val size = decoded.size
+        val content = decoded.readUtf8().ifEmpty {
+            if (state == "complete") "" else "[gzip response unavailable]"
+        }
+        return Body(content, size, state)
+    }
+
+    fun input(
+        component: String,
+        error: Throwable,
+        context: Map<String, String> = emptyMap(),
+        descriptor: kotlinx.serialization.descriptors.SerialDescriptor? = null,
+    ): DiagnosticInput {
+        val response = response()
+        val info = status?.takeIf { it >= java.net.HttpURLConnection.HTTP_BAD_REQUEST }
+            ?.let { ErrorClassifier.observe(error, it) }
+            ?: descriptor?.takeIf { error is kotlinx.serialization.SerializationException }
+                ?.let { ErrorClassifier.decode(error, text(decoded), it) }
+            ?: ErrorClassifier.classify(error)
+        return DiagnosticInput.error(component, info.code, error, context = context, attributes = buildMap {
+            putAll(info.attributes())
+            request?.let {
+                put("method", it.method)
+                put("route", it.url.encodedPath)
+                it.body?.contentType()?.toString()?.let { value -> put("request_content_type", value) }
+            }
+            status?.let { put("http_status", it.toString()) }
+            (type ?: request?.body?.contentType()?.toString())?.let { put("content_type", it) }
+            encoding?.let { put("content_encoding", it) }
+            put("request_bytes", sent.count.toString())
+            put("response_bytes", received.count.toString())
+            put("capture_limit", LIMIT.toString())
+            put("request_captured_bytes", sent.bytes.size.toString())
+            put("response_captured_bytes", received.bytes.size.toString())
+            put("response_decoded_bytes", response.bytes.toString())
+            put("response_capture", response.state)
+            put("response_capture_truncated", (response.state != "complete").toString())
+        }, payloads = mapOf(
+            "request" to { text(sent) },
+            "response" to { response.text },
+            "headers" to { headers },
+        ), secrets = secrets)
+    }
+}

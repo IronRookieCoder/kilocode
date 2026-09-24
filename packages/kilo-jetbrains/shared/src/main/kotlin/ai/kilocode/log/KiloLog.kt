@@ -1,6 +1,10 @@
 package ai.kilocode.log
 
 import ai.kilocode.KiloPlugin
+import ai.kilocode.stability.DiagnosticBridge
+import ai.kilocode.stability.DiagnosticContextElement
+import ai.kilocode.stability.DiagnosticInput
+import ai.kilocode.stability.DiagnosticSeverity
 import com.intellij.openapi.application.ApplicationInfo
 import com.intellij.openapi.application.PathManager
 import com.intellij.openapi.diagnostic.Logger
@@ -56,10 +60,13 @@ interface KiloLog {
             return create(cls, sandbox())
         }
 
-        internal fun create(cls: Class<*>, sandbox: Boolean): KiloLog = logger(
-            sandbox = sandbox,
-            intellij = { IntellijLog(cls) },
-            file = { FileLog(cls) },
+        internal fun create(cls: Class<*>, sandbox: Boolean): KiloLog = MirroredLog(
+            logger(
+                sandbox = sandbox,
+                intellij = { IntellijLog(cls) },
+                file = { FileLog(cls) },
+            ),
+            cls.name,
         )
 
         internal fun logger(sandbox: Boolean, intellij: () -> KiloLog, file: () -> KiloLog): KiloLog {
@@ -89,6 +96,41 @@ interface KiloLog {
                 }
             }.onFailure { log?.info("Could not read plugin version for environment payload: ${it.message}") }
         }
+    }
+}
+
+/** [KiloLog.create] 的唯一镜像层；底层 raw logger 仍可独立用于 collector 内部日志。 */
+internal class MirroredLog(private val delegate: KiloLog, private val component: String) : KiloLog {
+    override val isDebugEnabled: Boolean
+        get() = delegate.isDebugEnabled
+
+    override fun debug(block: () -> String) = delegate.debug(block)
+
+    override fun info(msg: String) = delegate.info(msg)
+
+    override fun warn(msg: String, t: Throwable?) {
+        delegate.warn(msg, t)
+        publish(DiagnosticSeverity.WARN, msg, t)
+    }
+
+    override fun error(msg: String, t: Throwable?) {
+        delegate.error(msg, t)
+        publish(DiagnosticSeverity.ERROR, msg, t)
+    }
+
+    private fun publish(severity: DiagnosticSeverity, message: String, error: Throwable?) {
+        val context = DiagnosticContextElement.value()
+        DiagnosticBridge.publish(
+            DiagnosticInput(
+                severity = severity,
+                component = component,
+                message = message,
+                error = error,
+                context = context?.context ?: emptyMap(),
+                attributes = context?.attributes ?: emptyMap(),
+                payloads = context?.payloads ?: emptyMap(),
+            ),
+        )
     }
 }
 

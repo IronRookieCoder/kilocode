@@ -12,6 +12,9 @@ import ai.kilocode.client.vfs.KiloVirtualFile
 import ai.kilocode.log.KiloLog
 import ai.kilocode.rpc.dto.DiffFileDto
 import ai.kilocode.rpc.dto.KiloAppStatusDto
+import ai.kilocode.stability.Operation
+import ai.kilocode.stability.Operations
+import ai.kilocode.stability.StabilityService
 import com.intellij.openapi.Disposable
 import com.intellij.openapi.components.Service
 import com.intellij.openapi.components.service
@@ -30,15 +33,61 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 import java.awt.BorderLayout
 import java.util.concurrent.atomic.AtomicBoolean
 import javax.swing.JComponent
 import javax.swing.JPanel
 
+internal const val IDE_OPERATION_NAME = "ide.operation"
+internal const val IDE_OPERATION_DEADLINE_MS = 30_000L
+
+private const val OPERATION_OPEN_DIFF = "open_diff"
+private const val STAGE_DIFF = "diff"
+private const val RESULT_SUCCESS = "success"
+private const val RESULT_FAILURE = "failure"
+private const val RESULT_CANCELLED = "cancelled"
+private const val CAUSE_UNKNOWN = "unknown"
+private const val CAUSE_USER = "user"
+private const val CODE_OTHER = "other"
+
+/**
+ * M23 open_diff观测句柄（C5）：begin在diff编辑器内容真实创建处（唯一处理器）——前端打开入口
+ * （KiloVfsManager.open / SessionUi等）绝不记录，绝不与这里相加。数据落地结算一次：
+ * Connecting不结算；Empty/Files→success；Error→failure（只有真实失败才failure，绝无伪造分母）。
+ * 编辑器在数据到达前被dispose→cancelled（正常取消不进错误计数）。operations为null时全程no-op。
+ */
+internal class DiffOpenObservation(operations: Operations?) {
+    private val operation: Operation? = operations?.begin(
+        IDE_OPERATION_NAME,
+        IDE_OPERATION_DEADLINE_MS,
+        buildJsonObject { put("operation", OPERATION_OPEN_DIFF) },
+    )
+
+    /** 数据落地结算（唯一end由Operation的CAS保证，晚到数据/重复结算被丢弃）。 */
+    fun settle(data: DiffEditorData) {
+        when (data) {
+            DiffEditorData.Connecting -> Unit
+            DiffEditorData.Empty -> operation?.end(RESULT_SUCCESS, STAGE_DIFF)
+            is DiffEditorData.Error -> operation?.end(RESULT_FAILURE, STAGE_DIFF, CAUSE_UNKNOWN, CODE_OTHER)
+            is DiffEditorData.Files -> operation?.end(RESULT_SUCCESS, STAGE_DIFF)
+        }
+    }
+
+    /** 编辑器在diff数据到达前被关闭：cancelled结算，deadline不再误判timeout。 */
+    fun cancel() {
+        operation?.end(RESULT_CANCELLED, STAGE_DIFF, CAUSE_USER)
+    }
+}
+
 internal object KiloDiffEditorKind : KiloEditorKind {
     const val ID = "kilo-diff"
 
     override val id: String = ID
+
+    /** 采集入口（生产为StabilityService，测试注入）；不可用时返回null，业务照常。 */
+    private val operations: Operations? get() = runCatching { service<StabilityService>().operations }.getOrNull()
 
     override fun title(params: Map<String, String>): String {
         return params["title"].takeIfPresent()
@@ -58,11 +107,15 @@ internal object KiloDiffEditorKind : KiloEditorKind {
 
     @RequiresEdt
     override fun createContent(project: Project, file: KiloVirtualFile, parent: Disposable): JComponent {
+        // M23 open_diff（C5）：唯一处理器=diff编辑器内容真实创建；数据落地/提前关闭即结算。
+        val open = DiffOpenObservation(operations)
+        Disposer.register(parent) { open.cancel() }
         val panel = JPanel(BorderLayout())
         panel.add(connecting(), BorderLayout.CENTER)
         val service = project.service<KiloDiffEditorService>()
         var current: Disposable? = null
         fun render(data: DiffEditorData) {
+            open.settle(data)
             current?.let { Disposer.dispose(it) }
             val child = Disposer.newDisposable(parent, "Kilo diff editor content")
             current = child

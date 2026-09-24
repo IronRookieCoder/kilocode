@@ -7,6 +7,8 @@ import ai.kilocode.cscloud.mcp.IdeMcpSessionFactory
 import ai.kilocode.log.KiloLog
 import ai.kilocode.rpc.ConnectionErrorCode
 import ai.kilocode.rpc.dto.CsCloudStartDto
+import ai.kilocode.stability.Fact
+import ai.kilocode.stability.Fixture
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.extensions.ExtensionPoint
 import com.intellij.testFramework.junit5.TestApplication
@@ -19,10 +21,13 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
+import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import okhttp3.mockwebserver.SocketPolicy
 import java.nio.file.Files
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
 import kotlin.test.Test
@@ -302,11 +307,13 @@ class CsCloudConnectionServiceTest {
     @Test
     fun `startCsCloud returns starter outcome and reconnects on success`() = runBlocking {
         val root = Files.createTempDirectory("cs-cloud-start")
+        val fixture = Fixture()
         val service = CsCloudConnectionService(
             scope,
             CsCloudEndpointResolver(root, emptyMap()),
             TestLog,
             starter = { CsCloudStartDto(true, "started") },
+            operations = fixture.operations,
         )
         try {
             val result = service.startCsCloud()
@@ -317,19 +324,68 @@ class CsCloudConnectionServiceTest {
             assertTrue(result.ok)
             assertEquals("started", result.message)
             assertEquals(CsCloudStartDto.STAGE_START, result.stage)
+            // M07（brief Step 3）：exit 0但daemon不可发现——健康确认失败不得记success。
+            fixture.flush()
+            val start = fixture.facts().filter { it.name == "csc.start" }
+            assertTrue(start.any { it.data["phase"]?.jsonPrimitive?.content == "start" }, "missing start fact: ${start.map { it.data }}")
+            val end = ends(start, "csc.start").single()
+            assertEquals("failure", end.data["result"]?.jsonPrimitive?.content)
+            assertEquals("health", end.data["stage"]?.jsonPrimitive?.content)
+            assertEquals("health_failed", end.data["error_code"]?.jsonPrimitive?.content)
         } finally {
             service.dispose()
+            fixture.close()
+        }
+    }
+
+    @Test
+    fun `start operation ends success only after daemon health confirmation`() = runBlocking {
+        val server = MockWebServer()
+        server.enqueue(MockResponse().setBody("""{"ok":true,"data":{"status":"ok","version":"1.0.0"}}"""))
+        server.enqueue(MockResponse().setBody("""{"ok":true,"data":{"status":"ok","version":"1.0.0"}}"""))
+        server.enqueue(sse(SocketPolicy.KEEP_OPEN))
+        server.start()
+        val root = Files.createTempDirectory("cs-cloud-start-healthy")
+        writeDaemonFiles(server, root)
+        val fixture = Fixture()
+        val service = CsCloudConnectionService(
+            scope,
+            CsCloudEndpointResolver(root, emptyMap()),
+            TestLog,
+            timeout = 5_000,
+            workspace = root,
+            starter = { CsCloudStartDto(true, "started") },
+            operations = fixture.operations,
+        )
+        try {
+            val result = service.startCsCloud()
+            assertTrue(result.ok, "result=$result")
+            assertIs<ConnectionState.Connected>(service.state.value, service.state.value.toString())
+            // daemon可发现且健康：唯一success在health阶段结算；完整连接归M04另一operation。
+            factsUntil(fixture) { facts -> ends(facts, "csc.start").size == 1 }
+            fixture.flush()
+            val start = fixture.facts().filter { it.name == "csc.start" }
+            val end = ends(start, "csc.start").single()
+            assertEquals("success", end.data["result"]?.jsonPrimitive?.content)
+            assertEquals("health", end.data["stage"]?.jsonPrimitive?.content)
+            assertEquals(1, ends(fixture.facts(), "connection").size)
+        } finally {
+            service.dispose()
+            fixture.close()
+            server.shutdown()
         }
     }
 
     @Test
     fun `startCsCloud failure does not reconnect`() = runBlocking {
         val root = Files.createTempDirectory("cs-cloud-start-fail")
+        val fixture = Fixture()
         val service = CsCloudConnectionService(
             scope,
             CsCloudEndpointResolver(root, emptyMap()),
             TestLog,
-            starter = { CsCloudStartDto(false, "csc not installed") },
+            starter = { CsCloudStartDto(false, "csc not installed", ConnectionErrorCode.CSC_NOT_INSTALLED) },
+            operations = fixture.operations,
         )
         try {
             val result = service.startCsCloud()
@@ -337,8 +393,15 @@ class CsCloudConnectionServiceTest {
             assertEquals("csc not installed", result.message)
             assertEquals(CsCloudStartDto.STAGE_START, result.stage)
             assertEquals(ConnectionState.Disconnected, service.state.value)
+            fixture.flush()
+            val start = fixture.facts().filter { it.name == "csc.start" }
+            assertTrue(start.any { it.data["phase"]?.jsonPrimitive?.content == "start" }, "missing start fact: ${start.map { it.data }}")
+            val end = ends(start, "csc.start").single()
+            assertEquals("blocked", end.data["result"]?.jsonPrimitive?.content)
+            assertEquals("csc_not_installed", end.data["error_code"]?.jsonPrimitive?.content)
         } finally {
             service.dispose()
+            fixture.close()
         }
     }
 
@@ -532,6 +595,245 @@ class CsCloudConnectionServiceTest {
             assertEquals("UNAVAILABLE", listed.errorCode)
         } finally {
             service.dispose()
+        }
+    }
+
+    // ------ B2：M04/M05 真实HTTP/SSE回归（fixture观测注入） ------
+
+    private fun ends(facts: List<Fact>, name: String) =
+        facts.filter { it.name == name && it.data["phase"]?.jsonPrimitive?.content == "end" }
+
+    private fun starts(facts: List<Fact>, name: String) =
+        facts.filter { it.name == name && it.data["phase"]?.jsonPrimitive?.content == "start" }
+
+    /** 观测任务与服务协程异步推进：轮询flush直到谓词满足（真实落盘后断言）。 */
+    private fun factsUntil(fixture: Fixture, timeoutMs: Long = 10_000, predicate: (List<Fact>) -> Boolean): List<Fact> {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        var facts = emptyList<Fact>()
+        while (System.currentTimeMillis() < deadline) {
+            fixture.flush()
+            facts = fixture.facts()
+            if (predicate(facts)) return facts
+            Thread.sleep(50)
+        }
+        error("observation condition not met within ${timeoutMs}ms; facts=${facts.map { it.name to it.data.toString() }}")
+    }
+
+    private fun writeDaemonFiles(server: MockWebServer, root: java.nio.file.Path) {
+        Files.createDirectories(root.resolve(".costrict/cs-cloud"))
+        Files.writeString(
+            root.resolve(".costrict/cs-cloud/server_url"),
+            server.url("/").newBuilder().host("127.0.0.1").build().toString(),
+        )
+        Files.writeString(root.resolve(".costrict/cs-cloud/config.json"), "{\"api_key\":\"secret\"}")
+    }
+
+    private fun sse(policy: SocketPolicy, bodyDelayMs: Long = 0): MockResponse =
+        MockResponse()
+            .setHeader("Content-Type", "text/event-stream")
+            .setBody(": keepalive\n\n")
+            .setSocketPolicy(policy)
+            .apply { if (bodyDelayMs > 0) setBodyDelay(bodyDelayMs, TimeUnit.MILLISECONDS) }
+
+    @Test
+    fun `two of three streams disconnecting open a single recovery`() = runBlocking {
+        val server = MockWebServer()
+        server.enqueue(MockResponse().setBody("""{"ok":true,"data":{"status":"ok","version":"1.0.0"}}"""))
+        // 两条流连接建立后迟些断开（bodyDelay保证三流先全部open），第三条保持。
+        server.enqueue(sse(SocketPolicy.DISCONNECT_AT_END, bodyDelayMs = 500))
+        server.enqueue(sse(SocketPolicy.DISCONNECT_AT_END, bodyDelayMs = 500))
+        server.enqueue(sse(SocketPolicy.KEEP_OPEN))
+        server.enqueue(MockResponse().setBody("""{"ok":true,"data":{"status":"ok","version":"1.0.0"}}"""))
+        repeat(3) { server.enqueue(sse(SocketPolicy.KEEP_OPEN)) }
+        server.start()
+        val root = Files.createTempDirectory("cs-cloud-three-roots")
+        writeDaemonFiles(server, root)
+        val dirs = (1..3).map { Files.createDirectories(root.resolve("root$it")) }
+        val fixture = Fixture()
+        val service = CsCloudConnectionService(
+            scope,
+            CsCloudEndpointResolver(root, emptyMap()),
+            TestLog,
+            timeout = 5_000,
+            roots = { dirs },
+            operations = fixture.operations,
+        )
+        try {
+            service.connect()
+            assertIs<ConnectionState.Connected>(service.state.value, service.state.value.toString())
+            // 两流断开：恰好一次退化transition与一个恢复区间（brief：多流同败只lost一次）。
+            factsUntil(fixture) { facts -> facts.count { it.name == "connection.state_changed" } == 1 }
+            factsUntil(fixture) { facts -> ends(facts, "connection.recovery").size == 1 }
+            fixture.flush()
+            val facts = fixture.facts()
+            assertEquals(1, facts.count { it.name == "connection.recovery" && it.data["phase"]?.jsonPrimitive?.content == "start" })
+            assertEquals(1, ends(facts, "connection.recovery").size)
+            assertEquals("success", ends(facts, "connection.recovery").single().data["result"]?.jsonPrimitive?.content)
+            assertEquals("partial_sse_failed", facts.first { it.name == "connection.state_changed" }.data["reason"]?.jsonPrimitive?.content)
+            service.dispose()
+        } finally {
+            service.dispose()
+            fixture.close()
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun `health 200 with a missing stream does not succeed`() = runBlocking {
+        val server = MockWebServer()
+        server.enqueue(MockResponse().setBody("""{"ok":true,"data":{"status":"ok","version":"1.0.0"}}"""))
+        server.enqueue(sse(SocketPolicy.KEEP_OPEN)) // 第二条流永不响应：健康200但缺流
+        server.start()
+        val root = Files.createTempDirectory("cs-cloud-missing-stream")
+        writeDaemonFiles(server, root)
+        val dirs = (1..2).map { Files.createDirectories(root.resolve("root$it")) }
+        val fixture = Fixture()
+        val service = CsCloudConnectionService(
+            scope,
+            CsCloudEndpointResolver(root, emptyMap()),
+            TestLog,
+            timeout = 1_000,
+            roots = { dirs },
+            operations = fixture.operations,
+        )
+        try {
+            service.connect()
+            assertIs<ConnectionState.Error>(service.state.value)
+            service.dispose()
+            fixture.flush()
+            val facts = fixture.facts()
+            assertTrue(
+                ends(facts, "connection").none { it.data["result"]?.jsonPrimitive?.content == "success" },
+                "missing stream must not end the connection success",
+            )
+            assertTrue(
+                facts.none { it.name == "connection.recovery" || it.name == "connection.state_changed" },
+                "pre-ready failure is not recovery",
+            )
+            assertTrue(
+                ends(facts, "connection.attempt").any {
+                    it.data["stage"]?.jsonPrimitive?.content == "streams" &&
+                        it.data["result"]?.jsonPrimitive?.content == "failure"
+                },
+                "the streams attempt must end failure",
+            )
+        } finally {
+            service.dispose()
+            fixture.close()
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun `restart opens a manual trigger journey`() = runBlocking {
+        val server = MockWebServer()
+        repeat(2) {
+            server.enqueue(MockResponse().setBody("""{"ok":true,"data":{"status":"ok","version":"1.0.0"}}"""))
+            server.enqueue(sse(SocketPolicy.KEEP_OPEN))
+        }
+        server.start()
+        val root = Files.createTempDirectory("cs-cloud-manual")
+        writeDaemonFiles(server, root)
+        val fixture = Fixture()
+        val service = CsCloudConnectionService(
+            scope,
+            CsCloudEndpointResolver(root, emptyMap()),
+            TestLog,
+            timeout = 5_000,
+            workspace = root,
+            operations = fixture.operations,
+        )
+        try {
+            service.connect()
+            assertIs<ConnectionState.Connected>(service.state.value)
+            factsUntil(fixture) { facts -> starts(facts, "connection").size == 1 }
+            // 用户显式restart：trigger=manual的新旅程（恢复中手动介入只改intervention的
+            // 语义由ConnectionObservationTest确定性地覆盖，此处验证服务接线）。
+            service.restart()
+            factsUntil(fixture) { facts -> starts(facts, "connection").size == 2 }
+            factsUntil(fixture) { facts -> ends(facts, "connection").size == 2 }
+            fixture.flush()
+            val facts = fixture.facts()
+            assertEquals("manual", starts(facts, "connection")[1].data["trigger"]?.jsonPrimitive?.content)
+            assertEquals("success", ends(facts, "connection")[1].data["result"]?.jsonPrimitive?.content)
+            // 正常dispose无断连事实由专测覆盖；真实HTTP下重建传输与关闭回调存在固有的
+            // 毫秒级竞态窗口，此处不断言恢复区间计数（该语义由单元测试确定性覆盖）。
+        } finally {
+            service.dispose()
+            fixture.close()
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun `normal dispose records no disconnect`() = runBlocking {
+        val server = MockWebServer()
+        server.enqueue(MockResponse().setBody("""{"ok":true,"data":{"status":"ok","version":"1.0.0"}}"""))
+        server.enqueue(sse(SocketPolicy.KEEP_OPEN))
+        server.start()
+        val root = Files.createTempDirectory("cs-cloud-dispose")
+        writeDaemonFiles(server, root)
+        val fixture = Fixture()
+        val service = CsCloudConnectionService(
+            scope,
+            CsCloudEndpointResolver(root, emptyMap()),
+            TestLog,
+            timeout = 5_000,
+            workspace = root,
+            operations = fixture.operations,
+        )
+        try {
+            service.connect()
+            assertIs<ConnectionState.Connected>(service.state.value)
+            factsUntil(fixture) { facts -> ends(facts, "connection").size == 1 }
+            service.dispose()
+            fixture.flush()
+            val facts = fixture.facts()
+            assertEquals(0, facts.count { it.name == "connection.state_changed" })
+            assertEquals(0, facts.count { it.name == "connection.recovery" })
+            assertEquals("success", ends(facts, "connection").single().data["result"]?.jsonPrimitive?.content)
+        } finally {
+            service.dispose()
+            fixture.close()
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun `empty roots at stream open end the connection as failure`() = runBlocking {
+        val server = MockWebServer()
+        server.enqueue(MockResponse().setBody("""{"ok":true,"data":{"status":"ok","version":"1.0.0"}}"""))
+        server.start()
+        val root = Files.createTempDirectory("cs-cloud-empty-roots")
+        writeDaemonFiles(server, root)
+        val dir = Files.createDirectories(root.resolve("rootA"))
+        // 首次roots()（connect的空检查）给出根目录，openSse再取时为空：命中终局失败路径。
+        val calls = AtomicInteger()
+        val fixture = Fixture()
+        val service = CsCloudConnectionService(
+            scope,
+            CsCloudEndpointResolver(root, emptyMap()),
+            TestLog,
+            timeout = 5_000,
+            roots = { if (calls.incrementAndGet() == 1) listOf(dir) else emptyList() },
+            operations = fixture.operations,
+        )
+        try {
+            service.connect()
+            assertIs<ConnectionState.Error>(service.state.value)
+            service.dispose()
+            fixture.flush()
+            val facts = fixture.facts()
+            val journeyEnd = ends(facts, "connection").single()
+            assertEquals("failure", journeyEnd.data["result"]?.jsonPrimitive?.content)
+            assertEquals("streams", journeyEnd.data["stage"]?.jsonPrimitive?.content)
+            assertEquals("environment", journeyEnd.data["cause"]?.jsonPrimitive?.content)
+            assertEquals("other", journeyEnd.data["error_code"]?.jsonPrimitive?.content)
+            assertEquals(0, facts.count { it.name == "connection.recovery" || it.name == "connection.state_changed" })
+        } finally {
+            service.dispose()
+            fixture.close()
+            server.shutdown()
         }
     }
 

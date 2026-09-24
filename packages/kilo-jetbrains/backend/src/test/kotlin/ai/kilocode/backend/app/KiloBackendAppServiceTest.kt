@@ -42,12 +42,40 @@ import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import kotlin.test.assertContains
+import ai.kilocode.stability.Fixture
+import kotlinx.serialization.json.jsonPrimitive
 
 /** Mirrors the backend's auth-required diagnostic (private in main sources). */
 private const val AUTH_REQUIRED =
     "CoStrict sign-in is missing or has expired - click Sign in to finish the csc auth login browser sign-in; cs-cloud re-reads auth.json on every request, so no restart is needed"
 
 class KiloBackendAppServiceTest {
+
+    @Test
+    fun `failed config HTTP exchange keeps backend load operation and raw body`() = runBlocking {
+        mock.configStatus = 404
+        mock.config = """{"message":"config endpoint missing","password":"config-secret"}"""
+        Fixture().use { fixture ->
+            fixture.enableDiagnostics()
+            val svc = KiloBackendAppService.create(scope, FakeCliServer(mock), log, operations = fixture.operations)
+            try {
+                svc.connect()
+                withTimeout(10_000) { svc.appState.first { it is KiloAppState.Error } }
+                fixture.flush()
+                val facts = fixture.facts()
+                val end = facts.single { it.name == "backend.load" && it.data["phase"]?.jsonPrimitive?.content == "end" }
+                val incidents = facts.filter { it.name == "diagnostic.reported" }
+                assertEquals(3, incidents.size)
+                assertTrue(incidents.all { it.context["operation_id"] == end.context["operation_id"] })
+                assertTrue(incidents.all { it.data["route"]?.jsonPrimitive?.content == "/global/config" })
+                assertTrue(fixture.payload("response").contains("config endpoint missing"))
+                assertTrue(fixture.payload("stack").contains("KiloBackendAppService"))
+                assertTrue(!facts.joinToString().contains("config-secret"))
+            } finally {
+                svc.dispose()
+            }
+        }
+    }
 
     private val mock = MockCliServer()
     private val log = TestLog()

@@ -221,6 +221,7 @@ dependencies {
     testImplementation(libs.okhttp.mockwebserver)
     testImplementation(libs.kotlinx.coroutines.test)
     testImplementation(kotlin("test"))
+    testImplementation(testFixtures(project(":shared")))
 }
 
 tasks.test {

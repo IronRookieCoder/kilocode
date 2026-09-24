@@ -15,6 +15,10 @@ import com.intellij.ide.ActivityTracker
 import com.intellij.openapi.components.Service
 import ai.kilocode.log.KiloLog
 import com.intellij.platform.project.ProjectId
+import ai.kilocode.stability.Operations
+import ai.kilocode.stability.StabilityService
+import ai.kilocode.stability.rpc
+import com.intellij.openapi.components.service
 import fleet.rpc.client.durable
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CancellationException
@@ -39,13 +43,19 @@ import java.util.concurrent.atomic.AtomicBoolean
 class KiloWorkspaceService internal constructor(
     private val cs: CoroutineScope,
     private val rpc: KiloWorkspaceRpcApi?,
+    // 稳定性采集入口（C2/M19）：生产经平台构造器注入；null=采集不可用，业务照常（B2注入模式）。
+    private val operations: Operations? = null,
 ) {
     /** Platform constructor — resolves RPC from the service container. */
-    constructor(cs: CoroutineScope) : this(cs, null)
+    constructor(cs: CoroutineScope) : this(cs, null, service<StabilityService>().operations)
 
     companion object {
         private val LOG = KiloLog.create(KiloWorkspaceService::class.java)
         private val INIT = KiloWorkspaceStateDto(KiloWorkspaceStatusDto.PENDING)
+
+        /** M19方法组受控词表（metrics"前后端通信"维度）：工作区数据与配置读写两组。 */
+        private const val GROUP_WORKSPACE = "workspace"
+        private const val GROUP_CONFIG = "config"
     }
 
     private val workspaces = ConcurrentHashMap<String, Workspace>()
@@ -59,9 +69,24 @@ class KiloWorkspaceService internal constructor(
 
     // ------ RPC helpers ------
 
-    private suspend fun <T> call(block: suspend KiloWorkspaceRpcApi.() -> T): T {
+    /**
+     * M19（C2）：wrapper置于durable{}内每次实际调用处——durable重连重试重新执行lambda时
+     * 各自形成独立attempt；直连RPC（split模式注入api）同样按次观测。长寿命Flow订阅
+     * （[stream]/[workspace]的stateIn收集）不观测，绝不把整个订阅时长当RPC。
+     */
+    private suspend fun <T> call(group: String, block: suspend KiloWorkspaceRpcApi.() -> T): T {
         val api = rpc
-        return if (api != null) block(api) else durable { block(KiloWorkspaceRpcApi.getInstance()) }
+        return if (api != null) {
+            observed(group) { block(api) }
+        } else {
+            durable { observed(group) { block(KiloWorkspaceRpcApi.getInstance()) } }
+        }
+    }
+
+    /** operations未注入时零开销直连；注入后每次实际调用一个rpc操作（成功仅metrics出口）。 */
+    private suspend fun <T> observed(group: String, block: suspend () -> T): T {
+        val observer = operations ?: return block()
+        return observer.rpc(group) { block() }
     }
 
     private fun <T> stream(block: suspend KiloWorkspaceRpcApi.() -> Flow<T>): Flow<T> = flow {
@@ -101,7 +126,7 @@ class KiloWorkspaceService internal constructor(
      */
     suspend fun resolveProjectDirectory(projectId: ProjectId?, hint: String): String {
         return try {
-            val resolved = call { resolveProjectDirectory(projectId, hint) }
+            val resolved = call(GROUP_WORKSPACE) { resolveProjectDirectory(projectId, hint) }
             LOG.info("Resolved project directory: projectId=$projectId hint=$hint -> $resolved")
             resolved
         } catch (e: Exception) {
@@ -114,7 +139,7 @@ class KiloWorkspaceService internal constructor(
     fun reload(directory: String) {
         cs.launch {
             try {
-                call { reload(directory) }
+                call(GROUP_WORKSPACE) { reload(directory) }
             } catch (e: Exception) {
                 LOG.warn("workspace reload failed for $directory", e)
             }
@@ -123,7 +148,7 @@ class KiloWorkspaceService internal constructor(
 
     suspend fun models(directory: String): ModelsWorkspaceDto {
         return try {
-            call { this.models(directory) }
+            call(GROUP_WORKSPACE) { this.models(directory) }
         } catch (e: Exception) {
             LOG.warn("models settings lookup failed for directory=$directory", e)
             ModelsWorkspaceDto(errors = listOf(LoadErrorDto(resource = "models", detail = e.message)))
@@ -132,7 +157,7 @@ class KiloWorkspaceService internal constructor(
 
     suspend fun files(directory: String, path: String): List<WorkspaceFileDto> {
         return try {
-            call { files(directory, path) }
+            call(GROUP_WORKSPACE) { files(directory, path) }
         } catch (e: Exception) {
             LOG.warn("workspace file lookup failed for directory=$directory path=$path", e)
             emptyList()
@@ -142,7 +167,7 @@ class KiloWorkspaceService internal constructor(
     suspend fun searchFiles(directory: String, query: String, limit: Int = 50): FileSearchResultDto {
         LOG.debug { "workspace file search directory=$directory query=$query limit=$limit" }
         return try {
-            call { searchFiles(directory, query, limit) }
+            call(GROUP_WORKSPACE) { searchFiles(directory, query, limit) }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -153,7 +178,7 @@ class KiloWorkspaceService internal constructor(
 
     suspend fun gitChanges(directory: String): String? {
         return try {
-            call { gitChanges(directory) }
+            call(GROUP_WORKSPACE) { gitChanges(directory) }
         } catch (e: Exception) {
             LOG.warn("git changes lookup failed for directory=$directory", e)
             null
@@ -166,11 +191,11 @@ class KiloWorkspaceService internal constructor(
      * [patches] = false on the badge path to fetch stats only and skip materializing patch text.
      */
     suspend fun branchDiff(directory: String, patches: Boolean = true): List<DiffFileDto> =
-        call { branchDiff(directory, patches) }
+        call(GROUP_WORKSPACE) { branchDiff(directory, patches) }
 
     suspend fun branchName(directory: String): String? {
         return try {
-            call { branchName(directory) }
+            call(GROUP_WORKSPACE) { branchName(directory) }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -182,7 +207,7 @@ class KiloWorkspaceService internal constructor(
     suspend fun openPath(directory: String, path: String, line: Int? = null, column: Int? = null, endLine: Int? = null): Boolean {
         val match = files(directory, path).firstOrNull() ?: return false
         return try {
-            call { openFile(match.path, line, column, endLine) }
+            call(GROUP_WORKSPACE) { openFile(match.path, line, column, endLine) }
         } catch (e: Exception) {
             LOG.warn("workspace file open failed for path=${match.path}", e)
             false
@@ -191,7 +216,7 @@ class KiloWorkspaceService internal constructor(
 
     suspend fun openFile(path: String, line: Int? = null, column: Int? = null, endLine: Int? = null): Boolean {
         return try {
-            call { openFile(path, line, column, endLine) }
+            call(GROUP_WORKSPACE) { openFile(path, line, column, endLine) }
         } catch (e: Exception) {
             LOG.warn("workspace file open failed for path=$path", e)
             false
@@ -200,7 +225,7 @@ class KiloWorkspaceService internal constructor(
 
     suspend fun localConfigTarget(directory: String): ConfigTargetDto? {
         return try {
-            val target = call { this.localConfigTarget(directory) }
+            val target = call(GROUP_CONFIG) { this.localConfigTarget(directory) }
             localConfig[directory] = target
             target
         } catch (e: Exception) {
@@ -211,7 +236,7 @@ class KiloWorkspaceService internal constructor(
 
     suspend fun globalConfigTarget(): ConfigTargetDto? {
         return try {
-            val target = call { this.globalConfigTarget() }
+            val target = call(GROUP_CONFIG) { this.globalConfigTarget() }
             globalConfig = target
             target
         } catch (e: Exception) {
@@ -249,7 +274,7 @@ class KiloWorkspaceService internal constructor(
     fun refreshConfigFiles(directory: String): Job {
         return cs.launch {
             try {
-                call { refreshConfigFiles(directory) }
+                call(GROUP_CONFIG) { refreshConfigFiles(directory) }
                 localConfigTarget(directory)
                 globalConfigTarget()
             } catch (e: Exception) {
@@ -263,7 +288,7 @@ class KiloWorkspaceService internal constructor(
     fun openLocalConfig(directory: String, done: (Boolean) -> Unit) {
         cs.launch {
             val ok = try {
-                call { this.openLocalConfig(directory) }
+                call(GROUP_CONFIG) { this.openLocalConfig(directory) }
             } catch (e: Exception) {
                 LOG.warn("local config open failed for directory=$directory", e)
                 false
@@ -275,7 +300,7 @@ class KiloWorkspaceService internal constructor(
     fun openGlobalConfig(done: (Boolean) -> Unit) {
         cs.launch {
             val ok = try {
-                call { this.openGlobalConfig() }
+                call(GROUP_CONFIG) { this.openGlobalConfig() }
             } catch (e: Exception) {
                 LOG.warn("global config open failed", e)
                 false

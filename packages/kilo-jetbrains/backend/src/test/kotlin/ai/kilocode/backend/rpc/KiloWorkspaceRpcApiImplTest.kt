@@ -7,6 +7,8 @@ import ai.kilocode.backend.testing.MockCliServer
 import ai.kilocode.backend.testing.TestLog
 import ai.kilocode.rpc.dto.WorkspaceFileDto
 import ai.kilocode.rpc.dto.KiloWorkspaceStatusDto
+import ai.kilocode.stability.Fixture
+import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -18,6 +20,7 @@ import java.nio.file.Files
 import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertIs
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
@@ -27,6 +30,7 @@ class KiloWorkspaceRpcApiImplTest {
     private val log = TestLog()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val apps = mutableListOf<KiloBackendAppService>()
+    private val fixture = Fixture()
 
     @AfterTest
     fun tearDown() = runBlocking {
@@ -34,6 +38,7 @@ class KiloWorkspaceRpcApiImplTest {
         apps.clear()
         scope.cancel()
         mock.close()
+        fixture.close()
     }
 
     @Test
@@ -57,6 +62,46 @@ class KiloWorkspaceRpcApiImplTest {
             assertEquals(2, mock.requestCount("/find/file"))
             assertTrue(mock.findFilePaths.any { it.contains("type=file") && it.contains("query=src") })
             assertTrue(mock.findFilePaths.any { it.contains("type=directory") && it.contains("query=src") })
+        } finally {
+            delete(dir)
+        }
+    }
+
+    @Test
+    fun `search accepts wrapped responses without protocol errors`() = runBlocking {
+        mock.findFiles = """{"ok":true,"data":["src/Main.kt"]}"""
+        mock.findDirectories = """{"ok":true,"data":[]}"""
+        val dir = Files.createTempDirectory("kilo-search-wrapped")
+        try {
+            val result = KiloWorkspaceRpcApiImpl(app(), fixture.operations).searchFiles(dir.toString(), "secret-query", 3)
+
+            assertEquals(listOf(WorkspaceFileDto("src/Main.kt", "Main.kt")), result.files)
+            fixture.flush()
+            assertTrue(fixture.facts().none { it.name == "protocol.error" })
+        } finally {
+            delete(dir)
+        }
+    }
+
+    @Test
+    fun `search records one decode protocol error for invalid response without leaking inputs`() = runBlocking {
+        mock.findFiles = """{"ok":false,"data":"secret-response-body"}"""
+        mock.findDirectories = "[]"
+        val dir = Files.createTempDirectory("kilo-search-private")
+        try {
+            val result = KiloWorkspaceRpcApiImpl(app(), fixture.operations).searchFiles(dir.toString(), "secret-query", 3)
+
+            assertTrue(result.files.isEmpty())
+            fixture.flush()
+            val facts = fixture.facts().filter { it.name == "protocol.error" }
+            assertEquals(1, facts.size)
+            val fact = facts.single()
+            assertEquals("http", fact.data.getValue("transport").jsonPrimitive.content)
+            assertEquals("decode", fact.data.getValue("stage").jsonPrimitive.content)
+            assertEquals("decode_failed", fact.data.getValue("error_code").jsonPrimitive.content)
+            assertFalse(fact.data.toString().contains("secret-response-body"))
+            assertFalse(fact.data.toString().contains("secret-query"))
+            assertFalse(fact.data.toString().contains(dir.toString()))
         } finally {
             delete(dir)
         }

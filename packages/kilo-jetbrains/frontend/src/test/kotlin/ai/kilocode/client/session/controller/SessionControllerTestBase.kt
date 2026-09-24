@@ -3,6 +3,7 @@ package ai.kilocode.client.session.controller
 import ai.kilocode.client.util.edtWait
 import ai.kilocode.client.app.KiloAppService
 import ai.kilocode.client.app.KiloSessionService
+import ai.kilocode.client.stability.Render
 import ai.kilocode.client.session.model.SessionModel
 import ai.kilocode.client.session.model.SessionModelEvent
 import ai.kilocode.client.session.model.SessionState
@@ -37,7 +38,11 @@ import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.util.Disposer
 import com.intellij.testFramework.fixtures.BasePlatformTestCase
 import ai.kilocode.client.testing.pumpEdt
+import ai.kilocode.rpc.KiloSessionRpcApi
+import ai.kilocode.stability.Fixture
 import java.awt.event.HierarchyEvent
+import java.util.concurrent.atomic.AtomicInteger
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
@@ -99,6 +104,9 @@ abstract class SessionControllerTestBase : BasePlatformTestCase() {
     protected lateinit var workspace: Workspace
     protected lateinit var timers: TestUiTimers
 
+    /** 共享稳定性夹具：controller的operations注入其同一recorder（P0结构约定）；子类经它读取实际Fact。 */
+    protected lateinit var fixture: Fixture
+
     private lateinit var coroutines: TestCoroutines
     protected lateinit var scope: CoroutineScope
     protected lateinit var parent: Disposable
@@ -109,6 +117,7 @@ abstract class SessionControllerTestBase : BasePlatformTestCase() {
         appRpc = FakeAppRpcApi()
         projectRpc = FakeWorkspaceRpcApi()
         timers = TestUiTimers()
+        fixture = Fixture()
 
         coroutines = TestCoroutines()
         scope = coroutines.scope
@@ -124,6 +133,8 @@ abstract class SessionControllerTestBase : BasePlatformTestCase() {
         try {
             Disposer.dispose(parent)
             coroutines.close()
+            // 先dispose controller再关闭fixture，保证controller对同一recorder的访问先于close。
+            if (this::fixture.isInitialized) fixture.close()
         } finally {
             super.tearDown()
         }
@@ -186,6 +197,9 @@ abstract class SessionControllerTestBase : BasePlatformTestCase() {
             timers = timers,
             log = log ?: KiloLog.create(SessionController::class.java),
             echo = echo,
+            operations = fixture.operations,
+            render = Render(fixture.clock, fixture.recorder),
+            resources = fixture.resources,
         )
         controllers.add(m)
         roots[m] = root
@@ -394,4 +408,26 @@ abstract class SessionControllerTestBase : BasePlatformTestCase() {
         agents = AgentsDto(agents = agents, all = agents, default = default),
         providers = ProvidersDto(providers = providers, connected = connected, defaults = defaults),
     )
+}
+
+/**
+ * pendingPermissions可控替身（B3恢复分母测试）：仅延迟/注入故障这一个方法，其余全部委托
+ * [FakeSessionRpcApi]——history先回、pending后回的真实恢复场景与pending失败场景都由它驱动。
+ * 经 `sessions = KiloSessionService(project, scope, GatedPendingApi(rpc, gate))` 注入，
+ * `rpc`字段仍指向原fake供测试读取状态。
+ */
+internal class GatedPendingApi(
+    private val delegate: KiloSessionRpcApi,
+    private val gate: CompletableDeferred<Unit>? = null,
+    private val pendingThrows: Exception? = null,
+) : KiloSessionRpcApi by delegate {
+
+    val pendingCalls = AtomicInteger()
+
+    override suspend fun pendingPermissions(directory: String): List<ai.kilocode.rpc.dto.PermissionRequestDto> {
+        pendingCalls.incrementAndGet()
+        gate?.await()
+        pendingThrows?.let { throw it }
+        return delegate.pendingPermissions(directory)
+    }
 }

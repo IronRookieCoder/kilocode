@@ -55,6 +55,16 @@ class KiloLogSettingsServiceTest : BasePlatformTestCase() {
         assertEquals(25, dto.previewMax)
     }
 
+    fun `test persisted reads back saved local state`() {
+        // B4/M12：本地保存以持久状态可重读为终点。
+        settings.update(LogConfig.LogLevel.WARN, LogConfig.ContentMode.FULL, 33)
+        settings.applyLocal()
+        assertTrue(settings.persisted())
+
+        LogConfig.apply(null, null, null)
+        assertFalse(settings.persisted())
+    }
+
     fun `test backendLog returns the file from rpc`() = runBlocking(Dispatchers.Default) {
         rpc.backendLog = LogFileDto("kilo.log", "line one\nline two\n")
 

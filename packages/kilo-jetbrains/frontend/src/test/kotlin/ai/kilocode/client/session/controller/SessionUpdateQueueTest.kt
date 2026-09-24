@@ -13,6 +13,9 @@ import ai.kilocode.rpc.dto.SessionStatusDto
 import ai.kilocode.rpc.dto.TodoDto
 import ai.kilocode.rpc.dto.ToolRefDto
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.serialization.json.double
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.long
 
 class SessionUpdateQueueTest : SessionControllerTestBase() {
 
@@ -604,6 +607,56 @@ class SessionUpdateQueueTest : SessionControllerTestBase() {
         assertTrue(order.contains("after:true:3"))
         assertNotNull(m.model.message("msg1"))
         assertTrue(m.model.state is SessionState.Busy)
+    }
+
+    fun `test one merged fire records one render sample`() {
+        appRpc.state.value = ai.kilocode.rpc.dto.KiloAppStateDto(ai.kilocode.rpc.dto.KiloAppStatusDto.READY)
+        projectRpc.state.value = workspaceReady()
+        controller("ses_test", flushMs = Long.MAX_VALUE)
+        flush()
+        val before = fixture.facts().count { it.name == "render.apply" }
+
+        emit(ChatEventDto.MessageUpdated("ses_test", msg("msg1", "ses_test", "assistant")), flush = false)
+        emit(ChatEventDto.PartUpdated("ses_test", part("prt1", "ses_test", "msg1", "text", text = "hello")), flush = false)
+        emit(ChatEventDto.PartUpdated("ses_test", part("prt2", "ses_test", "msg1", "text", text = "world")), flush = false)
+        settle()
+        flush()
+        fixture.flush()
+
+        val samples = fixture.facts().filter { it.name == "render.apply" }
+        // 一次合并fire恰一条render样本：计时在queue层包住真实fire（150ms批等待不在计时内）。
+        assertEquals(before + 1, samples.size)
+        val sample = samples.last()
+        assertEquals("success", sample.data.getValue("result").jsonPrimitive.content)
+        assertEquals("frontend", sample.data.getValue("component").jsonPrimitive.content)
+        // 合并后批次[MU, prt1, prt2]共3条 → 桶"2-5"。
+        assertEquals("2-5", sample.data.getValue("batch_size_bucket").jsonPrimitive.content)
+        assertEquals(1.0, sample.data.getValue("sample_rate").jsonPrimitive.double)
+        assertTrue(sample.data.getValue("duration_ms").jsonPrimitive.long >= 0L)
+    }
+
+    fun `test per token stream persists one render sample per fire`() {
+        appRpc.state.value = ai.kilocode.rpc.dto.KiloAppStateDto(ai.kilocode.rpc.dto.KiloAppStatusDto.READY)
+        projectRpc.state.value = workspaceReady()
+        controller("ses_test", flushMs = Long.MAX_VALUE)
+        flush()
+        val before = fixture.facts().count { it.name == "render.apply" }
+
+        emit(ChatEventDto.MessageUpdated("ses_test", msg("msg1", "ses_test", "assistant")), flush = false)
+        repeat(40) { i ->
+            emit(ChatEventDto.PartDelta("ses_test", "msg1", "prt1", "text", " t$i"), flush = false)
+        }
+        settle()
+        flush()
+        fixture.flush()
+
+        val samples = fixture.facts().filter { it.name == "render.apply" }
+        // 41个per-token事件只经历一次合并fire、只产出一条render样本——绝不逐Token落盘。
+        assertEquals(before + 1, samples.size)
+        val sample = samples.last()
+        assertEquals("success", sample.data.getValue("result").jsonPrimitive.content)
+        // 合并后批次[MU, 合并delta]共2条 → 桶"2-5"。
+        assertEquals("2-5", sample.data.getValue("batch_size_bucket").jsonPrimitive.content)
     }
 
     private fun question(id: String) = QuestionRequestDto(

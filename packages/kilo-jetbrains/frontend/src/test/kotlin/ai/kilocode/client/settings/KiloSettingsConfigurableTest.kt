@@ -14,6 +14,7 @@ import com.intellij.openapi.options.SearchableConfigurable
 import com.intellij.testFramework.fixtures.BasePlatformTestCase
 import com.intellij.ui.components.ActionLink
 import ai.kilocode.rpc.dto.KiloAppStatusDto
+import ai.kilocode.stability.Coverage
 import java.awt.Container
 import javax.swing.AbstractButton
 
@@ -151,6 +152,42 @@ class KiloSettingsConfigurableTest : BasePlatformTestCase() {
         assertEquals("Connection: ready", KiloSettingsConfigurable.statusText(KiloAppStatusDto.READY))
         assertEquals("Connection: error", KiloSettingsConfigurable.statusText(KiloAppStatusDto.ERROR))
         assertEquals("Connection: disconnected", KiloSettingsConfigurable.statusText(KiloAppStatusDto.DISCONNECTED))
+    }
+
+    fun `test stability coverage text maps reason to safe closed labels`() {
+        val enrolled = Coverage("monolith", "frontend", "default", metrics = true, logs = true, reason = "ok")
+        assertEquals("Stability collection: enrolled", KiloSettingsConfigurable.stabilityCoverageText(enrolled))
+        // unbound＝无有效策略（设计§8 fail-open采集中，metrics/logs双开）；本页复用既有
+        // "未授权"标签（R16：零bundle新增；策略过期与自定义配置未支持同样收敛为unbound）。
+        val unauthorized = Coverage("monolith", "frontend", "default", metrics = true, logs = true, reason = "unbound")
+        assertEquals(
+            "Stability collection: not authorized",
+            KiloSettingsConfigurable.stabilityCoverageText(unauthorized),
+        )
+        // 前端未接入桶：starting、writer_disabled、stopped_*等其余reason统一收敛，绝不透传内部token。
+        listOf("starting", "writer_disabled", "init_failed", "outbox_full", "stopped_app_close", "stopped_unload").forEach {
+            reason ->
+            val coverage = Coverage("unknown", "unknown", "default", metrics = false, logs = false, reason = reason)
+            assertEquals(
+                "Stability collection: frontend not connected",
+                KiloSettingsConfigurable.stabilityCoverageText(coverage),
+            )
+            assertFalse(
+                "internal reason must not leak into the label: $reason",
+                KiloSettingsConfigurable.stabilityCoverageText(coverage).contains(reason),
+            )
+        }
+    }
+
+    fun `test createComponent shows stability coverage row`() {
+        val cfg = KiloSettingsConfigurable()
+        edt {
+            val panel = cfg.createComponent()
+            assertTrue(
+                "root panel should contain the stability coverage row",
+                text(panel as Container).contains("Stability collection"),
+            )
+        }
     }
 
     // -- helpers --

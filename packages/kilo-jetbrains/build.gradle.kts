@@ -225,6 +225,10 @@ dependencies {
     integrationTestImplementation(libs.junit.jupiter)
     integrationTestImplementation(libs.kodein.di.jvm)
     integrationTestImplementation(libs.kotlinx.coroutines.core.jvm)
+    // Stability E2E parses the plugin's NDJSON wire format; a deliberate independent copy of
+    // the contract must not import the implementation under test (test classpath only — the
+    // sandbox exclusion above is unaffected).
+    integrationTestImplementation(libs.kotlinx.serialization.json)
     // The Starter framework pulls kotlin-reflect built with the platform's Kotlin (2.3.x), but its
     // metadata does not raise kotlin-stdlib accordingly; without this, the test process initializes
     // kodein against an older stdlib and dies on missing kotlin.jvm.internal.* classes.

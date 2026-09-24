@@ -79,6 +79,8 @@ class ViewSwitchingTest : SessionControllerTestBase() {
     }
 
     fun `test recent load failure shows empty view`() {
+        fixture.enableDiagnostics()
+        sessions = ai.kilocode.client.app.KiloSessionService(project, scope, rpc, operations = fixture.operations)
         projectRpc.state.value = workspaceReady()
         rpc.recentFailures = 1
         val m = controller()
@@ -95,6 +97,14 @@ class ViewSwitchingTest : SessionControllerTestBase() {
             ViewChanged empty
         """, events)
         assertTrue(m.recents().isEmpty())
+        fixture.flush()
+        assertEquals(1, fixture.facts().count { it.name == "diagnostic.reported" })
+        assertTrue(fixture.payload("stack").contains("recent unavailable"))
+        assertTrue(fixture.payload("request").contains("/test"))
+        val incident = fixture.facts().single { it.name == "diagnostic.reported" }
+        val end = fixture.facts().single { it.name == "rpc" && it.data["phase"].toString() == "\"end\"" }
+        assertEquals(end.context["operation_id"], incident.context["operation_id"])
+        assertEquals(end.context["operation_id"], rpc.correlations.single())
     }
 
     fun `test empty explicit session history shows empty view`() {

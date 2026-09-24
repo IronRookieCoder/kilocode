@@ -1,0 +1,262 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:costrict:jetbrains-stability:fact-schema-v2",
+  "title": "JetBrains 插件稳定性事实记录 v2（wire schema）",
+  "description": "本地事实格式v1/v2公共字段。传输形态：UTF-8无BOM，NDJSON，每行一个JSON对象，以LF结束，内嵌换行JSON转义；单条记录最大32KiB。schema_version major不兼容，consumer必须逐行按major解码。长度上限按UTF-8字节数执行。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "event_id",
+    "timestamp",
+    "producer_id",
+    "run_id",
+    "channel",
+    "seq",
+    "account_epoch",
+    "policy_revision",
+    "purposes",
+    "source",
+    "device_id",
+    "plugin_version",
+    "ide_product",
+    "ide_build",
+    "ide_build_major",
+    "os_family",
+    "arch",
+    "env",
+    "mode",
+    "side",
+    "connection_provider",
+    "kind",
+    "name",
+    "data"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+$",
+      "maxLength": 16,
+      "description": "1.0；major不兼容，minor只能增加可选字段"
+    },
+    "event_id": {
+      "type": "string",
+      "format": "uuid",
+      "minLength": 36,
+      "maxLength": 36,
+      "description": "采集时生成的UUID，重放不变"
+    },
+    "timestamp": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "发生时UTC Unix毫秒，不改成上传时间"
+    },
+    "producer_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "description": "采集进程标识，每次采集生命周期随机"
+    },
+    "run_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "description": "每次采集生命周期的运行周期标识"
+    },
+    "channel": {
+      "enum": ["critical", "diagnostic"]
+    },
+    "seq": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "每producer+run+channel从1递增，入队前分配，可用缺口辅助发现丢失"
+    },
+    "account_epoch": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "description": "采集时绑定的随机账户代号，不是用户ID或Token"
+    },
+    "policy_revision": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "采集时策略版本；发送时还要核对当前许可"
+    },
+    "purposes": {
+      "type": "array",
+      "items": {
+        "enum": ["metrics", "logs"]
+      },
+      "minItems": 1,
+      "maxItems": 2,
+      "uniqueItems": true,
+      "description": "采集时允许用途"
+    },
+    "source": {
+      "const": "jetbrains-plugin"
+    },
+    "device_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "description": "随机安装标识，非硬件标识"
+    },
+    "plugin_version": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64
+    },
+    "ide_product": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64
+    },
+    "ide_build": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64
+    },
+    "ide_build_major": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64
+    },
+    "os_family": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64
+    },
+    "arch": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "description": "版本和环境字段未知时使用unknown"
+    },
+    "env": {
+      "enum": ["prod", "dev", "test"]
+    },
+    "mode": {
+      "enum": ["monolith", "split"]
+    },
+    "side": {
+      "enum": ["monolith", "frontend", "backend"]
+    },
+    "connection_provider": {
+      "enum": ["cs-cloud", "kilo-cli", "unknown"]
+    },
+    "kind": {
+      "enum": ["operation", "transition", "lifecycle", "interval", "diagnostic", "health", "sample"]
+    },
+    "name": {
+      "enum": [
+        "plugin.started",
+        "plugin.shutdown",
+        "plugin.unclean",
+        "toolwindow.setup",
+        "backend.load",
+        "plugin.readiness",
+        "connection",
+        "connection.attempt",
+        "connection.state_changed",
+        "connection.recovery",
+        "csc.install",
+        "csc.start",
+        "credentials.ready",
+        "cli.download",
+        "migration.required",
+        "session.open",
+        "session.restore",
+        "action",
+        "availability",
+        "error.uncaught",
+        "error.reported",
+        "diagnostic.reported",
+        "diagnostic.payload",
+        "diagnostic.redaction_failed",
+        "protocol.error",
+        "telemetry.health",
+        "session.dispose_risk",
+        "rpc",
+        "edt.delay",
+        "edt.violation",
+        "edt.stall",
+        "render.apply",
+        "ide.operation",
+        "resource.snapshot"
+      ],
+      "description": "事件字典（设计第9章）登记的事实name；新增name需契约修订"
+    },
+    "context": {
+      "type": "object",
+      "description": "可选；仅允许六个闭集键，不存在上下文时整个字段省略，不能编造用户、设备或项目身份",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "maxProperties": 6,
+      "properties": {
+        "operation_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "attempt_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "fault_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "trace_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "workspace_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "description": "项目级随机映射或带本机秘密的HMAC，不用可被字典猜测的普通路径hash"
+        },
+        "incident_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "description": "同一高保真诊断主记录和分片组的关联标识"
+        }
+      }
+    },
+    "data": {
+      "type": "object",
+      "properties": {
+        "payload_refs": {
+          "type": "array",
+          "items": { "type": "string" },
+          "maxItems": 16
+        }
+      },
+      "description": "事件专属白名单，禁止任意业务payload；各name的data字段按事件字典（设计第9章）逐项冻结。值允许标量或字符串数组——如diagnostic详情的frames（脱敏插件栈帧摘要，最多5帧，不含原始异常message，设计6.2）。diagnostic的message安全摘要最大512字节。允许空对象：专属字段由公共字段承载的事件（如plugin.started）合法。",
+      "maxProperties": 32,
+      "propertyNames": {
+        "type": "string",
+        "pattern": "^[a-z][a-z0-9_]{0,63}$"
+      },
+      "additionalProperties": {
+        "anyOf": [
+          {
+            "type": ["string", "integer", "number", "boolean"]
+          },
+          {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 5,
+            "description": "如diagnostic详情的frames：脱敏插件栈帧摘要，最多5帧（设计6.2）"
+          }
+        ]
+      }
+    }
+  }
+}

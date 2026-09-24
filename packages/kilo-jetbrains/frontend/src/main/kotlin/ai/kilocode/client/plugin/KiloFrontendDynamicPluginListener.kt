@@ -6,9 +6,11 @@ import ai.kilocode.client.session.ui.attachment.unregisterAttachmentEditorKind
 import ai.kilocode.client.vfs.KiloEditorKindRegistry
 import ai.kilocode.client.vfs.KiloVirtualFileSystem
 import ai.kilocode.log.KiloLog
+import ai.kilocode.stability.StabilityService
 import com.intellij.ide.plugins.DynamicPluginListener
 import com.intellij.ide.plugins.IdeaPluginDescriptor
 import com.intellij.openapi.components.service
+import com.intellij.openapi.components.serviceIfCreated
 import com.intellij.openapi.fileEditor.FileEditorManager
 import com.intellij.openapi.project.ProjectManager
 import com.intellij.openapi.wm.ToolWindowManager
@@ -17,6 +19,8 @@ import javax.swing.SwingUtilities
 class KiloFrontendDynamicPluginListener : DynamicPluginListener {
     override fun beforePluginUnload(pluginDescriptor: IdeaPluginDescriptor, isUpdate: Boolean) {
         if (pluginDescriptor.pluginId != KiloPlugin.id) return
+        // Never create the stability collector at shutdown: only stop it if it exists.
+        serviceIfCreated<StabilityService>()?.stop("unload")
         KiloFrontendUnloadCleanup.cleanup(isUpdate)
     }
 }

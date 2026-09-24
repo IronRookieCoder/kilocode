@@ -3,22 +3,27 @@ package ai.kilocode.cscloud.mcp
 import ai.kilocode.backend.app.CapabilityResult
 import ai.kilocode.cscloud.CsCloudEndpoint
 import ai.kilocode.cscloud.CsCloudRequestException
+import ai.kilocode.cscloud.CsCloudRoute
 import ai.kilocode.log.KiloLog
+import ai.kilocode.stability.Fixture
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.async
+import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.OkHttpClient
 import okhttp3.mockwebserver.Dispatcher
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import okhttp3.mockwebserver.RecordedRequest
+import okhttp3.mockwebserver.SocketPolicy
 import java.nio.file.Files
 import java.util.concurrent.TimeUnit
-import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -29,6 +34,63 @@ import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
 class CsCloudMcpBridgeTest {
+    @Test
+    fun `cancellation during bind closes listener clears generation and records cancelled`() = runBlocking {
+        val entered = CompletableDeferred<Unit>()
+        val release = java.util.concurrent.CountDownLatch(1)
+        val closed = CompletableDeferred<Unit>()
+        val server = MockWebServer()
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse {
+                if (request.method == "PUT") {
+                    entered.complete(Unit)
+                    check(release.await(10, TimeUnit.SECONDS))
+                    return MockResponse().setBody("{}")
+                }
+                if (request.method == "DELETE") return MockResponse().setResponseCode(200)
+                return MockResponse().setBody("""{"capabilities":["conversation_ide_capability_v1"]}""")
+            }
+        }
+        server.start()
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        Fixture().use { fixture ->
+            val source = object : IdeMcpSessionFactory {
+                override fun enabled(allow: Set<String>) = setOf("read_file")
+                override suspend fun open(tools: Set<String>, ready: suspend (IdeMcpTransport) -> Nothing): Nothing {
+                    try {
+                        ready(IdeMcpTransport(49152, "X-Test-Auth", "test-token"))
+                    } finally {
+                        closed.complete(Unit)
+                    }
+                }
+            }
+            val bridge = CsCloudMcpBridge(
+                scope, { CsCloudEndpoint(server.url("/").toString().trimEnd('/'), null) },
+                { OkHttpClient() }, { 1 }, source, TestLog(), { it }, fixture.operations,
+            )
+            try {
+                val pending = async { bridge.ensure("conv-cancel", fixture.base.toString()) }
+                withTimeout(10_000) { entered.await() }
+                pending.cancel()
+                release.countDown()
+                withTimeout(10_000) { pending.join() }
+                assertTrue(closed.isCompleted, "listener must be closed before cancellation completes")
+                val requests = server.drain()
+                val bind = requests.single { it.method == "PUT" }
+                val generation = GENERATION.find(bind.body.readUtf8())?.groupValues?.get(1)
+                assertEquals(generation, requests.single { it.method == "DELETE" }.requestUrl?.queryParameter("generation"))
+                fixture.flush()
+                val facts = fixture.facts().filter { it.name == "ide.operation" }
+                assertEquals(setOf("start", "end"), facts.map { it.data.getValue("phase").jsonPrimitive.content }.toSet())
+                assertEquals("cancelled", facts.single { it.data["phase"]?.jsonPrimitive?.content == "end" }.data.getValue("result").jsonPrimitive.content)
+                assertEquals(facts.first().context["operation_id"], facts.last().context["operation_id"])
+            } finally {
+                release.countDown()
+                scope.cancel()
+                server.shutdown()
+            }
+        }
+    }
     @Test
     fun `lease cancellation is not logged as a failure`() = runBlocking {
         val ready = CompletableDeferred<IdeMcpTransport>()
@@ -138,6 +200,161 @@ class CsCloudMcpBridgeTest {
         }
     }
 
+    // ------ M23（C5）mcp_register：仅新绑定成功计一次注册；缓存lease复用不新增分母 ------
+
+    @Test
+    fun `new binding registers once and lease reuse adds no denominator`() {
+        val server = MockWebServer()
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse = when {
+                request.path == "/global/health" -> MockResponse().setBody("""{"capabilities":["conversation_ide_capability_v1"]}""")
+                request.method == "PUT" -> MockResponse().setResponseCode(200).setBody("{}")
+                request.method == "DELETE" -> MockResponse().setResponseCode(200)
+                else -> MockResponse().setResponseCode(404)
+            }
+        }
+        server.start()
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val workspace = Files.createTempDirectory("cs-cloud-register").toString()
+        var epoch: Long? = 1
+        Fixture().use { fixture ->
+            val bridge = CsCloudMcpBridge(
+                scope,
+                endpoint = { CsCloudEndpoint(server.url("/").toString().trimEnd('/'), null) },
+                client = { OkHttpClient() },
+                epoch = { epoch },
+                factory = FakeIdeMcpSessionFactory(),
+                log = TestLog(),
+                project = { directory -> directory },
+                operations = fixture.operations,
+            )
+            try {
+                // 新绑定成功：恰一次注册（start+end配对，Ready返回之前结算）。
+                val ready = runBlocking { bridge.ensure("conv-1", workspace) }
+                assertIs<CapabilityResult.Ready>(ready)
+                // 同epoch缓存lease复用：绝不是注册，分母不增。
+                runBlocking { bridge.ensure("conv-1", workspace) }
+                fixture.flush()
+
+                val ide = fixture.facts().filter { it.name == "ide.operation" }
+                val starts = ide.filter { it.data["phase"]?.jsonPrimitive?.content == "start" }
+                val ends = ide.filter { it.data["phase"]?.jsonPrimitive?.content == "end" }
+                assertEquals(1, starts.size)
+                assertEquals(1, ends.size)
+                assertEquals("mcp_register", starts.single().data.getValue("operation").jsonPrimitive.content)
+                assertEquals("success", ends.single().data.getValue("result").jsonPrimitive.content)
+                assertEquals("bind", ends.single().data.getValue("stage").jsonPrimitive.content)
+                assertEquals(starts.single().context["operation_id"], ends.single().context["operation_id"])
+
+                // epoch切换（daemon重启）：lease失效 → 重新绑定是新一次注册（+1）。
+                epoch = 2
+                runBlocking { bridge.ensure("conv-1", workspace) }
+                fixture.flush()
+                assertEquals(2, fixture.facts().count {
+                    it.name == "ide.operation" && it.data["phase"]?.jsonPrimitive?.content == "end"
+                })
+            } finally {
+                scope.cancel()
+                server.shutdown()
+            }
+        }
+    }
+
+    @Test
+    fun `unresponsive bind records a failed registration`() {
+        failedBind(
+            MockResponse().setSocketPolicy(SocketPolicy.NO_RESPONSE),
+            OkHttpClient.Builder()
+                .callTimeout(0, TimeUnit.MILLISECONDS)
+                .readTimeout(0, TimeUnit.MILLISECONDS)
+                .build(),
+            "failure",
+            "cs_cloud",
+            "ide_capability_bind_failed",
+        )
+    }
+
+    @Test
+    fun `502 bind records a failed registration`() {
+        failedBind(
+            MockResponse().setResponseCode(502).setHeader("X-Debug", "test-token")
+                .setBody("""{"error":{"code":"capability_bind_failed","message":"csc IDE capability request failed: HTTP 502, echoed test-token"}}"""),
+            OkHttpClient.Builder().addInterceptor(CsCloudRoute.responseInterceptor()).build(),
+            "failure",
+            "cs_cloud",
+            "ide_capability_bind_failed",
+        )
+    }
+
+    @Test
+    fun `unsupported bind records a blocked registration`() {
+        failedBind(
+            MockResponse().setResponseCode(404).setBody("""{"error":{"code":"capability_bind_failed","message":"csc IDE capability request failed: HTTP 404"}}"""),
+            OkHttpClient.Builder().addInterceptor(CsCloudRoute.responseInterceptor()).build(),
+            "blocked",
+            "environment",
+            "ide_capability_unsupported",
+        )
+    }
+
+    private fun failedBind(response: MockResponse, http: OkHttpClient, result: String, cause: String, code: String) {
+        val server = MockWebServer()
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse = when {
+                request.method == "PUT" -> response
+                request.path == "/global/health" -> MockResponse().setBody("""{"capabilities":["conversation_ide_capability_v1"]}""")
+                else -> MockResponse().setResponseCode(404)
+            }
+        }
+        server.start()
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val workspace = Files.createTempDirectory("cs-cloud-register-fail").toString()
+        Fixture().use { fixture ->
+            fixture.enableDiagnostics()
+            val bridge = CsCloudMcpBridge(
+                scope,
+                endpoint = { CsCloudEndpoint(server.url("/").toString().trimEnd('/'), null) },
+                client = { http },
+                epoch = { 1 },
+                factory = FakeIdeMcpSessionFactory(),
+                log = TestLog(),
+                project = { directory -> directory },
+                operations = fixture.operations,
+                timeout = TEST_BIND_TIMEOUT_MS,
+            )
+            try {
+                val down = runBlocking { bridge.ensure("conv-1", workspace) }
+                assertEquals(code, assertIs<CapabilityResult.Unavailable>(down).reason)
+                assertEquals(1, server.drain().count { it.method == "PUT" })
+                fixture.flush()
+                val ide = fixture.facts().filter { it.name == "ide.operation" }
+                val starts = ide.filter { it.data["phase"]?.jsonPrimitive?.content == "start" }
+                val ends = ide.filter { it.data["phase"]?.jsonPrimitive?.content == "end" }
+                assertEquals(1, starts.size)
+                assertEquals(1, ends.size)
+                assertEquals("mcp_register", starts.single().data.getValue("operation").jsonPrimitive.content)
+                assertEquals(result, ends.single().data.getValue("result").jsonPrimitive.content)
+                assertEquals("bind", ends.single().data.getValue("stage").jsonPrimitive.content)
+                assertEquals(cause, ends.single().data.getValue("cause").jsonPrimitive.content)
+                assertEquals(code, ends.single().data.getValue("error_code").jsonPrimitive.content)
+                assertEquals(starts.single().context["operation_id"], ends.single().context["operation_id"])
+                val incident = fixture.facts().single { it.name == "diagnostic.reported" }
+                assertEquals(ends.single().context["operation_id"], incident.context["operation_id"])
+                assertEquals("PUT", incident.data.getValue("method").jsonPrimitive.content)
+                assertTrue(incident.data.getValue("route").jsonPrimitive.content.endsWith("/capabilities/ide"))
+                assertTrue(fixture.payload("request").contains("read_file"))
+                assertTrue(fixture.payload("stack").contains("CsCloudMcpBridge"))
+                assertTrue(!fixture.facts().joinToString().contains("test-token"))
+                if (response.socketPolicy == SocketPolicy.NO_RESPONSE) {
+                    assertEquals("timeout", incident.data.getValue("code").jsonPrimitive.content)
+                }
+            } finally {
+                scope.cancel()
+                server.shutdown()
+            }
+        }
+    }
+
     // ------ release：撤销必须可审计 —— DELETE 携带 generation，日志记录 daemon 清理结果 ------
 
     @Test
@@ -214,6 +431,7 @@ class CsCloudMcpBridgeTest {
         generateSequence { takeRequest(500, TimeUnit.MILLISECONDS) }.toList()
 
     private companion object {
+        const val TEST_BIND_TIMEOUT_MS = 200L
         val GENERATION = Regex("\"generation\":\"([^\"]+)\"")
     }
 }

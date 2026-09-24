@@ -3,14 +3,25 @@ package ai.kilocode.cscloud.mcp
 import ai.kilocode.backend.app.CapabilityReleaseReason
 import ai.kilocode.backend.app.CapabilityResult
 import ai.kilocode.backend.app.KiloSessionCapabilities
+import ai.kilocode.backend.app.HttpCapture
+import ai.kilocode.stability.DiagnosticContextElement
 import ai.kilocode.cscloud.CsCloudEndpoint
 import ai.kilocode.cscloud.CsCloudRequestException
 import ai.kilocode.log.KiloLog
+import ai.kilocode.stability.Operations
+import ai.kilocode.stability.Operation
 import com.intellij.openapi.project.ProjectManager
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -20,10 +31,12 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.put
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -33,6 +46,10 @@ import java.nio.file.Path
 import java.security.MessageDigest
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.TimeUnit
+
+internal const val MCP_REGISTER_DEADLINE_MS = 30_000L
+private const val MCP_BIND_TIMEOUT_MS = MCP_REGISTER_DEADLINE_MS - 5_000L
 
 internal suspend fun runLease(
     ready: CompletableDeferred<IdeMcpTransport>,
@@ -59,6 +76,10 @@ class CsCloudMcpBridge(
     private val factory: IdeMcpSessionFactory?,
     private val log: KiloLog,
     private val project: (String) -> String? = ::platformProject,
+    // M23（C5）：采集入口来源（生产由CsCloudConnectionService传入，测试注入fixture）；
+    // null=采集不可用，业务照常。
+    private val operations: Operations? = null,
+    private val timeout: Long = MCP_BIND_TIMEOUT_MS,
 ) : KiloSessionCapabilities {
     private data class Lease(val workspace: String, val generation: String, val tools: Set<String>, val job: Job, val epoch: Long)
     private val leases = ConcurrentHashMap<String, Lease>()
@@ -91,19 +112,56 @@ class CsCloudMcpBridge(
                 }
             }
         }
-        val transport = runCatching { withTimeout(30_000) { ready.await() } }.getOrElse {
-            job.cancel()
-            return@withLock CapabilityResult.Unavailable(code(it))
+        var committed = false
+        var attempted = false
+        var operation: Operation? = null
+        try {
+            val transport = try {
+                withTimeout(30_000) { ready.await() }
+            } catch (error: TimeoutCancellationException) {
+                return@withLock CapabilityResult.Unavailable(code(error))
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                return@withLock CapabilityResult.Unavailable(code(error))
+            }
+            operation = operations?.begin(
+                "ide.operation",
+                MCP_REGISTER_DEADLINE_MS,
+                buildJsonObject { put("operation", "mcp_register") },
+            )
+            attempted = true
+            val fields = operation?.let { mapOf("operation_id" to it.id) }.orEmpty()
+            val context = DiagnosticContextElement(context = fields)
+            val failure = withContext(context) {
+                bind(id, workspace, generation, transport, tools)
+            }
+            if (failure != null) {
+                val blocked = failure == "ide_capability_unsupported"
+                operation?.end(
+                    if (blocked) "blocked" else "failure", "bind",
+                    if (blocked) "environment" else "cs_cloud", failure,
+                )
+                return@withLock CapabilityResult.Unavailable(failure)
+            }
+            currentCoroutineContext().ensureActive()
+            val old = leases.put(id, Lease(workspace, generation, tools, job, currentEpoch))
+            committed = true
+            operation?.end("success", "bind")
+            old?.job?.cancel()
+            old?.let { clear(id, it.generation, it.workspace) }
+            CapabilityResult.Ready(generation, tools)
+        } catch (error: CancellationException) {
+            operation?.end("cancelled", "bind")
+            throw error
+        } finally {
+            if (!committed) withContext(NonCancellable) {
+                job.cancelAndJoin()
+                // The daemon may have accepted PUT before cancellation/transport failure.
+                // Generation-scoped DELETE is valid only for the original connection epoch.
+                if (attempted && epoch() == currentEpoch) clear(id, generation, workspace)
+            }
         }
-        val failure = bind(id, workspace, generation, transport, tools)
-        if (failure != null) {
-            job.cancel()
-            return@withLock CapabilityResult.Unavailable(failure)
-        }
-        val old = leases.put(id, Lease(workspace, generation, tools, job, currentEpoch))
-        old?.job?.cancel()
-        old?.let { clear(id, it.generation, it.workspace) }
-        CapabilityResult.Ready(generation, tools)
     }
 
     override suspend fun release(id: String, reason: CapabilityReleaseReason) =
@@ -134,13 +192,32 @@ class CsCloudMcpBridge(
         val url = base.toHttpUrl().newBuilder().addPathSegments("api/v1/conversations").addPathSegment(id).addPathSegments("capabilities/ide").build()
         val request = Request.Builder().url(url).header("X-Workspace-Directory", workspace)
             .put(json.encodeToString(spec).toRequestBody("application/json".toMediaType())).build()
-        runCatching { http.newCall(request).execute().close() }.fold(
-            onSuccess = { null },
-            onFailure = {
-                log.warn("IDE MCP bind failed conversation=${hash(id)} generation=${hash(generation)}", it)
-                capabilityBindReason(it)
-            },
-        )
+        val bounded = http.newBuilder().callTimeout(timeout, TimeUnit.MILLISECONDS).build()
+        val capture = HttpCapture(request, setOf(transport.token))
+        coroutineScope {
+            val call = capture.client(bounded).newCall(request)
+            val cancellation = launch(start = CoroutineStart.UNDISPATCHED) {
+                try {
+                    awaitCancellation()
+                } finally {
+                    call.cancel()
+                }
+            }
+            try {
+                runCatching { call.execute().close() }.fold(
+                    onSuccess = { null },
+                    onFailure = {
+                        currentCoroutineContext().ensureActive()
+                        if (it is CancellationException) throw it
+                        operations?.report(capture.input("mcp.bind", it))
+                        log.warn("IDE MCP bind failed conversation=${hash(id)} generation=${hash(generation)}", it)
+                        capabilityBindReason(it)
+                    },
+                )
+            } finally {
+                cancellation.cancel()
+            }
+        }
     }
 
     private suspend fun supported(): Boolean = withContext(Dispatchers.IO) {
@@ -162,8 +239,9 @@ class CsCloudMcpBridge(
         val http = client() ?: return@withContext false
         val url = base.toHttpUrl().newBuilder().addPathSegments("api/v1/conversations").addPathSegment(id)
             .addPathSegments("capabilities/ide").addQueryParameter("generation", generation).build()
+        val bounded = http.newBuilder().callTimeout(timeout, TimeUnit.MILLISECONDS).build()
         runCatching {
-            http.newCall(Request.Builder().url(url).header("X-Workspace-Directory", workspace).delete().build()).execute().use { response ->
+            bounded.newCall(Request.Builder().url(url).header("X-Workspace-Directory", workspace).delete().build()).execute().use { response ->
                 val body = response.body?.string().orEmpty()
                 response.isSuccessful && Json.parseToJsonElement(body).jsonObject["cleared"]?.jsonPrimitive?.contentOrNull == "true"
             }

@@ -29,6 +29,9 @@ import com.intellij.ide.BrowserUtil
 import com.intellij.openapi.components.Service
 import com.intellij.openapi.components.service
 import com.intellij.openapi.project.ProjectManager
+import ai.kilocode.stability.Operations
+import ai.kilocode.stability.StabilityService
+import ai.kilocode.stability.rpc
 import fleet.rpc.client.durable
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CancellationException
@@ -49,10 +52,13 @@ import kotlinx.coroutines.launch
 class KiloAppService internal constructor(
     private val cs: CoroutineScope,
     private val rpc: KiloAppRpcApi?,
+    // 稳定性采集入口（C2/M19）：生产经平台构造器注入；null=采集不可用，业务照常（B2注入模式）。
+    // 刻意置于csCloudTasks之前：保持末位函数参数可由调用方以trailing lambda传入（SAM）。
+    private val operations: Operations? = null,
     private val csCloudTasks: CsCloudTaskRunner = BackgroundableCsCloudTask(),
 ) {
     /** Platform constructor — resolves RPC from the service container. */
-    constructor(cs: CoroutineScope) : this(cs, null)
+    constructor(cs: CoroutineScope) : this(cs, null, service<StabilityService>().operations)
 
     companion object {
         private val LOG = KiloLog.create(KiloAppService::class.java)
@@ -60,6 +66,17 @@ class KiloAppService internal constructor(
 
         /** Matches the VS Code webview's RECENT_LIMIT for recently used models. */
         private const val RECENT_MODEL_LIMIT = 5
+
+        /** M19方法组受控词表（metrics"前后端通信"维度）：本服务只有profile/config/other三组。 */
+        private const val GROUP_PROFILE = "profile"
+        private const val GROUP_CONFIG = "config"
+        private const val GROUP_OTHER = "other"
+
+        // RPC实际业务deadline原值（backend侧既有等待）：csc启动180秒（CsCloudConnectionService
+        // START_DEADLINE_MS）、安装300秒+CscCloudStarter 180秒链式、登录300秒（CscLogin等待）。
+        private const val RPC_DEADLINE_START_MS = 180_000L
+        private const val RPC_DEADLINE_INSTALL_MS = 480_000L
+        private const val RPC_DEADLINE_LOGIN_MS = 300_000L
     }
 
     private val started = AtomicBoolean(false)
@@ -102,16 +119,32 @@ class KiloAppService internal constructor(
 
     // ------ RPC helper ------
 
-    private suspend fun <T> call(block: suspend KiloAppRpcApi.() -> T): T {
+    /**
+     * M19（C2）：wrapper置于durable{}内每次实际调用处——durable重连重试重新执行lambda时
+     * 各自形成独立attempt；直连RPC（split模式注入api）同样按次观测。[deadline]仅在
+     * backend侧存在真实业务等待时传原值（csc启动/安装/登录），其余用默认观测窗口。
+     * 长寿命Flow订阅（[connect]的state收集、[watch]）不观测，绝不把整个订阅时长当RPC。
+     */
+    private suspend fun <T> call(group: String, deadline: Long = 0L, block: suspend KiloAppRpcApi.() -> T): T {
         val api = rpc
-        return if (api != null) block(api) else durable { block(KiloAppRpcApi.getInstance()) }
+        return if (api != null) {
+            observed(group, deadline) { block(api) }
+        } else {
+            durable { observed(group, deadline) { block(KiloAppRpcApi.getInstance()) } }
+        }
+    }
+
+    /** operations未注入时零开销直连；注入后每次实际调用一个rpc操作（成功仅metrics出口）。 */
+    private suspend fun <T> observed(group: String, deadline: Long, block: suspend () -> T): T {
+        val observer = operations ?: return block()
+        return if (deadline > 0L) observer.rpc(group, deadline) { block() } else observer.rpc(group) { block() }
     }
 
     // ------ Lifecycle ------
 
     fun connect() {
         if (!started.compareAndSet(false, true)) return
-        cs.launch { call { connect() } }
+        cs.launch { call(GROUP_OTHER) { connect() } }
         cs.launch {
             val api = rpc
             if (api != null) api.state().collect { onState(it) }
@@ -132,7 +165,7 @@ class KiloAppService internal constructor(
 
     /** Read the backend diagnostic log file for download in split mode. Null when absent or on failure. */
     suspend fun backendLog(): LogFileDto? = try {
-        call { backendLogFile() }
+        call(GROUP_OTHER) { backendLogFile() }
     } catch (e: Exception) {
         LOG.warn("backend log fetch failed", e)
         null
@@ -140,7 +173,7 @@ class KiloAppService internal constructor(
 
     /** One-shot health check. Returns null on failure. */
     suspend fun health(): HealthDto? = try {
-        call { health() }
+        call(GROUP_OTHER) { health() }
     } catch (e: Exception) {
         LOG.warn("health check failed", e)
         null
@@ -148,7 +181,7 @@ class KiloAppService internal constructor(
 
     suspend fun retry() {
         LOG.info("retry: sending RPC")
-        call { retry() }
+        call(GROUP_OTHER) { retry() }
     }
 
     /** Kill the Core process and restart it. */
@@ -156,7 +189,7 @@ class KiloAppService internal constructor(
         LOG.info("restart: resetting state and sending RPC")
         started.set(false)
         info = null
-        call { restart() }
+        call(GROUP_OTHER) { restart() }
         LOG.info("restart: RPC returned — backend restart complete")
     }
 
@@ -165,7 +198,7 @@ class KiloAppService internal constructor(
         LOG.info("reinstall: resetting state and sending RPC")
         started.set(false)
         info = null
-        call { reinstall() }
+        call(GROUP_OTHER) { reinstall() }
         LOG.info("reinstall: RPC returned — backend reinstall complete")
     }
 
@@ -204,7 +237,7 @@ class KiloAppService internal constructor(
         LOG.info("startCsCloudAsync: launching csc cloud start")
         runCsCloudTask(KiloBundle.message("csCloud.progress.start"), release = { csCloudStarting.set(false) }) {
             try {
-                val result = call { startCsCloud() }
+                val result = call(GROUP_OTHER, RPC_DEADLINE_START_MS) { startCsCloud() }
                 if (result.ok) {
                     KiloNotifications.info(KiloBundle.message("csCloud.start.ok"))
                 } else if (result.code == ConnectionErrorCode.CSC_NOT_INSTALLED) {
@@ -255,7 +288,7 @@ class KiloAppService internal constructor(
         LOG.info("installCscAsync: launching csc install")
         runCsCloudTask(KiloBundle.message("csCloud.progress.install"), release = { csCloudInstalling.set(false) }) {
             try {
-                val result = call { installCsc() }
+                val result = call(GROUP_OTHER, RPC_DEADLINE_INSTALL_MS) { installCsc() }
                 if (result.ok) {
                     KiloNotifications.info(KiloBundle.message("csCloud.install.ok"))
                 } else if (result.code == ConnectionErrorCode.NPM_NOT_FOUND) {
@@ -296,7 +329,7 @@ class KiloAppService internal constructor(
         cs.launch {
             try {
                 KiloNotifications.info(KiloBundle.message("csCloud.login.start"))
-                val result = call { loginCsCloud() }
+                val result = call(GROUP_OTHER, RPC_DEADLINE_LOGIN_MS) { loginCsCloud() }
                 if (result.ok) {
                     KiloNotifications.info(KiloBundle.message("csCloud.login.ok"))
                     onDone(true)
@@ -327,11 +360,11 @@ class KiloAppService internal constructor(
 
     suspend fun coreInfo(): CoreInfo? = try {
         val next = CoreInfo(
-            version = call { cliVersion() },
-            platform = call { cliPlatform() },
+            version = call(GROUP_OTHER) { cliVersion() },
+            platform = call(GROUP_OTHER) { cliPlatform() },
         )
         info = next
-        bundledFlag = call { cliBundled() }
+        bundledFlag = call(GROUP_OTHER) { cliBundled() }
         next
     } catch (e: Exception) {
         LOG.warn("core info failed", e)
@@ -387,7 +420,7 @@ class KiloAppService internal constructor(
             if (bundledFlag != null || bundledJob != null) return
             bundledJob = cs.launch {
                 val value = try {
-                    call { cliBundled() }
+                    call(GROUP_OTHER) { cliBundled() }
                 } catch (e: Exception) {
                     LOG.warn("core bundled check failed", e)
                     null
@@ -403,7 +436,7 @@ class KiloAppService internal constructor(
     fun refreshModelFavoritesAsync() {
         cs.launch {
             try {
-                setModelState(call { modelState() })
+                setModelState(call(GROUP_CONFIG) { modelState() })
             } catch (e: Exception) {
                 LOG.warn("model favorites refresh failed", e)
             }
@@ -423,7 +456,9 @@ class KiloAppService internal constructor(
         setModelState(next)
         cs.launch {
             try {
-                setModelState(call { updateModelFavorite(ModelFavoriteUpdateDto(action, providerID, modelID)) })
+                setModelState(
+                    call(GROUP_CONFIG) { updateModelFavorite(ModelFavoriteUpdateDto(action, providerID, modelID)) },
+                )
             } catch (e: Exception) {
                 LOG.warn("model favorite update failed", e)
                 setModelState(_models.value.copy(favorite = prev))
@@ -444,7 +479,9 @@ class KiloAppService internal constructor(
         )
         cs.launch {
             try {
-                setModelState(call { updateModelSelection(ModelSelectionUpdateDto(agent, providerID, modelID)) })
+                setModelState(
+                    call(GROUP_CONFIG) { updateModelSelection(ModelSelectionUpdateDto(agent, providerID, modelID)) },
+                )
             } catch (e: Exception) {
                 LOG.warn("model selection update failed", e)
                 setModelState(prev)
@@ -457,7 +494,7 @@ class KiloAppService internal constructor(
         setModelState(prev.copy(model = prev.model - agent))
         cs.launch {
             try {
-                setModelState(call { clearModelSelection(agent) })
+                setModelState(call(GROUP_CONFIG) { clearModelSelection(agent) })
             } catch (e: Exception) {
                 LOG.warn("model selection clear failed", e)
                 setModelState(prev)
@@ -470,7 +507,7 @@ class KiloAppService internal constructor(
         setModelState(prev.copy(variant = prev.variant + (key to value)))
         cs.launch {
             try {
-                setModelState(call { updateModelVariant(ModelVariantUpdateDto(key, value)) })
+                setModelState(call(GROUP_CONFIG) { updateModelVariant(ModelVariantUpdateDto(key, value)) })
             } catch (e: Exception) {
                 LOG.warn("model variant update failed", e)
                 setModelState(prev)
@@ -480,7 +517,7 @@ class KiloAppService internal constructor(
 
     suspend fun updateConfig(patch: ConfigPatchDto): KiloAppStateDto? = try {
         LOG.info("config update: sending RPC ${summary(patch)}")
-        val next = call { updateConfig(patch) }
+        val next = call(GROUP_CONFIG) { updateConfig(patch) }
         _state.value = next
         LOG.info("config update: RPC completed ${summary(patch)}")
         next
@@ -499,7 +536,7 @@ class KiloAppService internal constructor(
 
     fun applyLogConfigAsync(config: LogConfigDto): Job = cs.launch {
         try {
-            call { applyLogConfig(config) }
+            call(GROUP_CONFIG) { applyLogConfig(config) }
         } catch (e: Exception) {
             LOG.warn("log config apply failed", e)
         }
@@ -518,7 +555,7 @@ class KiloAppService internal constructor(
 
     /** Refresh the user profile and return the latest data. Null = not logged in. */
     suspend fun refreshProfile(): ProfileDto? = try {
-        call { refreshProfile() }.also { setProfile(it) }
+        call(GROUP_PROFILE) { refreshProfile() }.also { setProfile(it) }
     } catch (e: Exception) {
         LOG.warn("profile refresh failed", e)
         null
@@ -534,14 +571,14 @@ class KiloAppService internal constructor(
      * Returns [DeviceAuthDto] with the URL/code to display.
      * Throws on failure.
      */
-    suspend fun startLogin(directory: String? = null): DeviceAuthDto = call { startLogin(directory) }
+    suspend fun startLogin(directory: String? = null): DeviceAuthDto = call(GROUP_PROFILE) { startLogin(directory) }
 
     /**
      * Complete the login flow. Blocks until authentication finishes.
      * Returns the user profile, or null if unavailable.
      */
     suspend fun completeLogin(directory: String? = null): ProfileDto? = try {
-        call { completeLogin(directory) }.also { setProfile(it) }
+        call(GROUP_PROFILE) { completeLogin(directory) }.also { setProfile(it) }
     } catch (e: Exception) {
         LOG.warn("login completion failed", e)
         null
@@ -549,7 +586,7 @@ class KiloAppService internal constructor(
 
     /** Log out and clear the user profile. */
     suspend fun logout(): Boolean = try {
-        call { logout() }.also { ok ->
+        call(GROUP_PROFILE) { logout() }.also { ok ->
             if (ok) setProfile(null)
         }
     } catch (e: Exception) {
@@ -563,7 +600,7 @@ class KiloAppService internal constructor(
      * Returns the updated profile, or null if not logged in.
      */
     suspend fun setOrganization(organizationId: String?): ProfileDto? = try {
-        call { setOrganization(organizationId) }.also { setProfile(it) }
+        call(GROUP_PROFILE) { setOrganization(organizationId) }.also { setProfile(it) }
     } catch (e: Exception) {
         LOG.warn("organization switch failed", e)
         null

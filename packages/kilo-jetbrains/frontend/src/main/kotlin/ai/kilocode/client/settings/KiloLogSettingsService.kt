@@ -50,6 +50,18 @@ class KiloLogSettingsService : PersistentStateComponent<KiloLogSettingsService.S
         LogConfig.apply(state.level, state.contentMode, state.previewMax)
     }
 
+    /**
+     * 本地持久化回读校验（B4/M12 settings_save）：日志设置的保存以持久状态可重读为终点，
+     * 不以Configurable.apply返回为准。比对持久组件状态与运行时生效配置；重读失败不因
+     * 设置页关闭被遮盖（查询在service上，任何时机可读）。
+     */
+    fun persisted(): Boolean {
+        val read = getState()
+        return read.level != null && read.level == LogConfig.level().value &&
+            read.contentMode != null && read.contentMode == LogConfig.contentMode().value &&
+            read.previewMax != null && read.previewMax == LogConfig.previewMax()
+    }
+
     fun apply(app: KiloAppService = service()) {
         applyLocal()
         app.applyLogConfigAsync(dto())
