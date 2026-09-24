@@ -167,6 +167,9 @@ class KiloBackendAppService private constructor(
 
     /** Connection provider id — lets the frontend tailor recovery actions per provider. */
     val providerId: String get() = connectionProvider.id
+
+    /** Scope for optional background work that must never block an RPC caller. */
+    val capabilityScope: CoroutineScope get() = cs
     // kilocode_change end
 
     private var watcher: Job? = null

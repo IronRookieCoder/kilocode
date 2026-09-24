@@ -64,10 +64,25 @@ class KiloSessionRpcApiImplTest {
         val unavailable = capability { CapabilityResult.Unavailable("ide_capability_bind_failed") }
         val failed = capability { throw IllegalStateException("bind failed") }
 
-        ensureCapability(unavailable, "ses_test", "/test", log)
-        ensureCapability(failed, "ses_test", "/test", log)
+        withTimeout(30_000) {
+            ensureCapabilityRetry(unavailable, "ses_test", "/test", log, retryDelayMs = 10)
+            ensureCapabilityRetry(failed, "ses_test", "/test", log, retryDelayMs = 10)
+        }
 
         assertTrue(log.messages.any { it.contains("optional IDE capability failed") })
+    }
+
+    @Test
+    fun `IDE capability retry stops once ready`() = runBlocking {
+        var calls = 0
+        val capabilities = capability {
+            calls++
+            if (calls < 3) CapabilityResult.Unavailable("ide_capability_bind_failed") else CapabilityResult.Ready("gen", emptySet())
+        }
+
+        withTimeout(30_000) { ensureCapabilityRetry(capabilities, "ses_test", "/test", TestLog(), retryDelayMs = 10) }
+
+        assertEquals(3, calls)
     }
 
     @Test
@@ -75,7 +90,7 @@ class KiloSessionRpcApiImplTest {
         val capabilities = capability { throw kotlinx.coroutines.CancellationException("cancelled") }
 
         assertFailsWith<kotlinx.coroutines.CancellationException> {
-            ensureCapability(capabilities, "ses_test", "/test", TestLog())
+            ensureCapabilityRetry(capabilities, "ses_test", "/test", TestLog(), retryDelayMs = 10)
         }
     }
 
@@ -93,9 +108,9 @@ class KiloSessionRpcApiImplTest {
             "mcp_listener_failed",
         )
         for (reason in reasons) {
-            // Completing without throwing is the assertion: prompt() runs chat.prompt() right
-            // after ensureCapability(), so any non-cancellation outcome means the prompt is sent.
-            ensureCapability(capability { CapabilityResult.Unavailable(reason) }, "ses_test", "/test", TestLog())
+            // Completing without throwing is the assertion: prompt() launches the bind in the
+            // background, so any non-cancellation outcome means the prompt is sent.
+            ensureCapabilityRetry(capability { CapabilityResult.Unavailable(reason) }, "ses_test", "/test", TestLog(), retryDelayMs = 10)
         }
     }
 

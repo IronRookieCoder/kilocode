@@ -184,6 +184,24 @@ class TurnLifecycleTest : SessionControllerTestBase() {
         )
     }
 
+    fun `test retried turn parts withdraw error state`() {
+        val (m, _, _) = prompted()
+
+        // In-turn API failure surfaces the terminal error card...
+        emit(ChatEventDto.TurnOpen("ses_test"))
+        emit(ChatEventDto.Error("ses_test", MessageErrorDto(type = "APIError", message = "server_error")))
+        assertTrue(m.model.state is SessionState.Error)
+
+        // ...but when the same turn recovers and streaming resumes, the error must withdraw.
+        emit(ChatEventDto.MessageUpdated("ses_test", msg("a1", "ses_test", "assistant")), flush = false)
+        emit(ChatEventDto.PartUpdated(
+            "ses_test",
+            part("p1", "ses_test", "a1", "text", text = "recovered output"),
+        ))
+
+        assertTrue("expected Busy after recovery, was ${m.model.state}", m.model.state is SessionState.Busy)
+    }
+
     fun `test TurnClose interrupted shows interrupted outcome`() {
         val (m, _, _) = prompted()
 

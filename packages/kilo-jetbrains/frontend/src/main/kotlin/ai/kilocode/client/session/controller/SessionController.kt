@@ -1956,7 +1956,10 @@ class SessionController(
                 }
                 echoed(event.part, prev == null)
                 val s = model.state
-                if (s is SessionState.Busy || s is SessionState.Retry || s is SessionState.Offline) {
+                // Error is included: an in-turn API failure that later retries successfully
+                // resumes streaming parts — the terminal error card must be withdrawn then,
+                // not linger over the recovered turn.
+                if (s is SessionState.Busy || s is SessionState.Retry || s is SessionState.Offline || s is SessionState.Error) {
                     model.setState(SessionState.Busy(status()))
                 }
                 if (child != null) trackChild(key, child)
