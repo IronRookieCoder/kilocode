@@ -43,7 +43,7 @@ class DiagnosticsTest {
                 secrets = setOf(secret),
             ))
             fixture.flush()
-            val facts = fixture.facts()
+            val facts = fixture.businessFacts()
             assertTrue(facts.any { it.name == "diagnostic.reported" })
             assertFalse(facts.joinToString().contains(secret))
             assertTrue(fixture.payload("stack").contains("redacted:known-secret"))
@@ -60,7 +60,7 @@ class DiagnosticsTest {
                 "Set-Cookie" to "session=alpha; token=beta; final=cookie-secret",
             )))
             fixture.flush()
-            val text = payload(fixture.facts(), "attributes")
+            val text = payload(fixture.businessFacts(), "attributes")
             listOf("first", "second-fragment", "sid=one", "other-secret", "alpha", "beta", "cookie-secret").forEach {
                 assertFalse(text.contains(it), "credential fragment survived: $it")
             }
@@ -76,9 +76,9 @@ class DiagnosticsTest {
                 DiagnosticInput.error("shared", context = mapOf("incident_id" to JWT)),
             )
             fixture.flush()
-            assertEquals("diagnostic.redaction_failed", fixture.facts().single().name)
-            assertEquals(id, fixture.facts().single().context["incident_id"])
-            assertFalse(fixture.facts().joinToString().contains(JWT))
+            assertEquals("diagnostic.redaction_failed", fixture.businessFacts().single().name)
+            assertEquals(id, fixture.businessFacts().single().context["incident_id"])
+            assertFalse(fixture.businessFacts().joinToString().contains(JWT))
         }
     }
 
@@ -91,7 +91,7 @@ class DiagnosticsTest {
             val id = diagnostics.report(input)
             assertEquals(id, diagnostics.report(input), "duplicates return their original canonical incident")
             fixture.flush()
-            val facts = fixture.facts()
+            val facts = fixture.businessFacts()
             assertEquals(1, facts.count { it.name == "diagnostic.reported" })
             assertTrue(facts.all { it.context["incident_id"] == id })
             assertTrue(facts.filter { it.name == "diagnostic.payload" }.all { it.data["incident_id"] == JsonPrimitive(id) })
@@ -107,9 +107,9 @@ class DiagnosticsTest {
                 val diagnostics = Diagnostics(fixture.recorder, fixture.clock)
                 repeat(4) { diagnostics.report(DiagnosticInput.error(JWT, error = IllegalStateException("body"), context = mapOf("trace_id" to JWT, "workspace_id" to "C:/Users/private/work"))) }
                 fixture.flush()
-                assertEquals(4, fixture.facts().count { it.channel == "critical" })
-                assertFalse(fixture.facts().joinToString().contains(JWT), "JWT leaked for v2=$v2")
-                assertFalse(fixture.facts().joinToString().contains("C:/Users/private/work"), "context IDs must stay opaque")
+                assertEquals(4, fixture.businessFacts().count { it.channel == "critical" })
+                assertFalse(fixture.businessFacts().joinToString().contains(JWT), "JWT leaked for v2=$v2")
+                assertFalse(fixture.businessFacts().joinToString().contains("C:/Users/private/work"), "context IDs must stay opaque")
             }
         }
     }
@@ -150,8 +150,8 @@ class DiagnosticsTest {
                 })))
                 fixture.writer.start()
                 fixture.flush()
-                assertEquals(if (purpose == "metrics") 0 else 1, fixture.facts().count { it.channel == "critical" }, purpose)
-                assertEquals(if (purpose == "logs") 0 else 1, fixture.facts().count { it.name == "diagnostic.reported" }, purpose)
+                assertEquals(if (purpose == "metrics") 0 else 1, fixture.businessFacts().count { it.channel == "critical" }, purpose)
+                assertEquals(if (purpose == "logs") 0 else 1, fixture.businessFacts().count { it.name == "diagnostic.reported" }, purpose)
             }
         }
     }
@@ -165,8 +165,8 @@ class DiagnosticsTest {
                 fixture.advanceClock(2)
                 fixture.writer.start()
                 fixture.flush()
-                assertEquals(if (purpose == "metrics") 0 else 1, fixture.facts().count { it.channel == "critical" }, purpose)
-                assertEquals(if (purpose == "logs") 0 else 1, fixture.facts().count { it.name == "diagnostic.reported" }, purpose)
+                assertEquals(if (purpose == "metrics") 0 else 1, fixture.businessFacts().count { it.channel == "critical" }, purpose)
+                assertEquals(if (purpose == "logs") 0 else 1, fixture.businessFacts().count { it.name == "diagnostic.reported" }, purpose)
             }
         }
     }
@@ -177,8 +177,8 @@ class DiagnosticsTest {
             enable(fixture, "metrics_allowed_categories" to JsonArray(listOf(JsonPrimitive("diagnostic"))))
             Diagnostics(fixture.recorder, fixture.clock).report(DiagnosticInput.error("shared", error = IllegalStateException("body")))
             fixture.flush()
-            assertEquals(1, fixture.facts().count { it.name == "diagnostic.reported" })
-            assertTrue(fixture.facts().none { it.channel == "critical" })
+            assertEquals(1, fixture.businessFacts().count { it.name == "diagnostic.reported" })
+            assertTrue(fixture.businessFacts().none { it.channel == "critical" })
         }
     }
 
@@ -191,9 +191,9 @@ class DiagnosticsTest {
             fixture.advanceClock(61_000)
             diagnostics.report(DiagnosticInput.error("shared", context = mapOf("fault_id" to "fault-0")))
             fixture.flush()
-            assertEquals(3, fixture.facts().count { it.name == "diagnostic.redaction_failed" })
-            assertEquals(1, fixture.facts().count { it.data["count"]?.jsonPrimitive?.longOrNull == 7L })
-            assertFalse(fixture.facts().joinToString().contains("raw-"))
+            assertEquals(3, fixture.businessFacts().count { it.name == "diagnostic.redaction_failed" })
+            assertEquals(1, fixture.businessFacts().count { it.data["count"]?.jsonPrimitive?.longOrNull == 7L })
+            assertFalse(fixture.businessFacts().joinToString().contains("raw-"))
         }
     }
 
@@ -205,9 +205,9 @@ class DiagnosticsTest {
             Faults(diagnostics).report(IllegalStateException("full text"), "shared", false, "fault-fixed")
             diagnostics.report(DiagnosticInput.error("shared", error = IllegalStateException("duplicate"), context = mapOf("fault_id" to "fault-fixed")))
             fixture.flush()
-            assertEquals(1, fixture.facts().count { it.name == "diagnostic.reported" })
-            assertEquals(1, fixture.facts().count { it.name == "error.uncaught" })
-            assertEquals("full text", payload(fixture.facts(), "message"))
+            assertEquals(1, fixture.businessFacts().count { it.name == "diagnostic.reported" })
+            assertEquals(1, fixture.businessFacts().count { it.name == "error.uncaught" })
+            assertEquals("full text", payload(fixture.businessFacts(), "message"))
         }
     }
 
@@ -221,8 +221,8 @@ class DiagnosticsTest {
                 context = mapOf("operation_id" to "token=context-secret"),
             ))
             fixture.flush()
-            assertTrue(fixture.facts().any { it.name == "diagnostic.reported" })
-            assertFalse(fixture.facts().joinToString().contains("-secret"))
+            assertTrue(fixture.businessFacts().any { it.name == "diagnostic.reported" })
+            assertFalse(fixture.businessFacts().joinToString().contains("-secret"))
         }
     }
 
@@ -235,8 +235,8 @@ class DiagnosticsTest {
                 val diagnostics = Diagnostics(fixture.recorder, fixture.clock, redactor = { if (!supplier) throw failure; Redacted(it, false) })
                 assertSame(failure, assertFailsWith<OutOfMemoryError> { diagnostics.report(DiagnosticInput.error("shared", payloads = mapOf("request" to { throw failure }))) })
                 fixture.flush()
-                assertEquals("error.uncaught", fixture.facts().single().name)
-                assertFalse(fixture.facts().joinToString().contains("secret"))
+                assertEquals("error.uncaught", fixture.businessFacts().single().name)
+                assertFalse(fixture.businessFacts().joinToString().contains("secret"))
             }
         }
     }
@@ -251,7 +251,7 @@ class DiagnosticsTest {
             val expected = StringWriter().also { error.printStackTrace(PrintWriter(it)) }.toString()
             val id = Diagnostics(fixture.recorder, fixture.clock).report(DiagnosticInput.error("shared", error = error, context = mapOf("operation_id" to "op-1")))
             fixture.flush()
-            val facts = fixture.facts()
+            val facts = fixture.businessFacts()
             assertEquals(expected, payload(facts, "stack"))
             assertEquals(error.message, payload(facts, "message"))
             assertTrue(facts.all { it.context["incident_id"] == id && it.context["fault_id"] == id })
@@ -269,7 +269,7 @@ class DiagnosticsTest {
             val values = listOf("path", "headers", "request", "response", "event").associateWith { { "C:\\Users\\alice\\file\nAuthorization: Bearer secret-$it\nvalue" } }
             Diagnostics(fixture.recorder, fixture.clock).report(DiagnosticInput.error("shared", error = IllegalStateException("token=secret-message"), payloads = values))
             fixture.flush()
-            val facts = fixture.facts()
+            val facts = fixture.businessFacts()
             assertEquals(7, facts.filter { it.name == "diagnostic.payload" }.map { it.data["payload_kind"] }.distinct().size)
             assertFalse(facts.joinToString().contains("secret-"))
             values.keys.forEach { assertTrue(payload(facts, it).contains("alice")) }
@@ -287,7 +287,7 @@ class DiagnosticsTest {
             })
             diagnostics.report(DiagnosticInput.error("shared", message = "raw-message", payloads = mapOf("request" to { "raw-body" }), context = mapOf("incident_id" to "token=raw-id")))
             fixture.flush()
-            val fact = fixture.facts().single()
+            val fact = fixture.businessFacts().single()
             assertEquals("diagnostic.redaction_failed", fact.name)
             assertFalse(fact.toString().contains("raw-"))
             assertFalse(fact.toString().contains("secret-"))
@@ -302,7 +302,7 @@ class DiagnosticsTest {
                 "request" to { "head" + "x".repeat(700_000) + "tail" }, "response" to { "start" + "y".repeat(700_000) + "end" },
             )))
             fixture.flush()
-            val facts = fixture.facts()
+            val facts = fixture.businessFacts()
             assertTrue(facts.single { it.name == "diagnostic.reported" }.data.getValue("truncated").jsonPrimitive.boolean)
             val kinds = facts.filter { it.name == "diagnostic.payload" }.map { it.data.getValue("payload_kind").jsonPrimitive.content }.distinct()
             assertTrue(kinds.sumOf { payload(facts, it).encodeToByteArray().size } <= 1024 * 1024)
@@ -341,9 +341,9 @@ class DiagnosticsTest {
             fixture.advanceClock(61_000)
             diagnostics.report(DiagnosticInput.error("shared", context = mapOf("fault_id" to "fault-0")))
             fixture.flush()
-            assertEquals(100, fixture.facts().count { it.channel == "critical" })
-            assertEquals(3, fixture.facts().count { it.name == "diagnostic.reported" })
-            assertEquals(1, fixture.facts().count { it.data["count"]?.jsonPrimitive?.longOrNull == 97L })
+            assertEquals(100, fixture.businessFacts().count { it.channel == "critical" })
+            assertEquals(3, fixture.businessFacts().count { it.name == "diagnostic.reported" })
+            assertEquals(1, fixture.businessFacts().count { it.data["count"]?.jsonPrimitive?.longOrNull == 97L })
         }
     }
 
@@ -384,7 +384,7 @@ class DiagnosticsTest {
                     // 重复调用只触发汇总，不预留下一窗口的详情。
                     diagnostics.report(DiagnosticInput.error("shared", context = mapOf("fault_id" to "fault-0")))
                     fixture.flush()
-                    val facts = fixture.facts()
+                    val facts = fixture.businessFacts()
                     val details = facts.count {
                         it.name == "diagnostic.reported" ||
                             it.channel == "diagnostic" && it.data["count"]?.jsonPrimitive?.longOrNull == 1L
@@ -427,7 +427,7 @@ class DiagnosticsTest {
             enable(fixture, "logs_enabled" to JsonPrimitive(false))
             Diagnostics(fixture.recorder, fixture.clock).report(input)
             fixture.flush()
-            assertTrue(fixture.facts().none { it.schema_version == "2.0" })
+            assertTrue(fixture.businessFacts().none { it.schema_version == "2.0" })
         }
     }
 

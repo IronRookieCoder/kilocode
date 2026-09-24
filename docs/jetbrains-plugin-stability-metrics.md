@@ -6,7 +6,7 @@
 
 与cs-cloud指标的边界：Agent Core的任务、模型回答、工具调用、Token和费用归cs-cloud侧指标设计负责，本文不重复统计。这是职责划分，不代表统一指标上报已实现；cs-cloud源码及Draft提案的核验结果见[设计2.1](./jetbrains-stability-design.md#21-cs-cloud源码核验)。插件“发送成功”只表示请求被接收且界面正确更新，不表示模型回答正确或任务完成。
 
-插件侧已按设计落盘追加式事实、控制 schema、事实 schema、health 增量和 `edt.stall`；cs-cloud 消费、指标/日志转换及发送仍未实现，Draft/规划项不等于已上线能力。
+插件侧已按设计落盘追加式事实、控制 schema、事实 schema、health 增量和 `edt.stall`，并按[Outbox高保真诊断设计](./superpowers/specs/2026-09-23-jetbrains-outbox-diagnostics-design.md)（schema_version 2.0）落盘 `diagnostic.*` 事实、细分 drop 原因与 `quality`；cs-cloud 消费、指标/日志转换及发送仍未实现，Draft/规划项不等于已上线能力。
 
 ## 指标总览
 
@@ -332,11 +332,11 @@
 
 > 判断“没有错误”是健康，还是记录没写下来、没交给cs-cloud。
 
-**如何衡量：** 开始/结束完整性、写入失败、丢弃增量、待交接大小及最老年龄，每30秒和异常变化时记录。observation_total不新增采集点，由插件侧终态事实直接构成：run级复用M22的start/end/unclean，操作级复用各operation的end/timeout终态；cs-cloud不配对结算、不推断丢失终态，覆盖缺口由health损失增量与unclean表达。
+**如何衡量：** 开始/结束完整性、写入失败、丢弃增量、待交接大小及最老年龄，每30秒和异常变化时记录。丢弃增量按七种原因细分（invalid/contention/capacity/policy/oversize/evicted/failure）；failure为failure档横切计数，不计入drop汇总增量，任一failure档事实丢失即置quality=degraded。observation_total不新增采集点，由插件侧终态事实直接构成：run级复用M22的start/end/unclean，操作级复用各operation的end/timeout终态；cs-cloud不配对结算、不推断丢失终态，覆盖缺口由health损失增量与unclean表达。
 
-**技术指标：** `jetbrains_plugin_observation_total`（phase=started/terminal）、`jetbrains_plugin_telemetry_dropped_total`、`jetbrains_plugin_telemetry_write_error_total`、`jetbrains_plugin_outbox_depth_bytes`、`jetbrains_plugin_outbox_oldest_age_seconds`；按需选phase、reason、channel。
+**技术指标：** `jetbrains_plugin_observation_total`（phase=started/terminal）、`jetbrains_plugin_telemetry_dropped_total`（reason=invalid/contention/capacity/policy/oversize/evicted/failure）、`jetbrains_plugin_telemetry_write_error_total`、`jetbrains_plugin_telemetry_quality`（gauge，0=good、1=degraded）、`jetbrains_plugin_outbox_depth_bytes`、`jetbrains_plugin_outbox_oldest_age_seconds`；按需选phase、reason。drop与write_error为采集链路整体计数，不分wire channel。
 
-**如何解读：** 完整率=有可信终态的成熟操作/全部成熟操作，unknown不在分子。磁盘满且进程崩溃时，丢失计数也可能丢失，不能承诺知道所有损失。
+**如何解读：** 完整率=有可信终态的成熟操作/全部成熟操作，unknown不在分子。quality=degraded的run不得展示可信的精确成功率，成功率以自包含operation end为准。磁盘满且进程崩溃时，丢失计数也可能丢失，不能承诺知道所有损失。
 
 #### M17 数据何时进入上报服务（cs-cloud负责）
 
@@ -367,8 +367,8 @@
 | 项目 | 约定 |
 |---|---|
 | 前缀 | jetbrains_plugin_；daemon自身健康使用自有指标族 |
-| 类型 | _total为累计counter，_duration_seconds为累计histogram；M13的_seconds_total为累计时长counter；depth/age/resources为gauge |
-| 单位 | 秒seconds，字节bytes，次数times，丢弃条数records，资源count；内部duration_ms由cs-cloud除1000 |
+| 类型 | _total为累计counter，_duration_seconds为累计histogram；M13的_seconds_total为累计时长counter；depth/age/quality/resources为gauge |
+| 单位 | 秒seconds，字节bytes，次数times，丢弃条数records，资源count，质量分score（0/1）；内部duration_ms由cs-cloud除1000 |
 | 客户端枚举 | 指标使用jetbrains，需在指标服务登记 |
 | application | costrict-plugin，复用现有枚举并确认适用范围 |
 | 版本和环境 | 采集时固定plugin_version/IDE版本/env，不用发送时版本覆盖历史 |
@@ -394,7 +394,7 @@
 | 断连reason | sse_closed/heartbeat_timeout/health_failed/process_exit/daemon_restart/partial_sse_failed/unknown；shutdown排除 |
 | component | frontend/backend/cscloud/shared |
 | error_class | linkage_error/no_class_def_found/io_error/timeout_exception/json_parse/npe/illegal_state/other；预期取消排除 |
-| 丢弃reason | buffer_full/disk_full/expired/corrupt/oversize/quota/disabled |
+| 丢弃reason | invalid/contention/capacity/policy/oversize/evicted/failure |
 
 daemon_restart必须有daemon实例身份变化等证据；只使用provider实际可观测的心跳和退出事件。未知归other，不以自由文本或null作为标签。具体stage/reason按每组定义登记。
 

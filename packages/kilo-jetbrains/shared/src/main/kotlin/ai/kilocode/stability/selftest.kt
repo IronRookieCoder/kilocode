@@ -3,6 +3,9 @@ package ai.kilocode.stability
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.atomic.AtomicReference
+import kotlin.concurrent.thread
 
 /** 自检事实的项目上下文标记（context闭集键，值≤128B无控制字符）：盘上可逐条辨识自检驱动面。 */
 private const val SELFTEST_WORKSPACE = "ws-selftest"
@@ -10,6 +13,10 @@ private const val SELFTEST_WORKSPACE = "ws-selftest"
 /** 自检故障的显式fault_id（跨重复报告去重键；计数与详情两条事实经它关联）。 */
 private const val SELFTEST_FAULT_REPORTED = "fault-selftest-reported"
 private const val SELFTEST_FAULT_UNCAUGHT = "fault-selftest-uncaught"
+
+private const val OUTBOX_FAILURES = 100
+private const val OUTBOX_FILL_LIMIT = 100_000
+private const val OUTBOX_DEADLINE_MS = 600_000L
 
 /**
  * 采集链路自检的驱动面（设计第9章事件字典）：对每个登记name各产出至少一条字典合法事实，
@@ -178,6 +185,80 @@ fun emitDictionarySweep(
         fault = SELFTEST_FAULT_UNCAUGHT,
     )
 }
+
+/**
+ * Hidden real-IDE load driver for schema-v2 outbox diagnostics. Network and decode incidents are
+ * triggered through their real boundaries by the integration fixture; this hook only creates the
+ * in-process saturation, admission-loss, and open-operation states that the daemon cannot induce.
+ */
+fun emitOutboxScenario(recorder: Recorder, operations: Operations) {
+    // Fill the lower-priority quota before racing fresh samples with failure groups. The writer
+    // may drain concurrently in the IDE, so the capacity counter—not an iteration guess—is the
+    // completion condition.
+    val baseline = recorder.health().droppedCapacity
+    check((0 until OUTBOX_FILL_LIMIT).any { index ->
+        recorder.record(outboxSample(index))
+        recorder.health().droppedCapacity > baseline
+    }) { "outbox self-test could not fill the sample queue" }
+
+    val gate = CountDownLatch(1)
+    val failed = AtomicReference<Throwable?>()
+    val workers = listOf(
+        thread(start = true, name = "outbox-samples") {
+            gate.await()
+            repeat(OUTBOX_FAILURES * 10) { recorder.record(outboxSample(it)) }
+        },
+    ) + (0 until 4).map { worker ->
+        thread(start = true, name = "outbox-failures-$worker") {
+            gate.await()
+            repeat(OUTBOX_FAILURES / 4) { offset ->
+                val index = worker * (OUTBOX_FAILURES / 4) + offset
+                runCatching {
+                    operations.report(DiagnosticInput.error(
+                        component = "selftest.load",
+                        code = "load_failure_${index.toString().padStart(3, '0')}",
+                        message = "Concurrent failure $index",
+                        context = mapOf("fault_id" to "load-$index"),
+                        payloads = mapOf("response" to { "response-$index" }),
+                    ))
+                }.onFailure { error -> failed.compareAndSet(null, error) }
+            }
+        }
+    }
+    gate.countDown()
+    workers.forEach(Thread::join)
+    failed.get()?.let { throw it }
+
+    // Deliberately left open. A hard-killed IDE must let the next run recover this ID from the
+    // copied JSONL using per-producer/run/channel seq ordering rather than physical line order.
+    operations.begin("session.open", OUTBOX_DEADLINE_MS, fields("session_mode" to "create"))
+}
+
+/** Force a rejected failure group so the next real health snapshot must report degraded quality. */
+fun emitOutboxDegraded(recorder: Recorder): Admission = recorder.record(
+    Draft(
+        "diagnostic.reported",
+        "diagnostic",
+        "diagnostic",
+        buildJsonObject { put("unexpected", true) },
+        schemaVersion = "2.0",
+    ),
+)
+
+private fun outboxSample(index: Int) = Draft(
+    "render.apply",
+    "sample",
+    "critical",
+    buildJsonObject {
+        put("duration_ms", index.toLong())
+        put("result", "success")
+        put("component", "messages")
+        put("batch_size_bucket", "1")
+        put("sample_rate", 1.0)
+    },
+    context = mapOf("workspace_id" to SELFTEST_WORKSPACE),
+    purposes = setOf("metrics"),
+)
 
 private fun fields(vararg pairs: Pair<String, String>): JsonObject = buildJsonObject {
     pairs.forEach { (key, value) -> put(key, value) }

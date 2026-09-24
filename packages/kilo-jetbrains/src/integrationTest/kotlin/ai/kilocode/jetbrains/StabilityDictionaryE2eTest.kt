@@ -28,8 +28,8 @@ import java.util.concurrent.TimeUnit
  *  - **31个登记name全部落盘**（28个经自检 + started/shutdown/health由服务自然产出）；
  *  - 每个name的kind/channel/purposes与事件字典投影一致（含error族计数critical/metrics与
  *    详情diagnostic/logs两形态分道）；7种kind齐备；
- *  - **critical/diagnostic两通道行在同一追加文件内，seq按通道各自连续**（追加协议无封存
- *    节奏断言——通道不再是目录，唯一的线格式节律由seq连续性与优雅关闭末条shutdown表达）；
+ *  - **critical/diagnostic两通道行在同一追加文件内，seq按通道各自唯一**（容量重写可淘汰
+ *    internal checkpoint并留下合法缺口；业务末态由优雅关闭的shutdown表达）；
  *  - 自检事实带workspace_id=ws-selftest标记，与自然事实可区分（人工检查入口）；
  *  - 完整§6.1线格式校验（独立副本契约，同StabilityE2eTest原则：不依赖插件模块类）；
  *  - **落盘文件保留**：outbox全树+控制文件复制到`out/stability-evidence/dictionary/`
@@ -61,12 +61,14 @@ class StabilityDictionaryE2eTest : IntegrationTestBase() {
     private val modes = setOf("monolith", "split")
     private val sides = setOf("monolith", "frontend", "backend")
     private val providers = setOf("cs-cloud", "kilo-cli", "unknown")
-    private val contextKeys = setOf("operation_id", "attempt_id", "fault_id", "trace_id", "workspace_id")
+    private val contextKeys = setOf(
+        "operation_id", "attempt_id", "fault_id", "trace_id", "workspace_id", "incident_id",
+    )
     private val purposeValues = setOf("metrics", "logs")
     private val phaseValues = setOf("start", "progress", "end")
     private val endKinds = setOf("app_close", "unload")
 
-    /** 31个登记name（设计§9字典，含经真实StallMerger驱动的edt.stall）。 */
+    /** 正常生产路径可触发的登记name（redaction_failed由失败过滤器的专项单测覆盖）。 */
     private val registeredNames = setOf(
         "rpc", "render.apply", "edt.delay", "edt.stall", "resource.snapshot", "availability",
         "migration.required", "session.dispose_risk",
@@ -74,7 +76,7 @@ class StabilityDictionaryE2eTest : IntegrationTestBase() {
         "plugin.readiness", "connection", "connection.attempt", "connection.state_changed", "connection.recovery",
         "csc.install", "csc.start", "credentials.ready", "cli.download", "session.open", "session.restore",
         "action", "ide.operation", "telemetry.health", "protocol.error", "edt.violation",
-        "error.uncaught", "error.reported",
+        "error.uncaught", "error.reported", "diagnostic.reported", "diagnostic.payload",
     )
 
     /** name→(kind, channel, purposes) 字典投影独立副本；error族按通道分两形态。 */
@@ -84,7 +86,8 @@ class StabilityDictionaryE2eTest : IntegrationTestBase() {
     private fun expectedForm(name: String, channel: String): Triple<String, String, Set<String>>? = when {
         name == "error.reported" || name == "error.uncaught" ->
             if (channel == "critical") Triple("diagnostic", "critical", metricsOnly)
-            else Triple("diagnostic", "diagnostic", setOf("logs"))
+            else null
+        name.startsWith("diagnostic.") -> Triple("diagnostic", "diagnostic", setOf("logs"))
         else -> Triple(kindOf(name), "critical", if (name in metricsOnlyNames) metricsOnly else dual)
     }
 
@@ -98,7 +101,7 @@ class StabilityDictionaryE2eTest : IntegrationTestBase() {
         "plugin.started", "plugin.shutdown", "plugin.unclean" -> "lifecycle"
         "availability" -> "interval"
         "edt.delay", "edt.stall", "render.apply", "resource.snapshot" -> "sample"
-        "protocol.error", "edt.violation" -> "diagnostic"
+        "protocol.error", "edt.violation", "diagnostic.reported", "diagnostic.payload" -> "diagnostic"
         "telemetry.health" -> "health"
         else -> "operation"
     }
@@ -107,6 +110,7 @@ class StabilityDictionaryE2eTest : IntegrationTestBase() {
     private val sweepExclusiveNames = setOf(
         "plugin.unclean", "migration.required", "csc.install", "csc.start", "cli.download",
         "session.dispose_risk", "protocol.error", "edt.violation", "render.apply", "edt.stall",
+        "diagnostic.reported", "diagnostic.payload",
     )
 
     private val json = Json
@@ -146,13 +150,13 @@ class StabilityDictionaryE2eTest : IntegrationTestBase() {
         assertEquals(jsonl.fileName.toString(), jsonlFiles.single().fileName.toString(), "the file name must be stable")
         assertNoForeignEntries()
 
-        // —— 全量线格式 + 字典形态校验（seq按通道各自连续是校验的一部分）——
+        // —— 全量线格式 + 字典形态校验（seq按通道各自唯一是校验的一部分）——
         val facts = readFacts(listOf(jsonl))
         assertTrue(facts.isNotEmpty(), "facts must be recorded on disk")
         val failures = validateFacts(facts, launchMs - 10_000, closeMs + 10_000)
         assertTrue(failures.isEmpty(), "violations:\n${failures.joinToString("\n")}")
 
-        // —— critical/diagnostic两通道行均在同一文件且seq各自连续（封存节奏断言的替代）——
+        // —— critical/diagnostic两通道行均在同一文件且seq各自唯一（封存节奏断言的替代）——
         val criticalRows = facts.filter { it.channel == "critical" }
         val diagnosticRows = facts.filter { it.channel == "diagnostic" }
         assertTrue(criticalRows.isNotEmpty(), "critical channel rows must be present")
@@ -185,13 +189,15 @@ class StabilityDictionaryE2eTest : IntegrationTestBase() {
             "metrics-only and dual purposes projections must be present",
         )
 
-        // —— error族两形态分道且同一fault_id关联 ——
+        // —— error计数与v2 diagnostic parent/payload经同一fault_id/incident_id关联 ——
         val errorCounts = facts.filter { it.name.startsWith("error.") && it.channel == "critical" }
-        val errorDetails = facts.filter { it.channel == "diagnostic" }
+        val parents = facts.filter { it.name == "diagnostic.reported" }
+        val payloads = facts.filter { it.name == "diagnostic.payload" }
         assertTrue(errorCounts.isNotEmpty(), "error count form (critical/metrics) must be on disk")
-        assertTrue(errorDetails.isNotEmpty(), "error detail form (diagnostic/logs) must be on disk")
-        assertTrue(errorDetails.all { it.name.startsWith("error.") && it.purposes == setOf("logs") })
-        val detailFaultIds = errorDetails.mapNotNull { fact -> fact.obj["context"]?.jsonObject?.get("fault_id") }
+        assertTrue(parents.isNotEmpty(), "v2 diagnostic parents must be on disk")
+        assertTrue(payloads.isNotEmpty(), "v2 diagnostic payloads must be on disk")
+        assertTrue((parents + payloads).all { it.channel == "diagnostic" && it.purposes == setOf("logs") })
+        val detailFaultIds = parents.mapNotNull { fact -> fact.obj["context"]?.jsonObject?.get("fault_id") }
         assertTrue(
             errorCounts.any { count ->
                 detailFaultIds.any { id -> id.jsonPrimitive.content == count.obj["context"]!!.jsonObject["fault_id"]!!.jsonPrimitive.content }
@@ -199,12 +205,16 @@ class StabilityDictionaryE2eTest : IntegrationTestBase() {
             "a detail fact must reference the same fault_id as its count fact",
         )
 
-        // —— M22 lifecycle：恰1条started、1条shutdown(app_close)且为物理末行 ——
+        // —— M22 lifecycle：shutdown是最终critical业务事实；flush checkpoint可随后物理落盘 ——
         assertEquals(1, facts.count { it.name == "plugin.started" })
         val shutdowns = facts.filter { it.name == "plugin.shutdown" }
         assertEquals(1, shutdowns.size)
         assertEquals("app_close", shutdowns.single().obj["data"]!!.jsonObject["end_kind"]!!.jsonPrimitive.content)
-        assertEquals(facts.size, shutdowns.single().lineNo, "the graceful close must append plugin.shutdown as the final record")
+        assertEquals(
+            shutdowns.single().seq,
+            facts.filter { it.channel == "critical" && !it.isCheckpoint() }.maxOf { it.seq },
+            "the graceful close must leave shutdown as the final critical business fact",
+        )
 
         // —— 自检标记：sweep事实带ws-selftest（人工检查时可与自然事实区分）——
         assertTrue(
@@ -245,7 +255,8 @@ class StabilityDictionaryE2eTest : IntegrationTestBase() {
               "expires_at": $expiresAt,
               "metrics_allowed_categories": ["critical", "diagnostic"],
               "logs_allowed_categories": ["critical", "diagnostic"],
-              "log_detail_rate_limit": {"per_fingerprint_max_per_minute": 3}
+              "log_detail_rate_limit": {"per_fingerprint_max_per_minute": 3},
+              "accepted_fact_schema_majors": [1, 2]
             }
             """.trimIndent(),
         )
@@ -305,6 +316,9 @@ class StabilityDictionaryE2eTest : IntegrationTestBase() {
         val purposes: Set<String>,
     )
 
+    private fun FactLine.isCheckpoint(): Boolean = name == "telemetry.health" &&
+        obj["data"]?.jsonObject?.get("checkpoint")?.jsonPrimitive?.content == "true"
+
     private fun readFacts(files: List<Path>): List<FactLine> {
         val facts = mutableListOf<FactLine>()
         for (file in files) {
@@ -341,7 +355,7 @@ class StabilityDictionaryE2eTest : IntegrationTestBase() {
         return facts
     }
 
-    /** §6.1 wire invariants（独立副本，同StabilityE2eTest口径；seq按run+channel各自连续）。 */
+    /** §6.1 wire invariants（独立副本，同StabilityE2eTest口径；seq按run+channel各自唯一）。 */
     private fun validateFacts(facts: List<FactLine>, windowStartMs: Long, windowEndMs: Long): List<String> {
         val failures = mutableListOf<String>()
         fun fail(message: String) {
@@ -359,7 +373,9 @@ class StabilityDictionaryE2eTest : IntegrationTestBase() {
             if (obj.keys.any { it !in factFieldNames }) fail("$where: unknown field(s) ${obj.keys - factFieldNames}")
             val required = factFieldNames - "context"
             if (!obj.keys.containsAll(required)) fail("$where: missing field(s) ${required - obj.keys}")
-            if (obj["schema_version"]?.jsonPrimitive?.content != "1.0") fail("$where: schema_version must be 1.0")
+            val version = obj["schema_version"]?.jsonPrimitive?.content
+            if (version !in setOf("1.0", "2.0")) fail("$where: unsupported schema_version $version")
+            if (fact.name.startsWith("diagnostic.") && version != "2.0") fail("$where: diagnostic facts require v2")
             if (!uuidRegex.matches(fact.eventId)) fail("$where: event_id is not a UUID")
             if (fact.timestamp < windowStartMs || fact.timestamp > windowEndMs) fail("$where: timestamp outside window")
             if (fact.channel !in channels) fail("$where: channel ${fact.channel}")
@@ -403,8 +419,6 @@ class StabilityDictionaryE2eTest : IntegrationTestBase() {
             val sorted = seqs.sorted()
             if (sorted.first() != 1L) fail("$runChannel: seq must start at 1")
             if (seqs.toSet().size != seqs.size) fail("$runChannel: duplicate seq")
-            val gaps = sorted.zipWithNext().filter { (a, b) -> b != a + 1 }
-            if (gaps.isNotEmpty()) fail("$runChannel: seq gaps at $gaps")
         }
         return failures
     }

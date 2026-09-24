@@ -101,6 +101,11 @@ class Fixture(
             }
             ?: emptyList()
 
+    /** 业务语义断言忽略writer在成功force后追加的内部flush checkpoint。 */
+    fun businessFacts(): List<Fact> = facts().filterNot { fact ->
+        fact.name == "telemetry.health" && fact.data["checkpoint"] == JsonPrimitive(true)
+    }
+
     /** 可控时钟推进（单调与wall同步推进，策略判期与flush延迟共用同一时间线）。 */
     fun advanceClock(ms: Long) {
         (clock as FixtureClock).advance(ms)

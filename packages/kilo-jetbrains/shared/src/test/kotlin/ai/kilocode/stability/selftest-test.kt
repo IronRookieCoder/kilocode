@@ -14,6 +14,40 @@ import kotlin.test.assertTrue
 class SelfTestTest {
 
     @Test
+    fun `outbox scenario preserves every load incident under sample pressure`() {
+        Fixture(autoStart = false).use { fixture ->
+            fixture.enableDiagnostics()
+
+            emitOutboxScenario(fixture.recorder, fixture.operations)
+            val good = Health(fixture.recorder, fixture.writer, fixture.clock, intervalMs = 0).snapshot()
+
+            fixture.writer.start()
+            fixture.flush()
+            val facts = fixture.facts()
+            val incidents = facts.filter { it.name == "diagnostic.reported" }
+
+            val expected = (0 until 100).map { "load_failure_${it.toString().padStart(3, '0')}" }.toSet()
+            assertEquals(expected, incidents.map { it.data.getValue("code").jsonPrimitive.content }.toSet())
+            assertEquals(expected.size, incidents.size)
+            incidents.forEach { incident ->
+                val id = incident.context.getValue("incident_id")
+                assertTrue(incident.data.getValue("payload_refs").toString().contains("response"))
+                assertTrue(facts.any {
+                    it.name == "diagnostic.payload" && it.context["incident_id"] == id &&
+                        it.data["payload_kind"]?.jsonPrimitive?.content == "response"
+                })
+            }
+            assertTrue(good.getValue("drop_evicted").jsonPrimitive.long > 0)
+            assertEquals("good", good.getValue("quality").jsonPrimitive.content)
+
+            assertEquals(Admission.DROPPED, emitOutboxDegraded(fixture.recorder))
+            val degraded = Health(fixture.recorder, fixture.writer, fixture.clock, intervalMs = 0).snapshot()
+            assertTrue(degraded.getValue("drop_failure").jsonPrimitive.long > 0)
+            assertEquals("degraded", degraded.getValue("quality").jsonPrimitive.content)
+        }
+    }
+
+    @Test
     fun `sweep lands every driven name on disk in dictionary form`() {
         Fixture().use { fixture ->
             emitDictionarySweep(fixture.recorder, fixture.operations, Faults(fixture.recorder, fixture.clock), fixture.resources)
@@ -22,8 +56,15 @@ class SelfTestTest {
 
             // —— 覆盖：31个登记name中除plugin.started/plugin.shutdown/telemetry.health
             //    （服务级单发与真实快照，见selftest.kt KDoc）外全部落盘 ——
-            val expectedNames = Dictionary.names.toSet() - setOf("plugin.started", "plugin.shutdown", "telemetry.health")
-            assertEquals(expectedNames, facts.map { it.name }.toSet(), "sweep驱动的每个name都必须经.ready落盘")
+            val expectedNames = Dictionary.names.toSet() - setOf(
+                "plugin.started", "plugin.shutdown", "telemetry.health",
+                "diagnostic.reported", "diagnostic.redaction_failed", "diagnostic.payload",
+            )
+            assertEquals(
+                expectedNames,
+                facts.map { it.name }.toSet() - setOf("telemetry.health"),
+                "sweep驱动的每个name都必须经.ready落盘",
+            )
 
             // —— edt.stall：必须经真实StallMerger产出——同观测区间两枚首尾相接样本（seq 1→2）
             //    合并为2.5秒窗口，onObservationEnded终结后达标；驱动面不得伪造stall Draft形状 ——
@@ -66,14 +107,18 @@ class SelfTestTest {
             // —— 自检标记：驱动面事实带workspace_id=ws-selftest（error族经显式fault_id辨识；
             //    edt.stall由真实StallMerger产出，其Draft形状不带workspace上下文，与生产一致）——
             assertTrue(
-                facts.filter { it.name !in setOf("error.reported", "error.uncaught", "resource.snapshot", "edt.stall") }
+                facts.filter {
+                    it.name !in setOf(
+                        "error.reported", "error.uncaught", "resource.snapshot", "edt.stall", "telemetry.health",
+                    )
+                }
                     .all { it.context["workspace_id"] == "ws-selftest" },
                 "全部自检事实（error、resource.snapshot与StallMerger产出的edt.stall除外）都携带ws-selftest标记",
             )
 
-            // —— seq按通道从1连续（与自然事件交错时由writer保证，此处验证sweep自身不破坏）——
+            // —— failure-first物理写序不承诺业务顺序；按通道seq重建后必须从1连续 ——
             listOf("critical", "diagnostic").forEach { channel ->
-                val seqs = facts.filter { it.channel == channel }.map { it.seq }
+                val seqs = facts.filter { it.channel == channel }.map { it.seq }.sorted()
                 assertEquals((1L..seqs.size).toList(), seqs, "$channel seq must be contiguous from 1")
             }
 
@@ -91,6 +136,7 @@ class SelfTestTest {
         "availability" -> "interval"
         "edt.delay", "edt.stall", "render.apply", "resource.snapshot" -> "sample"
         "protocol.error", "edt.violation" -> "diagnostic"
+        "telemetry.health" -> "health"
         else -> "operation"
     }
 

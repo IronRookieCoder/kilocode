@@ -2,9 +2,12 @@ package ai.kilocode.client.stability
 
 import ai.kilocode.stability.StabilityService
 import ai.kilocode.stability.emitDictionarySweep
+import ai.kilocode.stability.emitOutboxDegraded
+import ai.kilocode.stability.emitOutboxScenario
 import com.intellij.openapi.actionSystem.AnAction
 import com.intellij.openapi.actionSystem.AnActionEvent
 import com.intellij.openapi.components.service
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * 采集链路自检动作（隐藏入口）：不注册进任何菜单/工具栏组，仅集成测试经
@@ -23,6 +26,18 @@ class StabilitySelfTestAction : AnAction() {
     override fun actionPerformed(e: AnActionEvent) {
         if (System.getProperty(SELFTEST_PROPERTY) != "true") return
         val stability = service<StabilityService>()
+        if (System.getProperty(SCENARIO_PROPERTY) == "outbox") {
+            when (phase.getAndIncrement()) {
+                0 -> {
+                    emitOutboxScenario(stability.recorder, stability.operations)
+                    // Timing-specific: keep the real EDT blocked long enough for two watchdog
+                    // ticks to capture the in-flight stack before this action returns.
+                    Thread.sleep(3_500)
+                }
+                1 -> check(emitOutboxDegraded(stability.recorder).name == "DROPPED")
+            }
+            return
+        }
         emitDictionarySweep(
             recorder = stability.recorder,
             operations = stability.operations,
@@ -33,5 +48,7 @@ class StabilitySelfTestAction : AnAction() {
 
     private companion object {
         const val SELFTEST_PROPERTY = "costrict.stability.selftest"
+        const val SCENARIO_PROPERTY = "costrict.stability.selftest.scenario"
+        val phase = AtomicInteger()
     }
 }

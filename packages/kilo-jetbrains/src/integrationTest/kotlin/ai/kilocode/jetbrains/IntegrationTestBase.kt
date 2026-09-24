@@ -208,21 +208,77 @@ abstract class IntegrationTestBase {
             expectedKill = hardKill,
             expectedExitCode = if (hardKill) 1 else 0,
         )
-        val result = if (hardKill) {
-            try {
-                run.driver.withContext { driverAssertions() }
-            } finally {
-                if (run.process.isAlive) run.forceKill()
+        val marker = context.paths.configDir.parent.toAbsolutePath().normalize()
+        val processes = linkedMapOf<Long, ProcessHandle>()
+        fun capture() {
+            testProcesses(run.process.id, marker).forEach { process -> processes[process.pid()] = process }
+        }
+        capture()
+        val result = try {
+            if (hardKill) {
+                try {
+                    run.driver.withContext {
+                        try {
+                            driverAssertions()
+                        } finally {
+                            capture()
+                        }
+                    }
+                } finally {
+                    if (run.process.isAlive) run.forceKill()
+                }
+                runBlocking { run.startResult.await() }
+            } else {
+                run.useDriverAndCloseIde {
+                    try {
+                        driverAssertions()
+                    } finally {
+                        capture()
+                    }
+                }
             }
-            runBlocking { run.startResult.await() }
-        } else {
-            run.useDriverAndCloseIde { driverAssertions() }
+        } finally {
+            awaitTestProcesses(testName, marker, processes.values)
         }
         if (reuseScope) {
             val file = context.paths.configDir.resolve("kilo-stability-scope-id")
             if (Files.isRegularFile(file)) scopes[testName] = Files.readAllBytes(file)
         }
         return result
+    }
+
+    private fun testProcesses(pid: String, marker: Path): List<ProcessHandle> {
+        val root = pid.toLongOrNull()?.let(ProcessHandle::of)?.orElse(null)
+        val known = root?.let { process ->
+            process.descendants().use { descendants -> listOf(process) + descendants.toList() }
+        }.orEmpty()
+        val scoped = ProcessHandle.current().descendants().use { descendants ->
+            descendants.filter { process ->
+                process.info().commandLine().orElse("").contains(marker.toString(), ignoreCase = true)
+            }.toList()
+        }
+        return (known + scoped).distinctBy(ProcessHandle::pid)
+    }
+
+    private fun awaitTestProcesses(testName: String, marker: Path, processes: Collection<ProcessHandle>) {
+        val tracked = processes.associateByTo(linkedMapOf(), ProcessHandle::pid)
+        val deadline = System.currentTimeMillis() + 30_000
+        while (true) {
+            ProcessHandle.allProcesses().use { all ->
+                all.filter { process ->
+                    process.info().commandLine().orElse("").contains(marker.toString(), ignoreCase = true)
+                }.forEach { process -> tracked[process.pid()] = process }
+            }
+            val alive = tracked.values.filter(ProcessHandle::isAlive)
+            if (alive.isEmpty()) return
+            if (System.currentTimeMillis() >= deadline) {
+                val details = alive.joinToString { process ->
+                    "pid=${process.pid()} command=${process.info().commandLine().orElse("<unavailable>")}"
+                }
+                throw AssertionError("$testName left IDE processes alive for context $marker: $details")
+            }
+            Thread.sleep(100)
+        }
     }
 
     /**

@@ -31,7 +31,7 @@ class FaultTest {
             val faults = Faults(fixture.recorder, fixture.clock)
             repeat(10) { faults.report(IllegalStateException("token=secret C:/Users/alice"), "frontend", true) }
             fixture.flush()
-            val facts = fixture.facts()
+            val facts = fixture.businessFacts()
             assertEquals(10, facts.count { it.name == "error.reported" && it.channel == "critical" })
             assertEquals(3, facts.count { it.name == "error.reported" && it.channel == "diagnostic" })
             val text = facts.joinToString { it.toString() }
@@ -46,7 +46,7 @@ class FaultTest {
             val faults = Faults(fixture.recorder, fixture.clock)
             repeat(5) { faults.report(IllegalStateException("boom once"), "frontend", true, "fault-fixed") }
             fixture.flush()
-            val facts = fixture.facts()
+            val facts = fixture.businessFacts()
             assertEquals(1, facts.count { it.name == "error.reported" && it.channel == "critical" })
             assertEquals(1, facts.count { it.name == "error.reported" && it.channel == "diagnostic" })
             assertEquals(1L, facts.single { it.channel == "diagnostic" }.data["count"]?.jsonPrimitive?.long)
@@ -59,7 +59,7 @@ class FaultTest {
             val faults = Faults(fixture.recorder, fixture.clock)
             repeat(10) { index -> faults.report(FaultA(), "frontend", true, "fault-$index") }
             fixture.flush()
-            val firstWindow = fixture.facts()
+            val firstWindow = fixture.businessFacts()
             assertEquals(10, firstWindow.count { it.channel == "critical" })
             assertEquals(3, firstWindow.count { it.channel == "diagnostic" })
             val detailFingerprint = firstWindow.first { it.channel == "diagnostic" }.data["fingerprint"]?.jsonPrimitive?.content
@@ -69,7 +69,7 @@ class FaultTest {
             faults.report(FaultA(), "frontend", true, "fault-0")
             fixture.flush()
 
-            val facts = fixture.facts()
+            val facts = fixture.businessFacts()
             assertEquals(10, facts.count { it.channel == "critical" }, "dedup hit must not add a count")
             assertEquals(
                 3,
@@ -91,7 +91,7 @@ class FaultTest {
             faults.report(FaultA(), "frontend", true, "fault-1")
             faults.report(FaultA(), "frontend", true, "fault-2")
             fixture.flush()
-            val counts = fixture.facts().filter { it.channel == "critical" }
+            val counts = fixture.businessFacts().filter { it.channel == "critical" }
             assertEquals(2, counts.size)
             assertEquals(2, counts.map { it.data["fault_id"]?.jsonPrimitive?.content }.distinct().size)
             assertEquals(1, counts.map { it.data["fingerprint"]?.jsonPrimitive?.content }.distinct().size)
@@ -104,7 +104,7 @@ class FaultTest {
             val faults = Faults(fixture.recorder, fixture.clock)
             faults.report(FaultB(), "shared", handled = false, fault = "fault-u1")
             fixture.flush()
-            val facts = fixture.facts()
+            val facts = fixture.businessFacts()
             val count = facts.single { it.channel == "critical" }
             assertEquals("error.uncaught", count.name)
             assertEquals(setOf("metrics"), count.purposes)
@@ -126,7 +126,7 @@ class FaultTest {
             val faults = Faults(fixture.recorder, fixture.clock)
             faults.report(FaultA(), "frontend", true, "fault-1")
             fixture.flush()
-            val facts = fixture.facts()
+            val facts = fixture.businessFacts()
             assertEquals(0, facts.count { it.channel == "critical" }, "metrics closed: no count fact")
             assertEquals(1, facts.count { it.channel == "diagnostic" }, "logs open: detail still recorded")
         }
@@ -139,7 +139,7 @@ class FaultTest {
             assertFailsWith<CancellationException> { faults.report(CancellationException("client cancelled prompt"), "frontend", true) }
             assertEquals(0L, fixture.recorder.health().accepted)
             fixture.flush()
-            assertEquals(0, fixture.facts().size)
+            assertEquals(0, fixture.businessFacts().size)
         }
     }
 
@@ -151,8 +151,8 @@ class FaultTest {
             assertFailsWith<ThreadDeath> { faults.report(ThreadDeath(), "frontend", true) }
             assertEquals(2L, fixture.recorder.health().accepted)
             fixture.flush()
-            assertEquals(2, fixture.facts().size)
-            assertTrue(fixture.facts().all { it.name == "error.uncaught" && it.channel == "critical" })
+            assertEquals(2, fixture.businessFacts().size)
+            assertTrue(fixture.businessFacts().all { it.name == "error.uncaught" && it.channel == "critical" })
         }
     }
 
@@ -163,7 +163,7 @@ class FaultTest {
             faults.report(NoClassDefFoundError("missing"), "shared", handled = false, fault = "fault-l1")
             faults.report(ClassCastException("cast"), "shared", handled = true, fault = "fault-l2")
             fixture.flush()
-            val facts = fixture.facts()
+            val facts = fixture.businessFacts()
             val uncaught = facts.single { it.name == "error.uncaught" && it.channel == "critical" }
             assertEquals("no_class_def_found", uncaught.data["error_class"]?.jsonPrimitive?.content)
             val reported = facts.single { it.name == "error.reported" && it.channel == "critical" }
@@ -177,7 +177,7 @@ class FaultTest {
             val faults = Faults(fixture.recorder, fixture.clock)
             faults.report(FaultA(), "frontend", true, "fault-1")
             fixture.flush()
-            val detail = fixture.facts().single { it.channel == "diagnostic" }
+            val detail = fixture.businessFacts().single { it.channel == "diagnostic" }
             val frames = detail.data["frames"]
             assertTrue(frames is JsonArray && frames.size <= 5)
             frames?.let { array ->
@@ -199,13 +199,13 @@ class FaultTest {
             faults.report(FaultA(), "frontend", true, "fault-a")
             repeat(5) { index -> faults.report(FaultB(), "frontend", true, "fault-b$index") }
             fixture.flush()
-            assertEquals(6, fixture.facts().count { it.channel == "critical" })
-            assertEquals(1, fixture.facts().count { it.channel == "diagnostic" }, "overflow fingerprints get no detail")
+            assertEquals(6, fixture.businessFacts().count { it.channel == "critical" })
+            assertEquals(1, fixture.businessFacts().count { it.channel == "diagnostic" }, "overflow fingerprints get no detail")
 
             fixture.advanceClock(WINDOW_STEP_MS)
             faults.report(FaultA(), "frontend", true, "fault-a")
             fixture.flush()
-            val facts = fixture.facts()
+            val facts = fixture.businessFacts()
             assertEquals(6, facts.count { it.channel == "critical" })
             val overflow = facts.filter { it.data["count"]?.jsonPrimitive?.longOrNull == 5L }
             assertEquals(1, overflow.size)
@@ -224,7 +224,7 @@ class FaultTest {
             // 下一窗口的任意新报告惰性冲刷上一窗口摘要；handled报告不得把摘要改名。
             faults.report(FaultA(), "shared", handled = true, fault = "fault-h1")
             fixture.flush()
-            val facts = fixture.facts()
+            val facts = fixture.businessFacts()
             val summary = facts.single { it.data["count"]?.jsonPrimitive?.long == 7L }
             assertEquals("error.uncaught", summary.name, "summary follows the fingerprint's own name (F4)")
             val handledDetail = facts.single {
@@ -243,8 +243,8 @@ class FaultTest {
                 val faults = Faults(fixture.recorder, fixture.clock)
                 repeat(4) { faults.report(FaultA(), "other", true) }
                 fixture.flush()
-                assertEquals(4, fixture.facts().count { it.channel == "critical" })
-                assertEquals(limit, fixture.facts().count { it.channel == "diagnostic" })
+                assertEquals(4, fixture.businessFacts().count { it.channel == "critical" })
+                assertEquals(limit, fixture.businessFacts().count { it.channel == "diagnostic" })
             }
         }
     }
@@ -259,15 +259,15 @@ class FaultTest {
             fixture.policies.refresh()
             repeat(4) { faults.report(FaultA(), "other", true) }
             fixture.flush()
-            assertEquals(5, fixture.facts().count { it.channel == "critical" })
-            assertEquals(1, fixture.facts().count { it.channel == "diagnostic" })
+            assertEquals(5, fixture.businessFacts().count { it.channel == "critical" })
+            assertEquals(1, fixture.businessFacts().count { it.channel == "diagnostic" })
             fixture.base.resolve("control.json").writeText(controlJson(true, true, 0))
             fixture.policies.refresh()
             fixture.advanceClock(WINDOW_STEP_MS)
             faults.report(FaultA(), "other", true)
             fixture.flush()
-            assertEquals(6, fixture.facts().count { it.channel == "critical" })
-            assertEquals(1, fixture.facts().count { it.channel == "diagnostic" }, "zero also forbids summaries")
+            assertEquals(6, fixture.businessFacts().count { it.channel == "critical" })
+            assertEquals(1, fixture.businessFacts().count { it.channel == "diagnostic" }, "zero also forbids summaries")
         }
     }
 
@@ -277,7 +277,7 @@ class FaultTest {
             val faults = Faults(fixture.recorder, fixture.clock)
             faults.report(FaultA(), "other", true)
             fixture.flush()
-            val detail = fixture.facts().single { it.channel == "diagnostic" }
+            val detail = fixture.businessFacts().single { it.channel == "diagnostic" }
             fixture.base.resolve("control.json").writeText(controlJson(false, true, categories = listOf("critical")))
             fixture.policies.refresh()
             faults.report(FaultB(), "other", true)
@@ -288,8 +288,8 @@ class FaultTest {
                 ProtocolTransport.SSE, ProtocolStage.DECODE, ProtocolCode.DECODE_FAILED,
             ))
             fixture.flush()
-            assertEquals(1, fixture.facts().count { it.channel == "diagnostic" })
-            assertEquals(setOf("logs"), fixture.facts().last().purposes)
+            assertEquals(1, fixture.businessFacts().count { it.channel == "diagnostic" })
+            assertEquals(setOf("logs"), fixture.businessFacts().last().purposes)
         }
     }
 
@@ -305,8 +305,8 @@ class FaultTest {
                 fixture.policies.refresh()
                 fixture.writer.start()
                 fixture.flush()
-                assertEquals(1, fixture.facts().size)
-                assertEquals("critical", fixture.facts().single().channel)
+                assertEquals(1, fixture.businessFacts().size)
+                assertEquals("critical", fixture.businessFacts().single().channel)
             }
         }
     }

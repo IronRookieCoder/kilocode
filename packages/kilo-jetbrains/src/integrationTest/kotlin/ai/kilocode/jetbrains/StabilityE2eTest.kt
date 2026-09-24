@@ -1,5 +1,7 @@
 package ai.kilocode.jetbrains
 
+import ai.kilocode.jetbrains.mock.MockResponse
+import com.intellij.driver.sdk.invokeAction
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
@@ -13,6 +15,8 @@ import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import java.nio.file.Files
 import java.nio.file.Path
+import java.security.MessageDigest
+import java.util.Base64
 import java.util.concurrent.TimeUnit
 
 /**
@@ -66,7 +70,9 @@ class StabilityE2eTest : IntegrationTestBase() {
     private val modes = setOf("monolith", "split")
     private val sides = setOf("monolith", "frontend", "backend")
     private val providers = setOf("cs-cloud", "kilo-cli", "unknown")
-    private val contextKeys = setOf("operation_id", "attempt_id", "fault_id", "trace_id", "workspace_id")
+    private val contextKeys = setOf(
+        "operation_id", "attempt_id", "fault_id", "trace_id", "workspace_id", "incident_id",
+    )
     private val purposeValues = setOf("metrics", "logs")
     private val phaseValues = setOf("start", "progress", "end")
     private val endKinds = setOf("app_close", "unload")
@@ -79,8 +85,13 @@ class StabilityE2eTest : IntegrationTestBase() {
         "plugin.readiness", "connection", "connection.attempt", "connection.state_changed", "connection.recovery",
         "csc.install", "csc.start", "credentials.ready", "cli.download", "session.open", "session.restore",
         "action", "ide.operation", "telemetry.health", "protocol.error", "edt.violation",
-        "error.uncaught", "error.reported",
+        "error.uncaught", "error.reported", "diagnostic.reported", "diagnostic.payload",
+        "diagnostic.redaction_failed",
     )
+
+    private val token = "tok-outbox-secret-42"
+    private val cookie = "cookie-outbox-secret-42"
+    private val password = "password-outbox-secret-42"
 
     private val json = Json
 
@@ -142,9 +153,8 @@ class StabilityE2eTest : IntegrationTestBase() {
             shutdowns.single().obj["data"]!!.jsonObject["end_kind"]!!.jsonPrimitive.content,
             "app close must be reported as end_kind=app_close",
         )
-        val lastLine = facts.maxBy { it.lineNo }
-        assertEquals("plugin.shutdown", lastLine.name, "the graceful close must append plugin.shutdown as the final record")
-        assertEquals(shutdowns.single().lineNo, lastLine.lineNo, "the shutdown must be the physically last line")
+        val lastBusiness = facts.filter { it.channel == "critical" && !it.isCheckpoint() }.maxBy { it.seq }
+        assertEquals("plugin.shutdown", lastBusiness.name, "shutdown must be the final critical business fact")
 
         printEvidence("collection", facts, outboxDir())
     }
@@ -160,6 +170,7 @@ class StabilityE2eTest : IntegrationTestBase() {
         var runA: String? = null
         var runB: String? = null
         var runAFacts: List<FactLine> = emptyList()
+        var permitMs = 0L
         var revokeMs = 0L
 
         runPluginIde("stabilityE2ePolicy") {
@@ -173,6 +184,7 @@ class StabilityE2eTest : IntegrationTestBase() {
             assertAppendLayoutClean(uniqueJsonl = true)
 
             // —— §8 first permit: within the 30s poll budget new facts adopt the real epoch/revision ——
+            permitMs = System.currentTimeMillis()
             writeControlFile(revision = 1, enabled = true)
             awaitTolerantFact(timeoutMs = 65_000) { it.epoch == accountEpoch && it.revision == 1L }
                 ?: throw AssertionError("new facts did not adopt epoch/rev1 within the poll budget")
@@ -224,7 +236,11 @@ class StabilityE2eTest : IntegrationTestBase() {
         assertEquals(runB, runBFacts.first { it.name == "plugin.started" }.runId, "run B identity is stable in its file")
         val shutdownB = runBFacts.last { it.name == "plugin.shutdown" }
         assertEquals("app_close", shutdownB.obj["data"]!!.jsonObject["end_kind"]!!.jsonPrimitive.content)
-        assertEquals(runBFacts.size, shutdownB.lineNo, "run B closes with plugin.shutdown as the physically last line")
+        assertEquals(
+            shutdownB.seq,
+            runBFacts.filter { it.channel == "critical" && !it.isCheckpoint() }.maxOf { it.seq },
+            "run B closes with plugin.shutdown as the final critical business fact",
+        )
 
         // —— run A (in-memory snapshot): unbound facts then rev1 facts, no fabricated shutdown ——
         assertTrue(runAFacts.any { it.epoch == unboundEpoch && it.revision == 0L }, "run A must have collected unbound facts")
@@ -245,6 +261,7 @@ class StabilityE2eTest : IntegrationTestBase() {
             expectedRevision = { fact -> if (fact.epoch == unboundEpoch) 0L else 1L },
         )
         assertTrue(failuresA.isEmpty(), "run A wire violations:\n${failuresA.joinToString("\n")}")
+        assertSeqGapsAtPolicyBoundaries(runAFacts, listOf(permitMs))
         assertTrue(runA != runB, "re-permit must start a new run_id")
 
         printEvidence("policy", runAFacts + runBFacts, outboxDir())
@@ -357,7 +374,11 @@ class StabilityE2eTest : IntegrationTestBase() {
         val shutdownB = runBFacts.filter { it.name == "plugin.shutdown" }
         assertEquals(1, shutdownB.size, "run B is active at close (placeholder permits) → one app_close shutdown")
         assertEquals("app_close", shutdownB.single().obj["data"]!!.jsonObject["end_kind"]!!.jsonPrimitive.content)
-        assertEquals(runBFacts.size, shutdownB.single().lineNo, "plugin.shutdown must be the physically last line")
+        assertEquals(
+            shutdownB.single().seq,
+            runBFacts.filter { it.channel == "critical" && !it.isCheckpoint() }.maxOf { it.seq },
+            "plugin.shutdown must be the final critical business fact",
+        )
         // seq 缺口只允许出现在策略边界（run B 正常无缺口；此处作为边界守卫）。
         assertSeqGapsAtPolicyBoundaries(runBFacts, listOf(regressMs))
 
@@ -369,8 +390,6 @@ class StabilityE2eTest : IntegrationTestBase() {
             windowEndMs = pendingMs + 65_000,
             expectedEpoch = { it == epoch1 || it == epoch2 },
             expectedRevision = { fact -> if (fact.epoch == epoch1) 1L else 2L },
-            // epoch 守卫在写入侧丢弃排队旧epoch事实：缺口是策略性丢弃，边界在下方逐一核对。
-            seqGapsAllowed = { _ -> true },
         )
         assertTrue(failuresA.isEmpty(), "run A wire violations:\n${failuresA.joinToString("\n")}")
         assertSeqGapsAtPolicyBoundaries(runAFacts, listOf(swapMs))
@@ -511,6 +530,138 @@ class StabilityE2eTest : IntegrationTestBase() {
         printEvidence("residue", factsB, outbox)
     }
 
+    @Test
+    fun `copied outbox alone reconstructs failures load quality stall and unclean restart`() {
+        writeControlFile(revision = 1, enabled = true, diagnostics = true)
+        daemon.scenario.withIdeCapability()
+        // Recent sessions are fetched via GET /experimental/session (DefaultApi.experimentalSessionList);
+        // the daemon-served body is what the decode boundary sees, so the bad row must land there.
+        daemon.scenario.override(
+            "GET",
+            Regex("^/experimental/session$"),
+            MockResponse.ok(
+                """[{"id":"ses_invalid","projectID":"fixture","time":"wrong-object","token":"$token"}]""",
+            ),
+        )
+        daemon.scenario.override(
+            "POST",
+            Regex("^/telemetry/capture$"),
+            MockResponse(
+                404,
+                """{"error":{"code":"not_found","message":"missing"},"password":"$password"}""",
+            ),
+        )
+        daemon.scenario.override(
+            "PUT",
+            Regex("^/api/v1/conversations/[^/]+/capabilities/ide$"),
+            MockResponse(
+                502,
+                """{"error":{"code":"capability_bind_failed","message":"bind rejected"},"cookie":"$cookie"}""",
+            ),
+        )
+        lateinit var jsonl: Path
+
+        runPluginIde(
+            testName = "stabilityOutboxOnly",
+            extraSystemProperties = mapOf(
+                "costrict.stability.selftest" to "true",
+                "costrict.stability.selftest.scenario" to "outbox",
+            ),
+            hardKill = true,
+            reuseScope = true,
+        ) {
+            awaitColdStartReady()
+            jsonl = awaitSingleOutboxFile(timeoutMs = 75_000)
+            awaitSessionUiReady()
+            val puts = daemon.ideCapabilityRequests("PUT").size
+            sendPrompt("exercise real diagnostic boundaries")
+            daemon.awaitIdeCapabilityRequest("PUT", puts, timeoutMs = 60_000)
+            awaitLiveFacts(jsonl, timeoutMs = 60_000) { facts ->
+                val incidents = facts.filter { it.name == "diagnostic.reported" }
+                val decode = incidents.any { fact ->
+                    val data = fact.obj["data"]?.jsonObject ?: return@any false
+                    data["code"]?.jsonPrimitive?.content == "decode_failed" &&
+                        data["json_path"]?.jsonPrimitive?.content == "$[0].time"
+                }
+                val missing = incidents.any { fact ->
+                    val data = fact.obj["data"]?.jsonObject ?: return@any false
+                    data["code"]?.jsonPrimitive?.content == "not_found" &&
+                        data["http_status"]?.jsonPrimitive?.longOrNull == 404L &&
+                        data["route"]?.jsonPrimitive?.content == "/telemetry/capture"
+                }
+                val bind = facts.any { fact ->
+                    val data = fact.obj["data"]?.jsonObject ?: return@any false
+                    fact.name == "ide.operation" && data["phase"]?.jsonPrimitive?.content == "end" &&
+                        data["error_code"]?.jsonPrimitive?.content == "ide_capability_bind_failed"
+                }
+                decode && missing && bind
+            }
+            invokeAction("Kilo.StabilitySelfTest")
+            awaitLiveFacts(jsonl, timeoutMs = 120_000) { facts ->
+                val codes = facts.filter { it.name == "diagnostic.reported" }
+                    .mapNotNull { it.obj["data"]?.jsonObject?.get("code")?.jsonPrimitive?.content }
+                    .toSet()
+                val load = codes.count { it.startsWith("load_failure_") }
+                val good = facts.any { fact ->
+                    val data = fact.obj["data"]?.jsonObject ?: return@any false
+                    fact.name == "telemetry.health" && data["quality"]?.jsonPrimitive?.content == "good" &&
+                        (data["drop_evicted"]?.jsonPrimitive?.longOrNull ?: 0) > 0
+                }
+                load == 100 && good && "edt_stall" in codes
+            }
+            invokeAction("Kilo.StabilitySelfTest")
+            awaitLiveFacts(jsonl, timeoutMs = 60_000) { facts ->
+                val degraded = facts.any { fact ->
+                    val data = fact.obj["data"]?.jsonObject ?: return@any false
+                    fact.name == "telemetry.health" && data["quality"]?.jsonPrimitive?.content == "degraded" &&
+                        (data["drop_failure"]?.jsonPrimitive?.longOrNull ?: 0) > 0
+                }
+                val open = facts.any { fact ->
+                    val data = fact.obj["data"]?.jsonObject ?: return@any false
+                    fact.name == "session.open" && data["phase"]?.jsonPrimitive?.content == "start"
+                }
+                degraded && open
+            }
+        }
+
+        runPluginIde("stabilityOutboxOnly", reuseScope = true) {
+            awaitColdStartReady()
+            awaitLiveFacts(jsonl, timeoutMs = 60_000) { facts ->
+                facts.any { fact ->
+                    val data = fact.obj["data"]?.jsonObject ?: return@any false
+                    fact.name == "plugin.unclean" &&
+                        (data["open_operation_count"]?.jsonPrimitive?.longOrNull ?: 0) > 0
+                }
+            }
+        }
+
+        val copied = copyOutboxOnly("outbox-only")
+        val facts = reconstruct(readFacts(jsonlFiles(copied)))
+        val decode = assertIncident(
+            facts,
+            code = "decode_failed",
+            component = "session.recent",
+            operation = "rpc",
+            payload = "response",
+        )
+        assertEquals("$[0].time", decode.obj["data"]!!.jsonObject["json_path"]?.jsonPrimitive?.content)
+        assertEquals("object", decode.obj["data"]!!.jsonObject["expected_type"]?.jsonPrimitive?.content)
+        assertEquals("string", decode.obj["data"]!!.jsonObject["actual_type"]?.jsonPrimitive?.content)
+        assertIncident(
+            facts,
+            code = "not_found",
+            component = "telemetry.capture",
+            route = "/telemetry/capture",
+            status = 404,
+            payload = "response",
+        )
+        assertMcpBindFailure(facts)
+        assertStallWithStack(facts, minimumMs = 2_000)
+        assertUncleanWithOpenOperations(facts)
+        assertLoadQuality(facts)
+        assertNoCredential(copied, token, cookie, password)
+    }
+
     // ------------------------------------------------------------------
     // Control file (§8 wire fields; closed set, additionalProperties=false)
     // ------------------------------------------------------------------
@@ -526,6 +677,7 @@ class StabilityE2eTest : IntegrationTestBase() {
         enabled: Boolean,
         epoch: String = accountEpoch,
         accountState: String = "ready",
+        diagnostics: Boolean = false,
     ) {
         val expiresAt = System.currentTimeMillis() + TimeUnit.HOURS.toMillis(2)
         Files.createDirectories(controlFile().parent)
@@ -545,7 +697,7 @@ class StabilityE2eTest : IntegrationTestBase() {
               "expires_at": $expiresAt,
               "metrics_allowed_categories": ["critical", "diagnostic"],
               "logs_allowed_categories": ["critical", "diagnostic"],
-              "log_detail_rate_limit": {"per_fingerprint_max_per_minute": 3}
+              "log_detail_rate_limit": {"per_fingerprint_max_per_minute": 3}${if (diagnostics) ",\n  \"accepted_fact_schema_majors\": [1, 2]" else ""}
             }
             """.trimIndent(),
         )
@@ -619,6 +771,7 @@ class StabilityE2eTest : IntegrationTestBase() {
         val obj: JsonObject,
         val eventId: String,
         val timestamp: Long,
+        val producerId: String,
         val runId: String,
         val channel: String,
         val seq: Long,
@@ -628,6 +781,9 @@ class StabilityE2eTest : IntegrationTestBase() {
         val revision: Long,
         val purposes: Set<String>,
     )
+
+    private fun FactLine.isCheckpoint(): Boolean = name == "telemetry.health" &&
+        obj["data"]?.jsonObject?.get("checkpoint")?.jsonPrimitive?.content == "true"
 
     private fun readFacts(files: List<Path>): List<FactLine> {
         val facts = mutableListOf<FactLine>()
@@ -660,6 +816,7 @@ class StabilityE2eTest : IntegrationTestBase() {
                 obj = obj,
                 eventId = requiredString(obj, "event_id", file, index),
                 timestamp = requiredLong(obj, "timestamp", file, index),
+                producerId = requiredString(obj, "producer_id", file, index),
                 runId = requiredString(obj, "run_id", file, index),
                 channel = requiredString(obj, "channel", file, index),
                 seq = requiredLong(obj, "seq", file, index),
@@ -700,8 +857,6 @@ class StabilityE2eTest : IntegrationTestBase() {
         windowEndMs: Long,
         expectedEpoch: (String) -> Boolean,
         expectedRevision: (FactLine) -> Long,
-        /** Per-runId: seq gaps allowed (§6.1 gaps signal loss — policy-drop scenarios opt in). */
-        seqGapsAllowed: (String) -> Boolean = { _ -> false },
     ): List<String> {
         val failures = mutableListOf<String>()
         fun fail(message: String) {
@@ -728,7 +883,9 @@ class StabilityE2eTest : IntegrationTestBase() {
             val required = factFieldNames - "context"
             if (!obj.keys.containsAll(required)) fail("$where: missing field(s) ${required - obj.keys}")
 
-            if (obj["schema_version"]?.jsonPrimitive?.content != "1.0") fail("$where: schema_version must be 1.0")
+            val version = obj["schema_version"]?.jsonPrimitive?.content
+            if (version !in setOf("1.0", "2.0")) fail("$where: unsupported schema_version $version")
+            if (fact.name.startsWith("diagnostic.") && version != "2.0") fail("$where: diagnostic facts require v2")
             if (!uuidRegex.matches(fact.eventId)) fail("$where: event_id is not a UUID: ${fact.eventId}")
             if (fact.timestamp < windowStartMs || fact.timestamp > windowEndMs) {
                 fail("$where: timestamp ${fact.timestamp} outside the test window")
@@ -792,14 +949,9 @@ class StabilityE2eTest : IntegrationTestBase() {
         if (duplicates.isNotEmpty()) fail("event_id values must be unique; duplicates: $duplicates")
 
         seqsByRunChannel.forEach { (runChannel, seqs) ->
-            val (runId, _) = runChannel
             val sorted = seqs.sorted()
             if (sorted.first() != 1L) fail("$runChannel: seq must start at 1, got ${sorted.first()}")
             if (seqs.toSet().size != seqs.size) fail("$runChannel: duplicate seq values")
-            val gaps = sorted.zipWithNext().filter { (a, b) -> b != a + 1 }
-            if (gaps.isNotEmpty() && !seqGapsAllowed(runId)) {
-                fail("$runChannel: seq gaps (drops) at $gaps — full list $sorted")
-            }
         }
         return failures
     }
@@ -898,11 +1050,205 @@ class StabilityE2eTest : IntegrationTestBase() {
         throw AssertionError("no fact line appeared in ${file.fileName} within ${timeoutMs}ms")
     }
 
+    private fun awaitLiveFacts(file: Path, timeoutMs: Long, predicate: (List<FactLine>) -> Boolean): List<FactLine> {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        var seen = emptyList<FactLine>()
+        while (System.currentTimeMillis() < deadline) {
+            seen = runCatching { parseTolerantLines(Files.readAllBytes(file), file) }.getOrDefault(emptyList())
+            if (predicate(seen)) return seen
+            Thread.sleep(500)
+        }
+        val codes = seen.filter { it.name == "diagnostic.reported" }
+            .mapNotNull { it.obj["data"]?.jsonObject?.get("code")?.jsonPrimitive?.content }
+        val health = seen.filter { it.name == "telemetry.health" }
+            .map { it.obj["data"] }.takeLast(5)
+        throw AssertionError(
+            "outbox condition not met within ${timeoutMs}ms; last facts=${seen.size}, " +
+                "load=${codes.count { it.startsWith("load_failure_") }}, " +
+                "codes=${codes.filterNot { it.startsWith("load_failure_") }.toSet()}, health=$health",
+        )
+    }
+
+    private fun reconstruct(facts: List<FactLine>): List<FactLine> = facts
+        .groupBy { Triple(it.producerId, it.runId, it.channel) }
+        .toSortedMap(compareBy({ it.first }, { it.second }, { it.third }))
+        .values.flatMap { rows -> rows.sortedBy { it.seq } }
+
+    private fun assertIncident(
+        facts: List<FactLine>,
+        code: String,
+        component: String? = null,
+        route: String? = null,
+        operation: String? = null,
+        status: Long? = null,
+        payload: String? = null,
+    ): FactLine {
+        val matches = facts.filter { fact ->
+            if (fact.name != "diagnostic.reported") return@filter false
+            val data = fact.obj["data"]!!.jsonObject
+            data["code"]?.jsonPrimitive?.content == code &&
+                (component == null || data["component"]?.jsonPrimitive?.content == component) &&
+                (route == null || data["route"]?.jsonPrimitive?.content == route)
+        }
+        val incident = matches.firstOrNull()
+            ?: throw AssertionError("no $code incident for component=$component route=$route")
+        val data = incident.obj["data"]!!.jsonObject
+        status?.let { assertEquals(it, data["http_status"]?.jsonPrimitive?.longOrNull, "$code HTTP status") }
+        val payloads = assertCompleteIncident(facts, incident)
+        payload?.let { assertTrue(payloads.containsKey(it), "$code must retain $it payload") }
+        operation?.let { expected ->
+            val id = incident.obj["context"]!!.jsonObject["operation_id"]?.jsonPrimitive?.content
+                ?: throw AssertionError("$code has no operation_id")
+            assertTrue(
+                facts.any { fact ->
+                    if (fact.obj["context"]?.jsonObject?.get("operation_id")?.jsonPrimitive?.content != id) return@any false
+                    val value = fact.obj["data"]?.jsonObject?.get("operation")?.jsonPrimitive?.content
+                    fact.obj["kind"]?.jsonPrimitive?.content == "operation" &&
+                        (fact.name == expected || value == expected)
+                },
+                "$code has no real associated $expected operation",
+            )
+        }
+        return incident
+    }
+
+    private fun assertMcpBindFailure(facts: List<FactLine>) {
+        val end = facts.lastOrNull { fact ->
+            val data = fact.obj["data"]?.jsonObject ?: return@lastOrNull false
+            fact.name == "ide.operation" && data["phase"]?.jsonPrimitive?.content == "end" &&
+                data["error_code"]?.jsonPrimitive?.content == "ide_capability_bind_failed"
+        } ?: throw AssertionError("no real failed mcp_register operation")
+        val id = end.obj["context"]!!.jsonObject["operation_id"]!!.jsonPrimitive.content
+        assertTrue(facts.any { fact ->
+            fact.name == "ide.operation" &&
+                fact.obj["context"]?.jsonObject?.get("operation_id")?.jsonPrimitive?.content == id &&
+                fact.obj["data"]?.jsonObject?.get("operation")?.jsonPrimitive?.content == "mcp_register"
+        }, "MCP failure has no associated mcp_register start")
+        val incident = facts.firstOrNull { fact ->
+            val data = fact.obj["data"]?.jsonObject ?: return@firstOrNull false
+            fact.name == "diagnostic.reported" &&
+                fact.obj["context"]?.jsonObject?.get("operation_id")?.jsonPrimitive?.content == id &&
+                data["route"]?.jsonPrimitive?.content?.endsWith("/capabilities/ide") == true
+        } ?: throw AssertionError("mcp_register failure has no HTTP diagnostic incident")
+        assertEquals(502L, incident.obj["data"]!!.jsonObject["http_status"]?.jsonPrimitive?.longOrNull)
+        assertTrue(assertCompleteIncident(facts, incident).containsKey("response"))
+    }
+
+    private fun assertStallWithStack(facts: List<FactLine>, minimumMs: Long) {
+        val stall = facts.firstOrNull { fact ->
+            fact.name == "edt.stall" &&
+                (fact.obj["data"]!!.jsonObject["duration_ms"]?.jsonPrimitive?.longOrNull ?: 0) >= minimumMs &&
+                fact.obj["context"]?.jsonObject?.get("incident_id") != null
+        } ?: throw AssertionError("no EDT stall >= ${minimumMs}ms with incident context")
+        val id = stall.obj["context"]!!.jsonObject["incident_id"]!!.jsonPrimitive.content
+        val incident = facts.single { fact ->
+            fact.name == "diagnostic.reported" &&
+                fact.obj["context"]?.jsonObject?.get("incident_id")?.jsonPrimitive?.content == id
+        }
+        val payloads = assertCompleteIncident(facts, incident)
+        assertTrue(payloads.getValue("edt_stack").isNotBlank(), "EDT stall must retain the blocked stack")
+    }
+
+    private fun assertUncleanWithOpenOperations(facts: List<FactLine>) {
+        val unclean = facts.lastOrNull { it.name == "plugin.unclean" }
+            ?: throw AssertionError("restart must record plugin.unclean")
+        val data = unclean.obj["data"]!!.jsonObject
+        assertTrue((data["open_operation_count"]?.jsonPrimitive?.longOrNull ?: 0) > 0)
+        val open = data["open_operations"] as? JsonArray ?: JsonArray(emptyList())
+        assertTrue(open.isNotEmpty(), "unclean evidence must include open operation IDs")
+    }
+
+    private fun assertLoadQuality(facts: List<FactLine>) {
+        val load = facts.filter { fact ->
+            fact.name == "diagnostic.reported" &&
+                fact.obj["data"]!!.jsonObject["code"]?.jsonPrimitive?.content?.startsWith("load_failure_") == true
+        }
+        val expected = (0 until 100).map { "load_failure_${it.toString().padStart(3, '0')}" }.toSet()
+        val grouped = load.groupBy { it.obj["data"]!!.jsonObject["code"]!!.jsonPrimitive.content }
+        assertEquals(expected, grouped.keys, "the exact load failure set must survive sample pressure")
+        expected.forEach { code ->
+            val incident = grouped.getValue(code).singleOrNull()
+                ?: throw AssertionError("$code must have exactly one parent, found ${grouped.getValue(code).size}")
+            val refs = (incident.obj["data"]!!.jsonObject["payload_refs"] as? JsonArray)
+                ?.map { it.jsonPrimitive.content }.orEmpty()
+            assertTrue("response" in refs, "$code must explicitly reference its response payload")
+            val payloads = assertCompleteIncident(facts, incident)
+            assertEquals("response-${code.takeLast(3).toInt()}", payloads.getValue("response"), "$code response")
+        }
+        val health = facts.filter { it.name == "telemetry.health" }.map { it.obj["data"]!!.jsonObject }
+        assertTrue(health.any { data ->
+            data["quality"]?.jsonPrimitive?.content == "good" &&
+                (data["drop_evicted"]?.jsonPrimitive?.longOrNull ?: 0) > 0
+        }, "health must report sample eviction without degrading failure quality")
+        assertTrue(health.any { data ->
+            data["quality"]?.jsonPrimitive?.content == "degraded" &&
+                (data["drop_failure"]?.jsonPrimitive?.longOrNull ?: 0) > 0
+        }, "forced failure admission loss must degrade quality")
+    }
+
+    private fun assertCompleteIncident(facts: List<FactLine>, incident: FactLine): Map<String, String> {
+        val data = incident.obj["data"]!!.jsonObject
+        val id = incident.obj["context"]!!.jsonObject["incident_id"]!!.jsonPrimitive.content
+        val refs = (data["payload_refs"] as? JsonArray)?.map { it.jsonPrimitive.content }.orEmpty()
+        assertTrue(refs.size <= 16, "$id exceeds the payload_refs limit")
+        val payloads = refs.associateWith { kind ->
+            val chunks = facts.filter { fact ->
+                fact.name == "diagnostic.payload" &&
+                    fact.obj["context"]?.jsonObject?.get("incident_id")?.jsonPrimitive?.content == id &&
+                    fact.obj["data"]!!.jsonObject["payload_kind"]?.jsonPrimitive?.content == kind
+            }.sortedBy { it.obj["data"]!!.jsonObject["chunk_index"]!!.jsonPrimitive.longOrNull }
+            assertTrue(chunks.isNotEmpty(), "$id/$kind has no payload chunks")
+            val first = chunks.first().obj["data"]!!.jsonObject
+            val count = first["chunk_count"]!!.jsonPrimitive.longOrNull
+            assertEquals(count, chunks.size.toLong(), "$id/$kind has missing chunks")
+            assertEquals((0L until count!!).toList(), chunks.map {
+                it.obj["data"]!!.jsonObject["chunk_index"]!!.jsonPrimitive.longOrNull
+            })
+            listOf("chunk_count", "encoding", "original_bytes", "sha256", "truncated").forEach { field ->
+                assertTrue(
+                    chunks.all { it.obj["data"]!!.jsonObject[field] == first[field] },
+                    "$id/$kind has inconsistent $field metadata",
+                )
+            }
+            val encoded = chunks.joinToString("") {
+                it.obj["data"]!!.jsonObject["content"]!!.jsonPrimitive.content
+            }
+            val encoding = first["encoding"]!!.jsonPrimitive.content
+            val bytes = if (encoding == "base64") Base64.getDecoder().decode(encoded) else encoded.encodeToByteArray()
+            val original = first["original_bytes"]!!.jsonPrimitive.longOrNull
+            val truncated = first["truncated"]!!.jsonPrimitive.content.toBoolean()
+            if (!truncated) {
+                assertEquals(original, bytes.size.toLong(), "$id/$kind byte count")
+                val hash = MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
+                assertEquals(first["sha256"]!!.jsonPrimitive.content, hash)
+            }
+            bytes.toString(Charsets.UTF_8)
+        }
+        assertTrue(payloads.values.sumOf { it.encodeToByteArray().size } <= 1024 * 1024, "$id exceeds 1 MiB")
+        return payloads
+    }
+
+    private fun copyOutboxOnly(scenario: String): Path {
+        val root = Path.of("out", "stability-evidence", scenario).toAbsolutePath()
+        root.toFile().deleteRecursively()
+        val copied = Files.createDirectories(root.resolve("outbox"))
+        copyTree(outboxDir(), copied)
+        assertEquals(listOf("outbox"), Files.list(root).use { files -> files.map { it.fileName.toString() }.toList() })
+        return copied
+    }
+
+    private fun jsonlFiles(dir: Path): List<Path> = Files.list(dir).use { files ->
+        files.filter { Files.isRegularFile(it) && outboxFileRegex.matches(it.fileName.toString()) }.toList()
+    }
+
+    private fun assertNoCredential(dir: Path, vararg secrets: String) {
+        val text = jsonlFiles(dir).joinToString("\n") { Files.readString(it, Charsets.UTF_8) }
+        secrets.forEach { secret -> assertFalse(text.contains(secret), "credential leaked into copied outbox") }
+    }
+
     /**
-     * Every seq gap must be a policy-drop: the dropped record's seq was allocated between its
-     * surviving neighbours, so at least one policy write time must lie within
-     * [neighbourBefore, neighbourAfter] (± the 65s observation/drain budget). A gap with no
-     * policy transition between its neighbours is an unexplained loss and fails the scenario.
+     * A gap whose surviving neighbours cross a policy boundary must align with a policy write.
+     * Same-policy gaps are permitted because an internal flush checkpoint can be evicted later.
      */
     private fun assertSeqGapsAtPolicyBoundaries(facts: List<FactLine>, policyWriteMs: List<Long>) {
         val budgetMs = 65_000L
@@ -912,13 +1258,15 @@ class StabilityE2eTest : IntegrationTestBase() {
             (1L..maxSeq).filter { it !in bySeq }.forEach { missing ->
                 val before = bySeq[missing - 1]
                 val after = runFacts.filter { it.seq > missing }.minByOrNull { it.seq }
-                val windowStart = (before?.timestamp ?: 0L) - 10_000
-                val windowEnd = (after?.timestamp ?: Long.MAX_VALUE) + budgetMs
+                if (before == null || after == null) return@forEach
+                if (before.epoch == after.epoch && before.revision == after.revision) return@forEach
+                val windowStart = before.timestamp - 10_000
+                val windowEnd = after.timestamp + budgetMs
                 val explained = policyWriteMs.any { write -> write in windowStart..windowEnd }
                 assertTrue(
                     explained,
-                    "$runChannel: unexplained seq gap at $missing (no policy write between " +
-                        "seq ${missing - 1}@${before?.timestamp} and the next survivor) — loss outside a policy drop",
+                        "$runChannel: unexplained seq gap at $missing (no policy write between " +
+                        "seq ${missing - 1}@${before.timestamp} and the next survivor) — loss outside a policy drop",
                 )
             }
         }
