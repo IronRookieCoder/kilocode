@@ -166,6 +166,57 @@ class KiloSessionRpcApiImplTest {
     }
 
     @Test
+    fun `delete releases the IDE capability before removing the conversation`() = runBlocking(Dispatchers.Default) {
+        val log = TestLog()
+        val calls = mutableListOf<String>()
+        val caps = object : KiloSessionCapabilities {
+            override suspend fun ensure(id: String, directory: String) = CapabilityResult.Unavailable("test")
+            override suspend fun release(id: String, reason: CapabilityReleaseReason) {
+                calls += "reason=$reason deletesSeen=${mock.requestCount("/session/ses_deleted")}"
+            }
+            override suspend fun releaseAll(reason: CapabilityReleaseReason) = Unit
+        }
+        val app = KiloBackendAppService.create(scope, FakeCliServer(mock), log, CapabilityProvider(FakeCliServer(mock), caps))
+        apps.add(app)
+        ready(app)
+        val api = KiloSessionRpcApiImpl(appOverride = app, log = log)
+
+        api.delete("ses_deleted", "/test")
+
+        assertEquals(1, mock.requestCount("/session/ses_deleted"))
+        assertEquals(listOf("reason=DELETE deletesSeen=0"), calls)
+    }
+
+    /** Exposes a recording [KiloSessionCapabilities] through a real [KiloConnectionService] delegate. */
+    private class CapabilityProvider(
+        private val server: ai.kilocode.backend.cli.CliServer,
+        private val caps: KiloSessionCapabilities,
+    ) : ai.kilocode.backend.app.KiloConnectionProvider {
+        override val id = "capability-test"
+
+        override fun create(
+            cs: CoroutineScope,
+            reconnect: () -> Unit,
+            log: ai.kilocode.log.KiloLog,
+            timeout: Long,
+        ): ai.kilocode.backend.app.KiloConnection = object : ai.kilocode.backend.app.KiloConnection {
+            private val delegate = ai.kilocode.backend.app.KiloConnectionService(cs, server, reconnect, log, timeout)
+            override val state get() = delegate.state
+            override val events get() = delegate.events
+            override val api get() = delegate.api
+            override val apiClient get() = delegate.apiClient
+            override val target get() = delegate.target
+            override val capabilities get() = caps
+            override suspend fun connect() = delegate.connect()
+            override suspend fun restart() = delegate.restart()
+            override suspend fun reinstall() = delegate.reinstall()
+            override fun shutdownForUnload() = delegate.dispose()
+            override fun shutdownForAppClose() = delegate.dispose()
+            override fun dispose() = delegate.dispose()
+        }
+    }
+
+    @Test
     fun `diffSides rebuilds full before by reverse-applying the patch to the working tree`() = runBlocking(Dispatchers.Default) {
         val dir = createTempDirectory("kilo-diff")
         try {

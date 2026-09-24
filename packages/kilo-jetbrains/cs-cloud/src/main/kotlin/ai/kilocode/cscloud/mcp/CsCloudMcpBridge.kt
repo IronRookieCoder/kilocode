@@ -20,6 +20,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -70,7 +71,7 @@ class CsCloudMcpBridge(
         val source = factory ?: return@withLock CapabilityResult.Unavailable("mcp_plugin_unavailable")
         val tools = source.enabled(COSTRICT_IDE_TOOLS)
         if (tools.isEmpty()) {
-            releaseLocked(id)
+            releaseLocked(id, CapabilityReleaseReason.TOOLS_DISABLED)
             return@withLock CapabilityResult.Unavailable("tools_disabled")
         }
         // The epoch is the connection generation, not the endpoint URL: a daemon restart on the
@@ -105,10 +106,21 @@ class CsCloudMcpBridge(
         CapabilityResult.Ready(generation, tools)
     }
 
-    override suspend fun release(id: String, reason: CapabilityReleaseReason) = locks.getOrPut(id) { Mutex() }.withLock { releaseLocked(id) }
+    override suspend fun release(id: String, reason: CapabilityReleaseReason) =
+        locks.getOrPut(id) { Mutex() }.withLock { releaseLocked(id, reason) }
+
     override suspend fun releaseAll(reason: CapabilityReleaseReason) { leases.keys.toList().forEach { release(it, reason) } }
 
-    private suspend fun releaseLocked(id: String) { leases.remove(id)?.let { lease -> lease.job.cancel(); clear(id, lease.generation, lease.workspace) } }
+    private suspend fun releaseLocked(id: String, reason: CapabilityReleaseReason) {
+        val lease = leases.remove(id)
+        if (lease == null) {
+            log.info("IDE capability release skipped conversation=${hash(id)} reason=$reason lease=none")
+            return
+        }
+        lease.job.cancel()
+        val cleared = clear(id, lease.generation, lease.workspace)
+        log.info("IDE capability released conversation=${hash(id)} generation=${hash(lease.generation)} reason=$reason cleared=$cleared")
+    }
 
     private suspend fun bind(id: String, workspace: String, generation: String, transport: IdeMcpTransport, tools: Set<String>): String? = withContext(Dispatchers.IO) {
         val base = endpoint()?.base ?: return@withContext "ide_capability_bind_failed"
@@ -144,13 +156,18 @@ class CsCloudMcpBridge(
         }.getOrDefault(false)
     }
 
-    private suspend fun clear(id: String, generation: String, workspace: String) = withContext(Dispatchers.IO) {
-        val base = endpoint()?.base ?: return@withContext
-        val http = client() ?: return@withContext
+    /** Clears the generation on the daemon; returns whether the daemon reported it cleared. */
+    private suspend fun clear(id: String, generation: String, workspace: String): Boolean = withContext(Dispatchers.IO) {
+        val base = endpoint()?.base ?: return@withContext false
+        val http = client() ?: return@withContext false
         val url = base.toHttpUrl().newBuilder().addPathSegments("api/v1/conversations").addPathSegment(id)
             .addPathSegments("capabilities/ide").addQueryParameter("generation", generation).build()
-        runCatching { http.newCall(Request.Builder().url(url).header("X-Workspace-Directory", workspace).delete().build()).execute().close() }
-            .onFailure { log.warn("IDE MCP release failed conversation=${hash(id)} generation=${hash(generation)}", it) }
+        runCatching {
+            http.newCall(Request.Builder().url(url).header("X-Workspace-Directory", workspace).delete().build()).execute().use { response ->
+                val body = response.body?.string().orEmpty()
+                response.isSuccessful && Json.parseToJsonElement(body).jsonObject["cleared"]?.jsonPrimitive?.contentOrNull == "true"
+            }
+        }.onFailure { log.warn("IDE MCP release failed conversation=${hash(id)} generation=${hash(generation)}", it) }.getOrDefault(false)
     }
 
     private fun code(error: Throwable) = error.message?.takeIf { it.matches(Regex("[a-z_]+")) } ?: "mcp_listener_failed"
