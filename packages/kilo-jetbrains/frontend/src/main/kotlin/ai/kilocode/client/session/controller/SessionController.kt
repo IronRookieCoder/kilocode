@@ -2056,7 +2056,7 @@ class SessionController(
                 status(event.status)
             }
 
-            is ChatEventDto.SessionUpdated -> model.setSession(event.session)
+            is ChatEventDto.SessionUpdated -> model.setSession(merged(model.session, event.session))
 
             is ChatEventDto.SessionIdle -> {
                 idle()
@@ -2128,7 +2128,7 @@ class SessionController(
             is ChatEventDto.QuestionReplied -> replied(event)
             is ChatEventDto.QuestionRejected -> rejected(event)
             is ChatEventDto.SessionStatusChanged -> status(event.status)
-            is ChatEventDto.SessionUpdated -> model.setSession(event.session)
+            is ChatEventDto.SessionUpdated -> model.setSession(merged(model.session, event.session))
             is ChatEventDto.SessionIdle -> idle()
             is ChatEventDto.SessionResult -> result(event, false)
             is ChatEventDto.SessionQueueChanged -> model.setQueued(event.queued.toSet())
@@ -2569,6 +2569,29 @@ class SessionController(
         if (pathKey(item.dir) != pathKey(session.directory)) return
         followup = null
         open(SessionRef.Local(session))
+    }
+
+    /**
+     * Completes a partial [SessionDto] from a `session.updated` event against the model's current
+     * session. A complete payload (id + directory + created time, e.g. the kilo CLI full session
+     * snapshot) replaces as-is, so explicit nulls like a cleared revert still apply. Daemon flat
+     * frames only carry the changed fields; blank/zero/null entries mean "not provided", so the
+     * current value is kept instead of wiping populated state.
+     */
+    private fun merged(current: SessionDto?, update: SessionDto): SessionDto {
+        val full = update.id.isNotBlank() && update.directory.isNotBlank() && update.time.created > 0.0
+        if (current == null || full) return update
+        return SessionDto(
+            id = update.id.ifBlank { current.id },
+            projectID = update.projectID.ifBlank { current.projectID },
+            directory = update.directory.ifBlank { current.directory },
+            parentID = update.parentID ?: current.parentID,
+            title = update.title.ifBlank { current.title },
+            version = update.version.ifBlank { current.version },
+            time = if (update.time.created <= 0.0 && update.time.updated <= 0.0) current.time else update.time,
+            summary = update.summary ?: current.summary,
+            revert = update.revert ?: current.revert,
+        )
     }
 
     private fun syncHistoryAgent(items: List<MessageWithPartsDto>) {

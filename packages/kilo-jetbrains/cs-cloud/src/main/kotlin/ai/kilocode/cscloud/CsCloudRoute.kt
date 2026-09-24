@@ -80,7 +80,8 @@ object CsCloudRoute {
             path == "/api/v1/agents/session-modes" -> agents(text)
             path == "/api/v1/agents/commands" -> commands(text)
             path == "/api/v1/conversations" -> conversations(text, list = response.request.method == "GET")
-            isConversationDetail(path) -> conversations(text, list = false)
+            response.request.method == "DELETE" && isConversationDetail(path) -> deleted(text)
+            response.request.method != "DELETE" && isConversationDetail(path) -> conversations(text, list = false)
             else -> text
         }
         response.newBuilder().body(data.toResponseBody(body.contentType())).build()
@@ -145,10 +146,18 @@ object CsCloudRoute {
         return conversation(value).toString()
     }
 
+    /** csc answers `{"deleted":true}`; the generated client decodes a bare boolean. */
+    private fun deleted(raw: String): String {
+        val value = (Json.parseToJsonElement(raw) as? JsonObject)?.get("deleted") ?: return raw
+        return value.toString()
+    }
+
     private fun isConversationDetail(path: String): Boolean {
         val prefix = "/api/v1/conversations/"
         val id = path.removePrefix(prefix)
-        return path.startsWith(prefix) && id.isNotEmpty() && !id.contains('/')
+        // "status" is the session-status map route, not a conversation id: normalizing it as a
+        // detail would inject projectID/title/version/time keys that break Map<String, SessionStatus>.
+        return path.startsWith(prefix) && id.isNotEmpty() && !id.contains('/') && id != "status"
     }
 
     private fun apiPath(raw: String): String {

@@ -355,12 +355,63 @@ class CsCloudMcpBridgeTest {
         }
     }
 
+    // ------ release：撤销必须可审计 —— DELETE 携带 generation，日志记录 daemon 清理结果 ------
+
+    @Test
+    fun `release sends generation delete and logs the daemon outcome`() {
+        val server = MockWebServer()
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse = when {
+                request.path == "/global/health" -> MockResponse().setBody("""{"capabilities":["conversation_ide_capability_v1"]}""")
+                request.method == "PUT" -> MockResponse().setResponseCode(200).setBody("{}")
+                request.method == "DELETE" -> MockResponse().setBody("""{"generation":"g","cleared":true}""")
+                else -> MockResponse().setResponseCode(404)
+            }
+        }
+        server.start()
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val workspace = Files.createTempDirectory("cs-cloud-release").toString()
+        val log = TestLog()
+        val bridge = CsCloudMcpBridge(
+            scope,
+            endpoint = { CsCloudEndpoint(server.url("/").toString().trimEnd('/'), null) },
+            client = { OkHttpClient() },
+            epoch = { 1 },
+            factory = FakeIdeMcpSessionFactory(),
+            log = log,
+            project = { directory -> directory },
+        )
+        try {
+            val ready = runBlocking { bridge.ensure("conv-1", workspace) }
+            val generation = assertIs<CapabilityResult.Ready>(ready).generation
+            server.drain()
+
+            runBlocking { bridge.release("conv-1", ai.kilocode.backend.app.CapabilityReleaseReason.DELETE) }
+
+            val release = server.drain().single { it.method == "DELETE" }
+            assertEquals("/api/v1/conversations/conv-1/capabilities/ide", release.requestUrl?.encodedPath)
+            assertEquals(generation, release.requestUrl?.queryParameter("generation"))
+            assertTrue(log.infos.any { it.contains("IDE capability released") && it.contains("reason=DELETE") && it.contains("cleared=true") }, log.infos.joinToString("\n"))
+
+            // Releasing again is a logged no-op: the lease is already gone.
+            runBlocking { bridge.release("conv-1", ai.kilocode.backend.app.CapabilityReleaseReason.IDLE) }
+            assertEquals(0, server.drain().count { it.method == "DELETE" })
+            assertTrue(log.infos.any { it.contains("release skipped") && it.contains("lease=none") }, log.infos.joinToString("\n"))
+        } finally {
+            scope.cancel()
+            server.shutdown()
+        }
+    }
+
     private class TestLog : KiloLog {
         var warnings = 0
         var error: Throwable? = null
+        val infos = mutableListOf<String>()
         override val isDebugEnabled = false
         override fun debug(block: () -> String) = Unit
-        override fun info(msg: String) = Unit
+        override fun info(msg: String) {
+            infos += msg
+        }
         override fun warn(msg: String, t: Throwable?) {
             warnings++
             error = t

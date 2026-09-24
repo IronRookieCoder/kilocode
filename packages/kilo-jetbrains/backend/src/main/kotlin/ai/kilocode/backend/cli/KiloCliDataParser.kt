@@ -188,9 +188,10 @@ object KiloCliDataParser {
             }
 
             "session.created" -> {
-                val info = props["info"]?.jsonObject ?: return null
+                // Daemon ingress frames carry the session fields at the top level instead of an info object.
+                val info = props["info"]?.jsonObject ?: props
                 val dto = parseSessionObject(info)
-                val sid = props.str("sessionID") ?: dto.id.takeIf { it.isNotBlank() } ?: return null
+                val sid = props.str("sessionID") ?: props.str("session_id") ?: dto.id.takeIf { it.isNotBlank() } ?: return null
                 ChatEventDto.SessionCreated(sid, dto)
             }
 
@@ -251,9 +252,11 @@ object KiloCliDataParser {
             }
 
             "session.updated" -> {
-                val info = props["info"]?.jsonObject ?: return null
+                // Flat daemon frames (e.g. csc setTitle/init pushes) also land here; partial
+                // fields are completed against the current session by the frontend consumer.
+                val info = props["info"]?.jsonObject ?: props
                 val dto = parseSessionObject(info)
-                val sid = props.str("sessionID") ?: dto.id.takeIf { it.isNotBlank() } ?: return null
+                val sid = props.str("sessionID") ?: props.str("session_id") ?: dto.id.takeIf { it.isNotBlank() } ?: return null
                 ChatEventDto.SessionUpdated(sid, dto)
             }
 

@@ -22,4 +22,5 @@ enum class CapabilityReleaseReason {
     PROJECT_CLOSED,
     DISCONNECT,
     SHUTDOWN,
+    TOOLS_DISABLED,
 }

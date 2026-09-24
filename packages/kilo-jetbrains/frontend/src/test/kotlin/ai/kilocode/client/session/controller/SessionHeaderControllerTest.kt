@@ -16,6 +16,28 @@ class SessionHeaderControllerTest : SessionControllerTestBase() {
         assertTrue(modelEvents.any { it is ai.kilocode.client.session.model.SessionModelEvent.SessionUpdated })
     }
 
+    fun `test sparse session updated keeps populated metadata`() {
+        val (m, _, _) = prompted()
+        emit(ChatEventDto.MessageUpdated("ses_test", msg("msg1", "ses_test", "assistant")))
+
+        emit(ChatEventDto.SessionUpdated("ses_test", session("ses_test").copy(id = "", directory = "", title = "")))
+
+        assertEquals("ses_test", m.model.session?.id)
+        assertEquals("/test", m.model.session?.directory)
+        assertEquals("Test Session", m.model.session?.title)
+    }
+
+    fun `test partial session updated applies carried fields only`() {
+        val (m, _, _) = prompted()
+        emit(ChatEventDto.MessageUpdated("ses_test", msg("msg1", "ses_test", "assistant")))
+
+        emit(ChatEventDto.SessionUpdated("ses_test", session("ses_test").copy(id = "", directory = "", title = "Live title")))
+
+        assertEquals("ses_test", m.model.session?.id)
+        assertEquals("/test", m.model.session?.directory)
+        assertEquals("Live title", m.model.session?.title)
+    }
+
     fun `test compact calls RPC with selected model when eligible`() {
         val (m, _, _) = prompted()
         emit(ChatEventDto.MessageUpdated("ses_test", msg("msg1", "ses_test", "assistant")))
