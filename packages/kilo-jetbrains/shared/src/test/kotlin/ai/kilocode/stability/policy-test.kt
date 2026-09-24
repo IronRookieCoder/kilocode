@@ -96,7 +96,14 @@ class PolicyTest {
         assertEquals(setOf(1, 2), v2.current().accepted)
 
         val invalid = newStore(writeControl(controlJson(accepted = listOf(2, 2)))) { 2_000L }
-        assertEquals(setOf(1), invalid.current().accepted)
+        assertEquals(setOf(1, 2), invalid.current().accepted)
+    }
+
+    @Test
+    fun `explicit v1-only control keeps suppressing v2 diagnostics`() {
+        val store = newStore(writeControl(controlJson(accepted = listOf(1)))) { 2_000L }
+        assertEquals(setOf(1), store.current().accepted)
+        assertEquals(emptySet(), store.current().permit(2_000L, "diagnostic.reported", "diagnostic", schema = 2))
     }
 
     @Test
@@ -326,8 +333,10 @@ class PolicyTest {
             assertNotNull(policy)
             assertEquals(EPOCH_UNBOUND, policy.epoch)
             assertEquals(0L, policy.revision)
+            assertEquals(setOf(1, 2), policy.accepted)
             assertEquals(setOf("metrics", "logs"), policy.permit(1_000L, "plugin.started"))
             assertEquals(setOf("metrics", "logs"), policy.permit(9_999_999_999L, "edt.delay"))
+            assertEquals(setOf("metrics", "logs"), policy.permit(1_000L, "diagnostic.reported", "diagnostic", schema = 2))
         } finally {
             store.close()
         }

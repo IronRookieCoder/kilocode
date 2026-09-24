@@ -11,7 +11,7 @@
 
 ### 1. 结论与范围
 
-采用“插件采集结构化事实并落盘，cs-cloud消费文件”的交接方式。插件不发起网络传输。交接面收敛为两个文件级约定：插件向`~/.costrict/telemetry/outbox/`追加NDJSON事实，cs-cloud发布`~/.costrict/telemetry/control/jetbrains.json`控制文件；cs-cloud对接只需第5.3节的路径与文件约定及第6、8、9章的行格式、控制格式与事件字典，无需了解插件实现细节。业务推导（操作终态、卡顿区间、健康增量）由插件完成。
+采用“插件采集结构化事实并落盘，cs-cloud消费文件”的交接方式。插件不发起网络传输。交接面收敛为一个文件级约定：插件向`~/.costrict/telemetry/outbox/`追加NDJSON事实；可选的控制文件`~/.costrict/telemetry/control/jetbrains.json`由外部显式放置用于收窄采集（第8章），cs-cloud不写入，无文件为常态。cs-cloud对接只需第5.3节的路径与文件约定及第6、9章的行格式与事件字典，无需了解插件实现细节。业务推导（操作终态、卡顿区间、健康增量）由插件完成。
 
 指标与日志是两种独立用途，共用采集器和文件交接设施，不共用统计口径。
 
@@ -47,7 +47,7 @@
 | 命名与单位 | 统一jetbrains_plugin_*，本地时长使用毫秒 |
 | 逐项源码映射 | 保留接入点和现状差距，明确“已有日志”不等于“口径可靠” |
 | 事件字典 | 吸收生命周期、连接、前置供给动作、UI/会话、异常和采集健康事件，并补关键操作与完整性 |
-| 对接面最小化 | 上行为outbox目录内每IDE安装范围一个追加式.jsonl，下行为单个控制文件；无登记目录、无状态机后缀、无锁、无救援，cs-cloud按“目录、行格式、位移”三个约定即可独立实现 |
+| 对接面最小化 | 上行为outbox目录内每IDE安装范围一个追加式.jsonl；cs-cloud不发布控制文件，插件默认采集，显式控制文件仅作外部可选收窄（第8章）；无登记目录、无状态机后缀、无锁、无救援，cs-cloud按“目录、行格式、位移”三个约定即可独立实现 |
 | 派生前移 | 操作终态、EDT卡顿区间、健康增量均由插件结算，落盘事实即终态；cs-cloud不配对、不推导、不做快照差分 |
 | 插件不绑定下游格式 | 本地只保存结构化事实，不让下游格式变化牵动插件 |
 | 位移即确认 | cs-cloud的持久化消费位移与可靠接收入队原子提交；插件不逐文件确认，位移之前的数据才可能被容量淘汰 |
@@ -68,7 +68,7 @@
 
 #### 3.3 观测盲区
 
-采集初始化前失败、进程强杀前尚未落盘、磁盘故障、已授权用途的策略过期时段及未接入的远程端都会造成覆盖偏差；首次安装、daemon未运行及本机无控制文件时的凭据未就绪时段按无有效策略默认采集，不再是盲区——daemon运行中显式发布pending/disabled仍按第8章停采，属显式限制而非fail-open。崩溃时未flush的追加尾行丢失（critical至多约30秒），读取方跳过残缺尾行，该损失由health计数表达，没有救援补偿。不能把“没有结束记录”当插件崩溃，也不能把“没有错误记录”当无错误。UI线程卡顿是共享IDE现象，除非有证据，不归因插件。
+采集初始化前失败、进程强杀前尚未落盘、磁盘故障、已授权用途的策略过期时段及未接入的远程端都会造成覆盖偏差；首次安装、daemon未运行及本机无控制文件（常态）时的凭据未就绪时段按无有效策略默认采集，不再是盲区——显式放置pending/disabled控制文件仍按第8章停采，属显式限制而非fail-open。崩溃时未flush的追加尾行丢失（critical至多约30秒），读取方跳过残缺尾行，该损失由health计数表达，没有救援补偿。不能把“没有结束记录”当插件崩溃，也不能把“没有错误记录”当无错误。UI线程卡顿是共享IDE现象，除非有证据，不归因插件。
 
 ## 第二部分：共用采集与文件交接协议
 
@@ -110,7 +110,7 @@ cs-cloud的消费组件随daemon启动，在agent初始化之前完成组装，�
 
 位移提交与持久入队必须在同一可恢复事务内完成。文件变短或被写者重写（文件身份变化）时位移归零重读，重复读取由event_id去重吸收，因此读取是幂等的；多个daemon并发读同一文件也是安全的，部署上仍建议单消费者，属资源建议而非协议要求。
 
-控制文件的发布（第8章）与文件消费可以共用同一轮扫描结果，但两件事互不阻塞；身份代际（account_epoch）同样由cs-cloud发布（见8.1）。
+控制文件（第8章）由外部显式放置，cs-cloud不发布；身份代际（account_epoch）随之仅存在于显式控制文件中（见8.1），无文件期间使用占位值unbound。
 
 ### 5. 部署与路径
 
@@ -124,11 +124,11 @@ cs-cloud的消费组件随daemon启动，在agent初始化之前完成组装，�
 
 #### 5.2 路径与文件布局
 
-事实文件与控制文件同根，都位于用户主目录：
+事实文件与可选的控制文件同根，都位于用户主目录：
 
 ```text
 ~/.costrict/telemetry/
-  control/jetbrains.json                    # cs-cloud原子写，插件30秒轮询（第8章）
+  control/jetbrains.json                    # 可选：外部显式放置，插件30秒轮询（第8章）；常态不存在
   outbox/<scope-id>.jsonl                   # 每个IDE安装范围一个，跨启动和插件版本追加
 ```
 
@@ -138,7 +138,7 @@ scope文件通过公开`PathManager.getConfigDir()`定位，仅保存15字节随
 
 当前功能处于调试阶段，不兼容旧的`<scope-id>-<producer-id>.jsonl`布局。启用单文件布局时，插件删除本scope下的旧布局文件而不迁移其中事实；不同scope属于不同IDE安装范围，不得由插件删除。
 
-以上为默认profile约定路径，不覆盖cs-cloud的data-dir/auth-path配置。v1自动接入仅针对双方确认的默认profile；自定义profile在完成显式绑定契约前标记不支持，不能回退使用默认控制文件或读取另一个profile的凭据。默认profile的控制文件发布者互斥由cs-cloud自行协调（如单例部署或最后写入者语义），不影响插件读取语义；自定义profile扩展需绑定数据目录、控制、账户代际和接收状态，而不只是换一个数据目录。
+以上为默认profile约定路径，不覆盖cs-cloud的data-dir/auth-path配置。v1自动接入仅针对双方确认的默认profile；自定义profile在完成显式绑定契约前标记不支持，不能读取另一个profile的凭据或依赖其控制文件；自定义profile扩展需绑定数据目录、控制、账户代际和接收状态，而不只是换一个数据目录。
 
 记录自身携带全部来源字段（6.1），生产者升级或清理元数据后历史仍可解释。device_id是随机安装标识，重装是否更换取决于IDE持久设置是否保留，不能承诺重装必变。
 
@@ -152,10 +152,10 @@ scope文件通过公开`PathManager.getConfigDir()`定位，仅保存15字节随
 |---|---|---|---|---|
 | 事实文件 | `~/.costrict/telemetry/outbox/<scope-id>.jsonl` | 插件单写者追加→cs-cloud按位移读取 | NDJSON v1：UTF-8无BOM、LF结尾、每行一个JSON对象、一行一write、普通记录≤32KiB；字段闭集与示例 | 6.1、7.1 |
 | 读取与位移 | cs-cloud自有状态存储（不写入outbox目录） | cs-cloud自管 | 每文件持久位移，与可靠接收原子提交；文件变短或身份变化即归零重读，重复由event_id去重吸收 | 7.2 |
-| 采集控制 | `~/.costrict/telemetry/control/jetbrains.json` | cs-cloud原子写→插件后台每30秒轮询 | control v1单JSON对象：开关、分用途有效期、account_epoch、account_state、允许事件类别及日志诊断限频；无有效策略（缺失、空、畸形、未知major）默认不限制，限制仅来自当前有效的显式策略 | 8 |
+| 采集控制（可选） | `~/.costrict/telemetry/control/jetbrains.json` | 外部显式放置→插件后台每30秒轮询（cs-cloud不写入） | control v1单JSON对象：开关、分用途有效期、account_epoch、account_state、允许事件类别、日志诊断限频及accepted_fact_schema_majors；无文件为常态，默认不限制（accepted {1,2}），限制仅来自当前有效的显式策略 | 8 |
 | 机器可读wire契约 | `packages/kilo-jetbrains/shared/src/test/resources/stability/` | 双方共同冻结 | `fact-schema.json`与`control-schema.json`为JSON Schema，已与追加式NDJSON、health增量、`edt.stall`及无有效策略的`unbound`占位语义同步；契约测试覆盖字段、枚举、用途和追加文件形态。cs-cloud仍未实现消费与发送 | 9.1、12 |
 
-唯一根路径为`~/.costrict/telemetry`（默认profile边界、机器局部）：`control/`只存放cs-cloud发布的控制文件，`outbox/`只存放插件追加的事实文件，两个子目录职责不混用——Split Mode下backend机器的cs-cloud读不到frontend机器的outbox（5.1）。事实行内禁止路径与凭据（6.1白名单）；consumer只接受outbox目录下的平铺常规文件并校验解析结果不越界，拒绝符号链接/重解析点（5.2）。
+唯一根路径为`~/.costrict/telemetry`（默认profile边界、机器局部）：`control/`只存放外部显式放置的控制文件（cs-cloud不写入），`outbox/`只存放插件追加的事实文件，两个子目录职责不混用——Split Mode下backend机器的cs-cloud读不到frontend机器的outbox（5.1）。事实行内禁止路径与凭据（6.1白名单）；consumer只接受outbox目录下的平铺常规文件并校验解析结果不越界，拒绝符号链接/重解析点（5.2）。
 
 ### 6. 本地事实格式v1
 
@@ -279,9 +279,9 @@ consumer崩溃后从上次已提交位移重放，不因文件名或身份变化
 
 ### 8. 采集开关与账户归属
 
-cs-cloud原子写`~/.costrict/telemetry/control/jetbrains.json`，插件后台每30秒检查策略；账户切换另按8.1同步。控制文件按机器生效：远程frontend机器没有本机cs-cloud时无策略来源，按无有效策略默认不限制，也不因backend机器存在策略而改变本机语义。字段：schema_major、revision、enabled、metrics_enabled、metrics_expires_at、logs_enabled、logs_expires_at、account_epoch、account_state（pending/ready/disabled）、expires_at、各用途允许事件类别及日志诊断限频，无凭据。事件固定policy_revision和purposes，便于策略变更后核对采集时用途，不能仅凭当前开关扩大旧数据用途。
+控制文件`~/.costrict/telemetry/control/jetbrains.json`可由外部显式放置（cs-cloud不写入），插件后台每30秒检查策略；账户切换另按8.1同步。控制文件按机器生效：本机无策略文件时按无有效策略默认不限制。字段：schema_major、revision、enabled、metrics_enabled、metrics_expires_at、logs_enabled、logs_expires_at、account_epoch、account_state（pending/ready/disabled）、expires_at、各用途允许事件类别、日志诊断限频及accepted_fact_schema_majors，无凭据。事件固定policy_revision和purposes，便于策略变更后核对采集时用途，不能仅凭当前开关扩大旧数据用途。
 
-**默认值（fail open）。** 无有效策略——文件不存在、为空、畸形或未知major——时默认不限制采集：插件按全用途采集，purposes标metrics与logs，policy_revision=0，account_epoch使用占位值unbound（见8.1）。限制只能来自当前有效的显式策略；策略过期视为显式授权边界已过，仍按过期停采处理，这也是“用户撤销授权且daemon失联无法更新文件”时的安全上限（单项最长24小时）。
+**默认值（fail open）。** 无有效策略——文件不存在（常态）、为空、畸形或未知major——时默认不限制采集：插件按全用途采集，purposes标metrics与logs，policy_revision=0，account_epoch使用占位值unbound（见8.1），且默认接受fact schema major {1,2}——v2高保真诊断随fail-open默认启用。限制只能来自当前有效的显式策略；策略过期视为显式授权边界已过，仍按过期停采处理，这也是“用户撤销授权且文件无法更新”时的安全上限（单项最长24小时）。
 
 | 状态 | 插件行为 |
 |---|---|
@@ -290,21 +290,21 @@ cs-cloud原子写`~/.costrict/telemetry/control/jetbrains.json`，插件后台�
 | metrics_enabled=false | 停止新增指标用途事实；日志仍按独立许可处理 |
 | 用户撤销授权、总enabled=false或公共expires_at过期 | 停采并清理待交接数据；初始启动读到该状态同样删除已有scope文件，清理失败时保持关闭，成功清理后重新授权从空文件开始 |
 | 某用途过期或显式关闭 | 仅停止该用途采集，另一有效用途继续 |
-| 无有效策略（缺失、空、畸形、未知major） | 默认不限制：全用途采集，purposes全标，epoch用占位值unbound，policy_revision=0 |
+| 无有效策略（缺失、空、畸形、未知major） | 默认不限制：全用途采集，purposes全标，epoch用占位值unbound，policy_revision=0，accepted={1,2}（v2默认启用） |
 
 日志用途关闭时，仍允许的指标事实可继续采集，但不得补充日志诊断详情。不能在重开后把关闭期间指标事实追溯标记为日志用途，或把仅日志用途的数据追溯标记为指标用途。
 
 控制文件分别提供metrics_expires_at与logs_expires_at，独立判断用途是否有效；公共expires_at仅限制账户绑定及总授权。每项用途的有效截止取自身截止与公共截止的较早值，不取另一个用途的截止。单项允许策略最长有效期建议24小时，且不得超过该用途上游授权或配置有效期。
 
-日志策略过期只停止logs用途，仍有效的metrics继续；指标策略过期亦然。有效策略中某用途关闭或过期即停止该用途，不因另一个用途允许而放行。公共策略失效、账户未就绪（显式pending/disabled）或总授权撤销才同时停止两种用途。默认不限制使首次安装、daemon未运行及凭据未就绪时段也有故障覆盖；若产品后续需要更保守的默认（如仅开指标用途），由cs-cloud发布显式策略实现，不由插件内置缩小或扩大。
+日志策略过期只停止logs用途，仍有效的metrics继续；指标策略过期亦然。有效策略中某用途关闭或过期即停止该用途，不因另一个用途允许而放行。公共策略失效、账户未就绪（显式pending/disabled）或总授权撤销才同时停止两种用途。默认不限制使首次安装、daemon未运行及凭据未就绪时段也有故障覆盖；若产品需要更保守的默认（如仅开指标用途），由显式放置控制文件实现，不由插件内置缩小或扩大。
 
 #### 8.1 账户切换边界
 
-account_epoch是daemon给当前已验证账户或租户的随机本机代号，事件采集时固定，与device_id不同。无有效策略期间采集的事实使用固定占位值unbound且policy_revision=0：占位epoch不绑定任何账户代际；ready epoch发布后新事实改用该epoch，占位期数据不重绑。账户或租户切换、登出时永久退役旧epoch，清除尚未写出的旧epoch事实；再次登录同一账户也分配新epoch。仅凭据刷新且已验证身份不变时可保留epoch。
+account_epoch是显式控制文件给当前已验证账户或租户的随机本机代号，事件采集时固定，与device_id不同。无有效策略期间（常态）采集的事实使用固定占位值unbound且policy_revision=0：占位epoch不绑定任何账户代际；ready epoch发布后新事实改用该epoch，占位期数据不重绑。账户或租户切换、登出时永久退役旧epoch，清除尚未写出的旧epoch事实；再次登录同一账户也分配新epoch。仅凭据刷新且已验证身份不变时可保留epoch。
 
 追加文件可能混有其他epoch的行，不按行改写文件。内存排队事实可直接按epoch丢弃；插件的容量重写与清理只由写者进程按7.4执行，不受epoch退役影响。
 
-身份代际必须与daemon实际使用的业务身份同步：在启用新身份前发布pending，新身份及许可确认后发布新的ready epoch。外部认证文件变化也必须经过该边界；若cs-cloud不能提供这项保证，账户归属能力不满足阶段0要求，不能用30秒轮询代替。
+身份代际语义仅由显式控制文件驱动：在启用新身份前发布pending，新身份及许可确认后发布新的ready epoch。外部认证文件变化也必须经过该边界；无文件期间全部使用占位值unbound，不绑定任何账户代际。
 
 插件观察到账户变化先暂停带账户归属的采集，清空尚未写出的旧epoch事实，应用新ready策略后再开启新操作上下文。跨端业务关联事实还须确认当前业务连接或响应属于同一身份代际，无法确认的过渡期事实仅留独立本地诊断。插件轮询尚未更新期间可能误带旧epoch，接收方不得将其改绑到新epoch。
 
@@ -423,7 +423,7 @@ message使用固定模板加安全枚举，禁止直接截取异常首行。原�
 | 接入任务 | 约束 |
 |---|---|
 | 消费组件生命周期 | 在agent初始化之前组装；组件失败不阻塞agent；agent启动失败时，已保存事实可由后续消费恢复 |
-| profile与控制 | 单profile控制文件发布者互斥；自定义profile完成显式绑定前不得读取默认profile的数据 |
+| profile与控制 | 自定义profile完成显式绑定前不得读取默认profile的数据；控制文件仅由外部显式放置 |
 | 插件文件消费 | 扫描outbox目录，按位移续读v1 NDJSON行并校验；路径范围与符号链接检查遵守5.2 |
 | 可靠接收 | 位移提交与事实持久接收在同一可恢复事务内完成；按event_id幂等重读 |
 | 状态与健康 | 报告文件接入、用途开关、积压、拒绝和覆盖状态；“服务在线”不等于文件链路已接入 |
@@ -479,7 +479,7 @@ message使用固定模板加安全枚举，禁止直接截取异常首行。原�
 | Split Mode前端无消费器 | 后端正常，前端覆盖缺口明确，不能宣称完整 |
 | 输入含路径、凭据或异常消息 | 出盘前按白名单过滤，不写入机密 |
 | Windows、Linux、macOS | 验证追加原子性、重写替换、ACL和清理，目录不能越界 |
-| 非默认data-dir/auth-path、多daemon发布策略 | 未绑定profile拒绝自动接入；默认控制文件发布互斥由cs-cloud协调 |
+| 非默认data-dir/auth-path | 未绑定profile拒绝自动接入 |
 
 #### 14.2 指标与日志事实
 

@@ -496,6 +496,27 @@ class QueueTest {
     }
 
     @Test
+    fun `no control file admits v2 diagnostics under the unbound placeholder`() {
+        val dir = Files.createTempDirectory("stability-queue-nofile").also { tempDirs.add(it) }
+        val store = PolicyStore(dir.resolve("jetbrains.json"), { 2_000L }).also { stores.add(it) }
+        val recorder = Recorder(PRODUCER_IDENTITY, store, SYSTEM_CLOCK)
+
+        // 无控制文件为常态：unbound占位策略accepted={1,2}，v2高保真诊断默认放行。
+        assertTrue(recorder.limit("diagnostic.reported", 2) > 0)
+        assertEquals(Admission.QUEUED, recorder.recordBatch(incident("no-file")))
+
+        val claim = assertNotNull(recorder.tryClaim(MAX_ITEMS, MAX_BYTES))
+        val facts = try {
+            claim.records.map { record -> record.fact }
+        } finally {
+            claim.release()
+        }
+        assertTrue(facts.isNotEmpty())
+        assertTrue(facts.all { fact -> fact.schema_version == "2.0" })
+        assertTrue(facts.all { fact -> fact.purposes == setOf("logs") })
+    }
+
+    @Test
     fun `concurrent record and end keep event ids and per channel seq unique`() {
         val fixture = newFixture(OperationTest.controlJson())
         val recorder = fixture.recorder

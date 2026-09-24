@@ -16,7 +16,7 @@
 
 ## 数据模型
 
-新增事件类型、原始内容和分片语义超出了 v1“minor 只能增加可选字段”的兼容边界，因此使用 `schema_version=2.0`。控制契约新增消费者支持的 fact schema major；只有消费者明确接受 major 2 时才启用高保真诊断，发布顺序必须是消费者先于插件。一个 scope 文件可以包含历史 v1 行和新 v2 行，消费者必须逐行按 major 解码。每个故障由一个主记录和零到多个分片组成：
+新增事件类型、原始内容和分片语义超出了 v1“minor 只能增加可选字段”的兼容边界，因此使用 `schema_version=2.0`。无控制契约文件（常态）：插件 fail-open 占位策略默认接受 fact schema major {1,2}，高保真诊断默认启用；显式放置的控制文件仍可按其 `accepted_fact_schema_majors` 声明收窄（如 `[1]` 抑制 v2）。一个 scope 文件可以包含历史 v1 行和新 v2 行，消费者必须逐行按 major 解码。每个故障由一个主记录和零到多个分片组成：
 
 - `diagnostic.reported`：WARN/ERROR 或业务失败的主记录。
 - `error.reported`、`error.uncaught`：异常计数和异常诊断主记录；继续区分 handled。

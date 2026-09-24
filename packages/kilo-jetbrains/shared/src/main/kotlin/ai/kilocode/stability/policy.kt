@@ -103,7 +103,8 @@ internal const val EPOCH_UNBOUND = "unbound"
 
 /**
  * 无有效策略时的占位策略（设计第8章"默认不限制采集"）：epoch=[EPOCH_UNBOUND]、revision=0、
- * 公共与两用途均放行全部登记name、截止为[Long.MAX_VALUE]（[Policy.permit]按名即时放行）。
+ * 公共与两用途均放行全部登记name、截止为[Long.MAX_VALUE]（[Policy.permit]按名即时放行）、
+ * accepted={1,2}——v2高保真诊断随fail-open默认启用。
  *
  * 全进程共享同一不可变实例，不在每次[current]调用时重建；它不表达任何账户授权，只表达
  * "尚无有效控制文件"这一事实——事实落盘后由consumer按epoch/revision归因丢弃或保留。
@@ -117,19 +118,20 @@ private val UNBOUND_POLICY: Policy = Policy(
     expires = Long.MAX_VALUE,
     metrics = Permit(true, Long.MAX_VALUE, REGISTERED_NAMES),
     logs = Permit(true, Long.MAX_VALUE, REGISTERED_NAMES),
-    accepted = setOf(1),
+    accepted = setOf(1, 2),
 )
 
 /**
  * 控制文件读取与原子快照（设计第8章）。
  *
- * cs-cloud原子写`~/.costrict/telemetry/control/jetbrains.json`，本类后台最多每[POLL_INTERVAL_MS]
- * 读取一次并原子替换不可变快照；JSON解析与权限验证不发生在record热路径，record只需
- * [current]快照加[Policy.permit]即时判期，到期不等待下一次轮询，也不依赖文件mtime。
+ * 控制文件`~/.costrict/telemetry/control/jetbrains.json`可由外部手动放置（cs-cloud不写入），
+ * 本类后台最多每[POLL_INTERVAL_MS]读取一次并原子替换不可变快照；JSON解析与权限验证不发
+ * 生在record热路径，record只需[current]快照加[Policy.permit]即时判期，到期不等待下一次
+ * 轮询，也不依赖文件mtime。
  *
  * fail open（设计第8章）：文件缺失、不可读、畸形、未知major或字段越界时[current]返回
- * [UNBOUND_POLICY]占位策略（双用途全放行、revision=0、epoch=`unbound`，默认不限制采集；
- * 构造时同步读取一次，不等下一次轮询）。限制只能来自当前有效的显式策略：显式`enabled=false`
+ * [UNBOUND_POLICY]占位策略（双用途全放行、accepted={1,2}、revision=0、epoch=`unbound`，
+ * 默认不限制采集；构造时同步读取一次，不等下一次轮询）。限制只能来自当前有效的显式策略：显式`enabled=false`
  * 或公共`expires_at`过期即停采，不fall open；用途块缺失或畸形只关闭该用途（设计第8章），
  * 公共字段与log_detail_rate_limit缺失、类型错误、越界则整份文件无效。
  *
