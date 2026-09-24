@@ -2,6 +2,8 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **进度（2026-09-24）**：Task 1–7 全部完成并提交（Task 8 的验收面见各步 checkbox 与实况注记）；Task 8 已提交（`2fbe768ebe`），仅 outbox 集成场景因桌面焦点串扰未在本机跑通——详见 Task 8 Step 3 与 Final verification 的实况记录。Task 1–7 的步骤 checkbox 未逐项勾选，完成证据以分支提交历史为准（`892ecfb6e6`…`24a33b51e9`）。
+
 **Goal:** Make the JetBrains stability outbox contain the complete, correlated, high-fidelity information needed to diagnose plugin failures without consulting separate log files.
 
 **Architecture:** Extend the existing stability protocol with structured diagnostic incidents and bounded payload chunks, mirror WARN/ERROR through a recursion-safe bridge, and add explicit capture at RPC/HTTP/SSE boundaries where raw business context exists. Preserve non-blocking producer behavior while giving failure records a loss-resistant queue and retention priority; expose per-reason loss counters so metric quality is measurable.
@@ -435,7 +437,7 @@ git commit -m "feat(jetbrains): capture stall and unclean evidence"
 - Consumes: all diagnostic, correlation, priority, and special-evidence behavior from Tasks 1–7.
 - Produces: reproducible evidence that a copied outbox alone explains representative plugin failures.
 
-- [ ] **Step 1: Add an outbox-only integration scenario**
+- [x] **Step 1: Add an outbox-only integration scenario**
 
 Run a sandbox IDE against the fake daemon and trigger JSON type mismatch, HTTP 404, MCP bind failure, EDT stall, and an unclean restart. After shutdown, parse only the copied outbox and assert:
 
@@ -450,7 +452,7 @@ assertNoCredential(SECRET_TOKEN, SECRET_COOKIE, SECRET_PASSWORD)
 
 The test must not read `kilo.log` or `idea.log`.
 
-- [ ] **Step 2: Add load and metric-quality acceptance**
+- [x] **Step 2: Add load and metric-quality acceptance**
 
 Generate periodic samples until lower-priority capacity is full, concurrently produce 100 unique failures, then verify every failure incident is complete. Assert health reports sample eviction by reason and `quality=good` when no failure/end is lost. Inject a forced failure admission error and assert `quality=degraded`.
 
@@ -467,7 +469,9 @@ From `packages/kilo-jetbrains/`:
 
 Expected: PASS. If integration infrastructure is unavailable, record the exact failed command and do not claim outbox-only diagnosis is complete.
 
-- [ ] **Step 4: Run repository guards**
+> 2026-09-24 实况：`compileIntegrationTestKotlin`、`StabilityDictionaryE2eTest`、`typecheck` 通过。`StabilityE2eTest` 的 outbox 场景三轮受阻于同桌面并行会话抢占系统焦点（robot 键盘事件未进入沙箱 IDE；沙箱日志确认 decode fixture 修正已生效，`$[0].time` 解码错误已产生），其余 4 个旧场景为强杀 IDE 孤儿进程锁共享 IDE 缓存的连锁失败。焦点干净时段 `McpBridgeLifecycleTest` bind 用例（真实 sendPrompt→PUT→prompt POST 全链）通过。失败命令：`.\gradlew.bat integrationTest --tests "ai.kilocode.jetbrains.StabilityE2eTest"`。
+
+- [x] **Step 4: Run repository guards**
 
 From the repository root:
 
@@ -478,7 +482,7 @@ git diff --check
 
 Expected: both commands exit successfully.
 
-- [ ] **Step 5: Add the user-facing changeset and commit**
+- [x] **Step 5: Add the user-facing changeset and commit**
 
 Create `.changeset/jetbrains-outbox-diagnostics.md`:
 
@@ -497,6 +501,8 @@ git add packages/kilo-jetbrains/src/integrationTest packages/kilo-jetbrains/scri
 git commit -m "test(jetbrains): verify outbox-only diagnostics"
 ```
 
+> 2026-09-24 实况：changeset 已随 Task 5 提交入库；验收面提交为 `2fbe768ebe test(jetbrains): verify outbox-only diagnostics`。
+
 ## Final verification
 
 - [ ] Run the final focused regression set from `packages/kilo-jetbrains/`:
@@ -510,6 +516,10 @@ git commit -m "test(jetbrains): verify outbox-only diagnostics"
 .\gradlew.bat integrationTest --tests "ai.kilocode.jetbrains.StabilityE2eTest" --tests "ai.kilocode.jetbrains.StabilityDictionaryE2eTest"
 ```
 
+> 2026-09-24 实况：`typecheck` 与 `:shared:test`（全量 `ai.kilocode.stability.*`，覆盖上列全部 shared 测试类）通过；`StabilityDictionaryE2eTest` 通过。frontend/backend/cs-cloud 源码本轮未改动（Task 6/7 提交时已各自验证），未重跑。`StabilityE2eTest` 状态见 Task 8 Step 3 记录。
+
 - [ ] Inspect the generated JSONL with the acceptance script and confirm every incident can be reconstructed without reading another log file.
 - [ ] Search the generated outbox for every injected credential and require zero matches.
 - [ ] Confirm the worktree contains no unrelated changes and no `kilocode_change` markers were added under Kilo-owned paths.
+
+> 2026-09-24 实况：前两项依赖 outbox 场景产物，随 Step 3 的环境阻塞未执行；工作区检查通过（本轮提交无 `kilocode_change` 标记，`git diff --check` 干净；工作区仅剩并行会话生成的未跟踪 `docs/jetbrains-plugin-stability-metrics-spec.yaml`，非本工作产物）。
