@@ -7,6 +7,7 @@ import ai.kilocode.backend.app.KiloBackendActivityManager
 import ai.kilocode.backend.app.KiloBackendChatManager
 import ai.kilocode.backend.app.KiloBackendSessionManager
 import ai.kilocode.backend.app.CapabilityReleaseReason
+import ai.kilocode.backend.app.CapabilityResult
 import ai.kilocode.backend.app.KiloSessionCapabilities
 import ai.kilocode.backend.workspace.KiloBackendWorkspaceManager
 import ai.kilocode.log.ChatLogSummary
@@ -38,6 +39,7 @@ import ai.kilocode.log.KiloLog
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -369,7 +371,13 @@ class KiloSessionRpcApiImpl internal constructor(
 
     override suspend fun prompt(id: String, directory: String, prompt: PromptDto) {
         app.requireReady()
-        ensureCapability(app.sessionCapabilities, id, directory, log) // kilocode_change
+        // kilocode_change start
+        // Never block the prompt on the capability bind: while the session's csc child is
+        // still initializing, the daemon blocks the capability PUT ~10s and then fails with
+        // 502, so awaiting ensure() here added that wait to every first prompt. Bind in the
+        // background with bounded retries; the next prompt round re-ensures anyway.
+        app.capabilityScope.launch { ensureCapabilityRetry(app.sessionCapabilities, id, directory, log) }
+        // kilocode_change end
         log.info("prompt RPC: session=$id, dir=$directory, parts=${prompt.parts.size}")
         chat.prompt(id, directory, prompt)
     }
@@ -556,13 +564,34 @@ class KiloSessionRpcApiImpl internal constructor(
 }
 
 // kilocode_change start
-internal suspend fun ensureCapability(capabilities: KiloSessionCapabilities?, id: String, directory: String, log: KiloLog) {
-    try {
-        capabilities?.ensure(id, directory)
-    } catch (error: CancellationException) {
-        throw error
-    } catch (error: Throwable) {
-        log.warn("optional IDE capability failed for session=$id", error)
+private const val CAPABILITY_RETRY_DELAY_MS = 5_000L
+private const val CAPABILITY_RETRY_MAX = 5
+
+/**
+ * Binds the IDE capability in the background with bounded retries. A freshly created
+ * session's csc child initializes for ~25s; during that window the daemon rejects the
+ * capability PUT with 502 after a ~10s block. Retrying here lets the session regain
+ * its IDE tools mid-turn instead of waiting for the next prompt round's ensure.
+ */
+internal suspend fun ensureCapabilityRetry(
+    capabilities: KiloSessionCapabilities?,
+    id: String,
+    directory: String,
+    log: KiloLog,
+    retryDelayMs: Long = CAPABILITY_RETRY_DELAY_MS,
+) {
+    repeat(CAPABILITY_RETRY_MAX) { attempt ->
+        val result = try {
+            capabilities?.ensure(id, directory)
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Throwable) {
+            log.warn("optional IDE capability failed for session=$id attempt=${attempt + 1}", error)
+            null
+        }
+        if (result is CapabilityResult.Ready) return
+        if (attempt < CAPABILITY_RETRY_MAX - 1) delay(retryDelayMs)
     }
+    log.info("IDE capability not established for session=$id after $CAPABILITY_RETRY_MAX attempts")
 }
 // kilocode_change end

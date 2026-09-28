@@ -9,12 +9,12 @@ import org.junit.jupiter.api.Test
 
 /**
  * M 桥（JetBrains IDE MCP capability bridge）生命周期（方案 §3.2 M-1/M-2/M-3/M-8）：
- * prompt 前 `ensureCapability` → `CsCloudMcpBridge.ensure` 的门禁与绑定 → idle 沿撤销 → 凭据不落日志。
+ * prompt 触发后台 `ensureCapabilityRetry` → `CsCloudMcpBridge.ensure` 的门禁与绑定 → idle 沿撤销 → 凭据不落日志。
  *
  * 两个用例 = 两次 IDE 启动（spec §3.1 "class = one IDE session"）：
  *  - 默认 health 不声明 `conversation_ide_capability_v1`（mock 缺省）→ 门禁：无 PUT，prompt 照发（M-1）；
- *  - `scenario.withIdeCapability()` → PUT 先于 prompt、`IdeMcpCapabilitySpec` 形状、busy→idle 沿触发
- *    DELETE 且 generation 一致（M-2/M-3），随后校验 token/generation 不泄漏进 idea.log（M-8）。
+ *  - `scenario.withIdeCapability()` → prompt 不等待绑定、PUT 最终到达、`IdeMcpCapabilitySpec` 形状、
+ *    busy→idle 沿触发 DELETE 且 generation 一致（M-2/M-3），随后校验 token/generation 不泄漏进 idea.log（M-8）。
  *
  * 真实 MCP 往返（csc 连 `/stream` 调工具、旧 token 401 失效）超出 mock 能力，归 T3/人工（M-7/M-9）。
  */
@@ -37,7 +37,7 @@ class McpBridgeLifecycleTest : IntegrationTestBase() {
     }
 
     @Test
-    fun `ide capability binds before prompt and releases on idle`() {
+    fun `ide capability binds in background and releases on idle`() {
         // 绑定场景：health 声明 IDE 能力（必须在 IDE 连接前置好；reset 会在下个用例复原）。
         daemon.scenario.withIdeCapability()
         val result = runPluginIde("costrictMcpBindRelease") {
@@ -48,15 +48,9 @@ class McpBridgeLifecycleTest : IntegrationTestBase() {
             val promptsBefore = promptAsyncPosts().size
             sendPrompt("bind check prompt")
 
-            // —— M-2: PUT（绑定）先于 prompt/async（ensureCapability 在 chat.prompt 之前）——
-            val bind = daemon.awaitIdeCapabilityRequest("PUT", putsBefore, timeoutMs = 60_000)
+            // —— M-2: prompt 不等待绑定（ensureCapability 后台异步），PUT 最终到达 ——
             val prompt = awaitPromptAsync(promptsBefore, timeoutMs = 30_000)
-            val bindIndex = daemon.requests.indexOf(bind)
-            val promptIndex = daemon.requests.indexOf(prompt)
-            assertTrue(
-                bindIndex in 0 until promptIndex,
-                "capability PUT must reach the daemon before the prompt POST: bind@$bindIndex vs prompt@$promptIndex",
-            )
+            val bind = daemon.awaitIdeCapabilityRequest("PUT", putsBefore, timeoutMs = 60_000)
             assertEquals(
                 prompt.header("X-Workspace-Directory"),
                 bind.header("X-Workspace-Directory"),
