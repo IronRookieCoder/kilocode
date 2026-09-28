@@ -24,7 +24,7 @@
 
 主记录包含：
 
-- `incident_id`、`severity`、`component`、`code`、`message`；
+- `incident_id`、`severity`、`component`、`code`、`message`（承载脱敏后的原始消息文本，上限 16 KiB；超长截断并置 `truncated=true`，完整原文溢出为 `payload_kind=message` 分片）；
 - `exception_type`、完整 `cause_chain`、`suppressed_count`；
 - `thread_name`、`thread_id`、`frames`；
 - `method`、`route`、`http_status`、`content_type`、`payload_bytes`；

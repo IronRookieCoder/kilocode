@@ -1176,10 +1176,13 @@ class StabilityE2eTest : IntegrationTestBase() {
             assertEquals("response-${code.takeLast(3).toInt()}", payloads.getValue("response"), "$code response")
         }
         val health = facts.filter { it.name == "telemetry.health" }.map { it.obj["data"]!!.jsonObject }
+        // 修复后incident组不再携带message分片，可整体落入保留配额——sample压力此时
+        // 以容量拒绝而非驱逐体现；两种丢弃形态都证明sample让路而failure全保留。
         assertTrue(health.any { data ->
             data["quality"]?.jsonPrimitive?.content == "good" &&
-                (data["drop_evicted"]?.jsonPrimitive?.longOrNull ?: 0) > 0
-        }, "health must report sample eviction without degrading failure quality")
+                ((data["drop_evicted"]?.jsonPrimitive?.longOrNull ?: 0) > 0 ||
+                    (data["drop_capacity"]?.jsonPrimitive?.longOrNull ?: 0) > 0)
+        }, "health must report sample loss without degrading failure quality")
         assertTrue(health.any { data ->
             data["quality"]?.jsonPrimitive?.content == "degraded" &&
                 (data["drop_failure"]?.jsonPrimitive?.longOrNull ?: 0) > 0
