@@ -129,7 +129,7 @@ internal class CloudHubSettingsUi(
         HubRowLogic.ACTIVE -> KiloBundle.message("settings.agentBehavior.cloudHub.badge.active")
         HubRowLogic.DOWNLOADED -> KiloBundle.message("settings.agentBehavior.cloudHub.badge.downloaded")
         HubRowLogic.CLOUD -> KiloBundle.message("settings.agentBehavior.cloudHub.badge.cloud")
-        HubRowLogic.UNLOADED -> KiloBundle.message("settings.agentBehavior.cloudHub.badge.unloaded")
+        HubRowLogic.UNLOADED, HubRowLogic.DISABLED -> KiloBundle.message("settings.agentBehavior.cloudHub.badge.unloaded")
         else -> status
     }
 
@@ -150,6 +150,9 @@ internal object HubRowLogic {
     const val DOWNLOADED = "Downloaded"
     const val CLOUD = "Cloud"
     const val UNLOADED = "Unloaded"
+
+    /** Daemon-side spelling of [UNLOADED]; see hub model StatusDisabled. */
+    const val DISABLED = "Disabled"
     const val ENABLE_CELL = "enable"
     const val DISABLE_CELL = "disable"
     private val SECTION_ORDER = listOf("skill", "agent", "command", "mcp")
@@ -168,7 +171,7 @@ internal object HubRowLogic {
         ACTIVE -> 0
         DOWNLOADED -> 1
         CLOUD -> 2
-        UNLOADED -> 3
+        UNLOADED, DISABLED -> 3
         else -> 4
     }
 

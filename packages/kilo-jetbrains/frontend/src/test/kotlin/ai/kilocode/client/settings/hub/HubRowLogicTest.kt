@@ -36,6 +36,11 @@ class HubRowLogicTest {
     }
 
     @Test
+    fun `disabled ranks with unloaded`() {
+        assertEquals(HubRowLogic.statusRank("Disabled"), HubRowLogic.statusRank("Unloaded"))
+    }
+
+    @Test
     fun `filters unknown item types`() {
         val ordered = HubRowLogic.ordered(
             listOf(item("ok", "skill", "Active"), item("weird", "prompt", "Active")),
@@ -45,7 +50,7 @@ class HubRowLogicTest {
 
     @Test
     fun `enable cell for every non-active status`() {
-        for (status in listOf("Cloud", "Downloaded", "Unloaded", "")) {
+        for (status in listOf("Cloud", "Downloaded", "Unloaded", "Disabled", "")) {
             assertEquals(HubRowLogic.ENABLE_CELL, HubRowLogic.cellId(status), status)
         }
     }
