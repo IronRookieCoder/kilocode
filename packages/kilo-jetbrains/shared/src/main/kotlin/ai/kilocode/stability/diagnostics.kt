@@ -22,6 +22,9 @@ private const val MAX_INCIDENT_BYTES = 1024 * 1024
 private const val MAX_KEYS = 1024
 private const val MAX_FRAMES = 5
 private const val SCALAR_BYTES = 64
+// 主记录message的上限，与Dictionary为diagnostic族message登记的TEXT字节上限保持一致。
+private const val MAX_MESSAGE_BYTES = 16 * 1024
+private const val EMPTY_MESSAGE = "(no message text)"
 private val IDENTIFIER = Regex("[A-Za-z0-9_.-]{1,128}")
 private val SCALAR = Regex("[A-Za-z0-9_.#$<> -]+")
 
@@ -199,6 +202,11 @@ class Diagnostics(
         if (attributes.isNotEmpty()) {
             content["attributes"] = JsonObject(attributes.mapValues { JsonPrimitive(it.value) }).toString()
         }
+        // 主记录message承载脱敏原文（对齐outbox契约向量2与下游message直映）；超出字典TEXT
+        // 上限时截断并置truncated，完整原文降级为message分片保留重组能力。
+        val text = content.remove("message")!!
+        val clipped = text.encodeToByteArray().size > MAX_MESSAGE_BYTES
+        if (clipped) content["message"] = text
         val bytes = content.filterValues { it.isNotEmpty() }.mapValues { it.value.encodeToByteArray() }
         val total = bytes.values.sumOf { it.size.toLong() }
         var remaining = MAX_INCIDENT_BYTES
@@ -222,7 +230,7 @@ class Diagnostics(
             put("severity", input.severity.name.lowercase())
             put("component", fields.component)
             put("code", scalar(attributes["code"] ?: "other"))
-            put("message", "Diagnostic detail in payloads")
+            put("message", (if (clipped) head(text, MAX_MESSAGE_BYTES) else text).ifEmpty { EMPTY_MESSAGE })
             put("thread_name", scalar(clean(input.thread)))
             put("thread_id", input.threadId)
             input.error?.let { error ->
@@ -232,7 +240,7 @@ class Diagnostics(
             metadata(attributes).forEach { (key, value) -> put(key, value) }
             put("payload_bytes", total)
             put("payload_refs", JsonArray(bytes.keys.map(::JsonPrimitive)))
-            put("truncated", parts.any { it.truncated })
+            put("truncated", clipped || parts.any { it.truncated })
         }
         return listOf(parent("diagnostic.reported", fields.context, data)) + parts.flatMap { it.drafts }
     }
@@ -323,6 +331,21 @@ private fun content(input: DiagnosticInput, redactor: (String) -> Redacted): Lin
         content[kind] = clean(supplier())
     }
     return content
+}
+
+/** 码点安全地保留不超过[maxBytes]个UTF-8字节的消息前缀，不切半个字符。 */
+private fun head(text: String, maxBytes: Int): String = buildString {
+    var size = 0
+    var index = 0
+    while (index < text.length) {
+        val point = text.codePointAt(index)
+        val char = String(Character.toChars(point))
+        val next = char.encodeToByteArray().size
+        if (size + next > maxBytes) break
+        append(char)
+        size += next
+        index += Character.charCount(point)
+    }
 }
 
 private fun metadata(attributes: Map<String, String>): JsonObject = buildJsonObject {

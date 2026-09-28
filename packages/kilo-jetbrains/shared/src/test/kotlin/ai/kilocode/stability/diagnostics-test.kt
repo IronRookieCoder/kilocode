@@ -207,7 +207,10 @@ class DiagnosticsTest {
             fixture.flush()
             assertEquals(1, fixture.businessFacts().count { it.name == "diagnostic.reported" })
             assertEquals(1, fixture.businessFacts().count { it.name == "error.uncaught" })
-            assertEquals("full text", payload(fixture.businessFacts(), "message"))
+            assertEquals(
+                "full text",
+                fixture.businessFacts().single { it.name == "diagnostic.reported" }.data.getValue("message").jsonPrimitive.content,
+            )
         }
     }
 
@@ -253,9 +256,10 @@ class DiagnosticsTest {
             fixture.flush()
             val facts = fixture.businessFacts()
             assertEquals(expected, payload(facts, "stack"))
-            assertEquals(error.message, payload(facts, "message"))
-            assertTrue(facts.all { it.context["incident_id"] == id && it.context["fault_id"] == id })
             val parent = facts.single { it.name == "diagnostic.reported" }
+            assertEquals(error.message, parent.data.getValue("message").jsonPrimitive.content)
+            assertTrue(facts.all { it.context["incident_id"] == id && it.context["fault_id"] == id })
+            assertEquals(listOf("stack"), (parent.data.getValue("payload_refs") as JsonArray).map { it.jsonPrimitive.content })
             assertEquals("op-1", parent.context["operation_id"])
             assertEquals(1L, parent.data["suppressed_count"]?.jsonPrimitive?.long)
             assertFalse(parent.data.getValue("truncated").jsonPrimitive.boolean)
@@ -270,7 +274,7 @@ class DiagnosticsTest {
             Diagnostics(fixture.recorder, fixture.clock).report(DiagnosticInput.error("shared", error = IllegalStateException("token=secret-message"), payloads = values))
             fixture.flush()
             val facts = fixture.businessFacts()
-            assertEquals(7, facts.filter { it.name == "diagnostic.payload" }.map { it.data["payload_kind"] }.distinct().size)
+            assertEquals(6, facts.filter { it.name == "diagnostic.payload" }.map { it.data["payload_kind"] }.distinct().size)
             assertFalse(facts.joinToString().contains("secret-"))
             values.keys.forEach { assertTrue(payload(facts, it).contains("alice")) }
         }
@@ -428,6 +432,63 @@ class DiagnosticsTest {
             Diagnostics(fixture.recorder, fixture.clock).report(input)
             fixture.flush()
             assertTrue(fixture.businessFacts().none { it.schema_version == "2.0" })
+        }
+    }
+
+    @Test
+    fun `parent message carries the redacted original text without a message chunk`() {
+        Fixture().use { fixture ->
+            enable(fixture)
+            Diagnostics(fixture.recorder, fixture.clock).report(DiagnosticInput(
+                DiagnosticSeverity.ERROR,
+                "backend.rpc",
+                message = "Expected object at \$.projectID",
+                attributes = mapOf(
+                    "code" to "json_decode_failed", "json_path" to "\$.projectID",
+                    "expected_type" to "object", "actual_type" to "array",
+                ),
+                payloads = mapOf("response" to { "{\"projectID\": 42}" }),
+                thread = "DefaultDispatcher-worker-1",
+                threadId = 42,
+            ))
+            fixture.flush()
+            val facts = fixture.businessFacts()
+            val parent = facts.single { it.name == "diagnostic.reported" }
+            assertEquals("Expected object at \$.projectID", parent.data.getValue("message").jsonPrimitive.content)
+            // attributes会按既有行为另成一种分片；本修复只约束message不再占用分片。
+            val refs = (parent.data.getValue("payload_refs") as JsonArray).map { it.jsonPrimitive.content }
+            assertEquals(listOf("response", "attributes"), refs)
+            assertEquals("{\"projectID\": 42}", payload(facts, "response"))
+            assertTrue(
+                facts.none { it.name == "diagnostic.payload" && it.data["payload_kind"] == JsonPrimitive("message") },
+                "short messages must live in the parent, not in chunks",
+            )
+        }
+    }
+
+    @Test
+    fun `oversize message is clipped in the parent and overflows into message chunks`() {
+        Fixture().use { fixture ->
+            enable(fixture)
+            val text = "m".repeat(17 * 1024)
+            Diagnostics(fixture.recorder, fixture.clock).report(DiagnosticInput.error("shared", message = text))
+            fixture.flush()
+            val facts = fixture.businessFacts()
+            val parent = facts.single { it.name == "diagnostic.reported" }
+            assertEquals(16 * 1024, parent.data.getValue("message").jsonPrimitive.content.encodeToByteArray().size)
+            assertTrue(parent.data.getValue("truncated").jsonPrimitive.boolean)
+            assertEquals(text, payload(facts, "message"), "the clipped overflow must reassemble the original text")
+        }
+    }
+
+    @Test
+    fun `blank message falls back to non-empty text and still validates`() {
+        Fixture().use { fixture ->
+            enable(fixture)
+            Diagnostics(fixture.recorder, fixture.clock).report(DiagnosticInput.error("shared", message = ""))
+            fixture.flush()
+            val parent = fixture.businessFacts().single { it.name == "diagnostic.reported" }
+            assertEquals("(no message text)", parent.data.getValue("message").jsonPrimitive.content)
         }
     }
 

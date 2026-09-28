@@ -37,7 +37,12 @@ class SelfTestTest {
                         it.data["payload_kind"]?.jsonPrimitive?.content == "response"
                 })
             }
-            assertTrue(good.getValue("drop_evicted").jsonPrimitive.long > 0)
+            // 修复后incident组不再携带message分片，可整体落入保留配额——sample压力此时
+            // 以容量拒绝而非驱逐体现；两种丢弃形态都证明sample让路而failure全保留。
+            assertTrue(
+                good.getValue("drop_evicted").jsonPrimitive.long > 0 ||
+                    good.getValue("drop_capacity").jsonPrimitive.long > 0,
+            )
             assertEquals("good", good.getValue("quality").jsonPrimitive.content)
 
             assertEquals(Admission.DROPPED, emitOutboxDegraded(fixture.recorder))

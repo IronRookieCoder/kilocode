@@ -157,7 +157,7 @@ class HttpCaptureTest {
                     assertFalse(facts.any { it.name == "diagnostic.redaction_failed" })
                     val incident = facts.single { it.name == "diagnostic.reported" }
                     assertEquals("502", incident.data.getValue("http_status").jsonPrimitive.content)
-                    assertEquals("failure evidence", fixture.payload("message"))
+                    assertEquals("failure evidence", incident.data.getValue("message").jsonPrimitive.content)
                     assertEquals("request evidence", fixture.payload("request"))
                     assertTrue(fixture.payload("stack").contains("HttpFailure"))
                     val prefix = fixture.payload("response")
@@ -197,7 +197,7 @@ class HttpCaptureTest {
                     assertFalse(facts.joinToString().contains("opaque-secret"))
                     val incident = facts.single { it.name == "diagnostic.reported" }
                     assertEquals("502", incident.data.getValue("http_status").jsonPrimitive.content)
-                    assertEquals(error.message, fixture.payload("message"))
+                    assertEquals(error.message, incident.data.getValue("message").jsonPrimitive.content)
                     assertEquals("request evidence", fixture.payload("request"))
                     assertTrue(fixture.payload("stack").contains("IOException"))
                     assertEquals("[gzip response unavailable]", fixture.payload("response"))
