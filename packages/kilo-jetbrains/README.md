@@ -93,7 +93,7 @@ First-time setup (outside the IDE):
 1. Install csc: `npm install -g @costrict/csc`
 2. Start the daemon: `csc cloud start` (downloads and starts cs-cloud automatically on first run)
 
-The daemon URL is read from `~/.costrict/cs-cloud/server_url`. The API key is selected in this order: `CS_BRIDGE_API_KEY`, `CS_CLOUD_API_KEY`, then `~/.costrict/cs-cloud/config.json` (`api_key`). Only loopback URLs (`localhost`, `127.0.0.1`, or `::1`) are accepted.
+The daemon URL is read from `~/.costrict/cs-bridge/server_url` (falling back to the legacy `~/.costrict/cs-cloud/server_url` written by daemons older than v1.2.72). The API key is selected in this order: `CS_BRIDGE_API_KEY`, `CS_CLOUD_API_KEY`, then `config.json` (`api_key`) from the same root directory. Only loopback URLs (`localhost`, `127.0.0.1`, or `::1`) are accepted.
 
 While the daemon is unavailable, the plugin keeps polling in the background and connects automatically once `csc cloud start` brings it up — no manual Retry needed. The connection banner shows the install command, and the retry menu offers two actions: "Start cs-cloud" runs `csc cloud start` from the plugin, and "Install csc CLI" opens the npm page. An authentication error means the selected environment variable or `config.json` key is missing or invalid. Restarting the connection re-reads the URL and credentials without managing the daemon process.
 
