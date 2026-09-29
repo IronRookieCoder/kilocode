@@ -11,6 +11,51 @@ import kotlin.test.assertNull
 
 class CsCloudEndpointResolverTest {
     @Test
+    fun `cs-bridge root is preferred over legacy cs-cloud`() = withRoot {
+        writeUrl("http://127.0.0.1:8080", dir = "cs-bridge")
+        writeUrl("http://127.0.0.1:9999")
+        writeConfig("config-key")
+
+        assertEquals(CsCloudEndpoint("http://127.0.0.1:8080", null), resolve().getOrThrow())
+    }
+
+    @Test
+    fun `config key follows the discovered root`() = withRoot {
+        writeUrl("http://127.0.0.1:8080", dir = "cs-bridge")
+        writeConfig("bridge-key", dir = "cs-bridge")
+        writeConfig("legacy-key")
+
+        assertEquals("bridge-key", resolve().getOrThrow().key)
+    }
+
+    @Test
+    fun `legacy cs-cloud root is used when cs-bridge has no server_url`() = withRoot {
+        root.resolve(".costrict/cs-bridge").createDirectories()
+        writeConfig("bridge-key", dir = "cs-bridge")
+        writeUrl("http://127.0.0.1:8080")
+
+        val found = resolve().getOrThrow()
+        assertEquals("http://127.0.0.1:8080", found.base)
+        assertNull(found.key)
+    }
+
+    @Test
+    fun `empty server_url does not fall through to the other root`() = withRoot {
+        writeUrl("http://127.0.0.1:8080")
+        root.resolve(".costrict/cs-bridge").createDirectories()
+        root.resolve(".costrict/cs-bridge/server_url").writeText("  ")
+
+        assertIs<CsCloudDiscoveryError.MissingUrl>(resolve().exceptionOrNull())
+    }
+
+    @Test
+    fun `missing URL returns typed error when only cs-bridge exists`() = withRoot {
+        root.resolve(".costrict/cs-bridge").createDirectories()
+
+        assertIs<CsCloudDiscoveryError.MissingUrl>(resolve().exceptionOrNull())
+    }
+
+    @Test
     fun `bridge key takes precedence over cloud key and config`() = withRoot {
         writeUrl("http://127.0.0.1:8080/")
         writeConfig("config-key")
@@ -68,14 +113,14 @@ class CsCloudEndpointResolverTest {
     private fun resolve(env: Map<String, String> = emptyMap()): Result<CsCloudEndpoint> =
         CsCloudEndpointResolver(root, env).resolve()
 
-    private fun writeUrl(value: String) {
-        root.resolve(".costrict/cs-cloud").createDirectories()
-        root.resolve(".costrict/cs-cloud/server_url").writeText(value)
+    private fun writeUrl(value: String, dir: String = "cs-cloud") {
+        root.resolve(".costrict/$dir").createDirectories()
+        root.resolve(".costrict/$dir/server_url").writeText(value)
     }
 
-    private fun writeConfig(key: String) {
-        root.resolve(".costrict/cs-cloud").createDirectories()
-        root.resolve(".costrict/cs-cloud/config.json").writeText("{\"api_key\":\"$key\"}")
+    private fun writeConfig(key: String, dir: String = "cs-cloud") {
+        root.resolve(".costrict/$dir").createDirectories()
+        root.resolve(".costrict/$dir/config.json").writeText("{\"api_key\":\"$key\"}")
     }
 
     private fun withRoot(block: CsCloudEndpointResolverTest.() -> Unit) {
